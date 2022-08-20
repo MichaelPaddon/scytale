@@ -1,0 +1,7 @@
+[package]
+name = "scytale"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+zeroize = {version = "1.5", features = ["zeroize_derive"]}
