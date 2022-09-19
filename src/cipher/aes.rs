@@ -1,4 +1,8 @@
 pub mod fast;
-pub mod sbox;
+mod sbox;
 #[cfg(test)]
-pub mod vectors;
+mod vectors;
+
+pub use fast::Aes128;
+pub use fast::Aes192;
+pub use fast::Aes256;
