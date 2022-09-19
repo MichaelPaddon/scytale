@@ -17,3 +17,4 @@ pub trait BlockCipher {
 }
 
 pub mod aes;
+pub mod key;

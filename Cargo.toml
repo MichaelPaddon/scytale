@@ -4,4 +4,5 @@ version = "0.0.0"
 edition = "2021"
 
 [dependencies]
-zeroize = {version = "1.5", features = ["zeroize_derive"]}
+rand = "0.8.5"
+zeroize = {version = "1.5.7", features = ["zeroize_derive"]}
