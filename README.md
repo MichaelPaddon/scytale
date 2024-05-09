@@ -16,6 +16,11 @@ The following algorithms are currently available:
 - SHA2-512/224
 - SHA2-512/256
 
+See the [API documentation](https://docs.rs/scytale/latest/scytale/) for more
+information.
+
+Scytale also provides a CLI.
+
 # Licence
 
 Scytale is licensed under the BSD+Patent License
