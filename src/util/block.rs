@@ -111,7 +111,7 @@ where
 ///
 #[derive(Clone, Debug, Default)]
 pub struct BlockBuffer<T, const N: usize> {
-    // a fixed length buffer
+    // a buffer backed by a fixed length array
     buffer: ArrayVec<T, N>
 }
 
@@ -130,6 +130,15 @@ where
     ///
     /// Any remaining values that don't make a up a complete block
     /// are buffered and prepended to the next slice passed in.
+    ///
+    /// Typical usage is:
+    /// '''
+    /// let buffer = BlockBuffer::<u8; 8>::new();
+    /// for block in buffer.blocks("hello world".as_bytes()) {
+    ///     // process block
+    /// }
+    /// assert_eq!(buffer.len(), 3);
+    /// '''
     pub fn blocks<'a: 'b, 'b>(&'a mut self, values: &'b [T])
         -> Blocks<'a, 'b, T, N>
     {
