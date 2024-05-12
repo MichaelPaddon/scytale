@@ -18,6 +18,13 @@ clap = { version = "4.5.4", features = ["derive"] }
 derive_more = "0.99.17"
 hex = "0.4.3"
 num-traits = "0.2.18"
+
+[dev-dependencies]
+criterion = { version = "0.5.1", features = ["html_reports"] }
 serde = "1.0.198"
 serde_json = "1.0.116"
 serde_json_path = "0.6.7"
+
+[[bench]]
+name = "sha2"
+harness = false
