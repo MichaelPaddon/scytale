@@ -7,12 +7,11 @@
 //! [FIPS 180-4](https://csrc.nist.gov/pubs/fips/180-4/upd1/final).
 
 use core::marker::PhantomData;
-use core::mem::{MaybeUninit, size_of, transmute, transmute_copy};
+use core::mem::{size_of, transmute_copy};
 use core::num::Wrapping;
 use core::ops::Add;
 use core::ptr::{read_unaligned, write_unaligned};
 use num_traits::{AsPrimitive, PrimInt};
-use std::io::{Result, Write};
 use crate::hash::Hash;
 use crate::util::block::BlockBuffer;
 
@@ -25,7 +24,7 @@ trait Sha2Initializer<Word> {
 #[derive(Clone, Copy, Debug)]
 struct Sha224Initializer;
 impl Sha2Initializer<u32> for Sha224Initializer {
-    const H: [u32; 8] = [
+    const H: State<u32> = [
         0xc1059ed8, 0x367cd507, 0x3070dd17, 0xf70e5939,
         0xffc00b31, 0x68581511, 0x64f98fa7, 0xbefa4fa4
     ];
@@ -34,7 +33,7 @@ impl Sha2Initializer<u32> for Sha224Initializer {
 #[derive(Clone, Copy, Debug)]
 struct Sha256Initializer;
 impl Sha2Initializer<u32> for Sha256Initializer {
-    const H: [u32; 8] = [
+    const H: State<u32> = [
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
         0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
     ];
@@ -43,7 +42,7 @@ impl Sha2Initializer<u32> for Sha256Initializer {
 #[derive(Clone, Copy, Debug)]
 struct Sha384Initializer;
 impl Sha2Initializer<u64> for Sha384Initializer {
-    const H: [u64; 8] = [
+    const H: State<u64> = [
         0xcbbb9d5dc1059ed8, 0x629a292a367cd507, 0x9159015a3070dd17,
         0x152fecd8f70e5939, 0x67332667ffc00b31, 0x8eb44a8768581511,
         0xdb0c2e0d64f98fa7, 0x47b5481dbefa4fa4
@@ -53,7 +52,7 @@ impl Sha2Initializer<u64> for Sha384Initializer {
 #[derive(Clone, Copy, Debug)]
 struct Sha512Initializer;
 impl Sha2Initializer<u64> for Sha512Initializer {
-    const H: [u64; 8] = [
+    const H: State<u64> = [
         0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b,
         0xa54ff53a5f1d36f1, 0x510e527fade682d1, 0x9b05688c2b3e6c1f,
         0x1f83d9abfb41bd6b, 0x5be0cd19137e2179
@@ -63,7 +62,7 @@ impl Sha2Initializer<u64> for Sha512Initializer {
 #[derive(Clone, Copy, Debug)]
 struct Sha512_224Initializer;
 impl Sha2Initializer<u64> for Sha512_224Initializer {
-    const H: [u64; 8] = [
+    const H: State<u64> = [
         0x8c3d37c819544da2, 0x73e1996689dcd4d6, 0x1dfab7ae32ff9c82,
         0x679dd514582f9fcf, 0x0f6d2b697bd44da8, 0x77e36f7304c48942,
         0x3f9d85a86a1d36c8, 0x1112e6ad91d692a1
@@ -73,7 +72,7 @@ impl Sha2Initializer<u64> for Sha512_224Initializer {
 #[derive(Clone, Copy, Debug)]
 struct Sha512_256Initializer;
 impl Sha2Initializer<u64> for Sha512_256Initializer {
-    const H: [u64; 8] = [
+    const H: State<u64> = [
         0x22312194FC2BF72C, 0x9f555fa3c84c64c2, 0x2393b86b6f53b151,
         0x963877195940eabd, 0x96283ee2a88effe3, 0xbe5e1e2553863992,
         0x2b0199fc2c85b8aa, 0x0eb72ddc81c52ca2
@@ -216,20 +215,22 @@ trait Sha2Core<Word, const BLOCK_SIZE: usize> {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Core<Word, Functions, Constants,
-    const BLOCK_SIZE: usize, const BLOCK_WORDS: usize, const ROUNDS: usize>
+struct Core<
+    Word, Functions, Constants, const BLOCK_SIZE: usize, const ROUNDS: usize
+>
 {
-    h: [Word; 8],
+    h: State<Word>,
     _functions: PhantomData<Functions>,
     _constants: PhantomData<Constants>
 }
 
-impl <Word, Functions, Constants,
-    const BLOCK_SIZE: usize, const BLOCK_WORDS: usize, const ROUNDS: usize>
-Sha2Core<Word, BLOCK_SIZE> for
-Core<Word, Functions, Constants, BLOCK_SIZE, BLOCK_WORDS, ROUNDS>
+impl <
+    Word, Functions, Constants, const BLOCK_SIZE: usize, const ROUNDS: usize
+> Sha2Core<Word, BLOCK_SIZE>
+    for Core<Word, Functions, Constants, BLOCK_SIZE, ROUNDS>
 where 
     Word: PrimInt,
+    State<Word>: Default,
     Wrapping<Word>: Add<Output = Wrapping<Word>>,
     Functions: Sha2Functions<Word>,
     Constants: Sha2Constants<Word, ROUNDS>
@@ -247,34 +248,29 @@ where
     }
 
     #[inline(always)]
-    fn update(&mut self, block: &[u8; BLOCK_SIZE]){
-        let mut w: [MaybeUninit<Word>; ROUNDS] = unsafe {
-            MaybeUninit::uninit().assume_init()
-        };
+    fn update(&mut self, block: &[u8; BLOCK_SIZE]) {
+        let mut w = [Word::zero(); ROUNDS];
 
-        let src = block as *const u8 as *const Word;
-        for t in 0..BLOCK_WORDS {
+        let n = BLOCK_SIZE / size_of::<Word>();
+        let mut src: *const Word = block.as_ptr().cast();
+        for t in 0..n {
             let word = unsafe {
-                read_unaligned(src.offset(t as isize))
+                read_unaligned(src)
             };
-            w[t].write(Word::from_be(word));
+            src = unsafe {
+                src.offset(1)
+            };
+            w[t] = Word::from_be(word);
         }
 
-        for t in BLOCK_WORDS..ROUNDS {
-            let (a, b, c, d) = unsafe {(
-                w[t-2].assume_init_read(),
-                w[t-7].assume_init_read(),
-                w[t-15].assume_init_read(),
-                w[t-16].assume_init_read()
-            )};
-            let word = (Wrapping(Functions::σ1(a)) + Wrapping(b)
-               + Wrapping(Functions::σ0(c)) + Wrapping(d)).0;
-            w[t].write(word);
+        for t in n..ROUNDS {
+            w[t] = (
+                Wrapping(Functions::σ1(w[t-2]))
+                    + Wrapping(w[t-7])
+                    + Wrapping(Functions::σ0(w[t-15]))
+                    + Wrapping(w[t-16])
+            ).0;
         }
-
-        let w_: &[Word; ROUNDS] = unsafe {
-            transmute(&w)
-        };
 
         let mut a = self.h[0];
         let mut b = self.h[1];
@@ -291,7 +287,7 @@ where
                     + Wrapping(Functions::Σ1(e))
                     + Wrapping(Functions::ch(e, f, g))
                     + Wrapping(Constants::K[t])
-                    + Wrapping(w_[t])
+                    + Wrapping(w[t])
             ).0;
             let t2 = (
                 Wrapping(Functions::Σ0(a))
@@ -318,15 +314,11 @@ where
     }
 
     fn finalize(&mut self) -> State<Word> {
-        let mut h: [MaybeUninit<Word>; 8] = unsafe {
-            MaybeUninit::uninit().assume_init()
-        };
-        for i in 0..8 {
-            h[i].write(Word::to_be(self.h[i]));
+        let mut h = State::<Word>::default();
+        for i in 0.. 8 {
+            h[i] = Word::to_be(self.h[i]);
         }
-        unsafe {
-            *h.as_ptr().cast()
-        }
+        h
     }
 }
 
@@ -341,64 +333,16 @@ struct Sha2Variant<Word, Length, Core, Initializer,
     _initializer: PhantomData<Initializer>
 }
 
-impl<Word, Length, Core, Initializer,
-    const BLOCK_SIZE: usize, const DIGEST_SIZE: usize> 
-Sha2Variant<Word, Length, Core, Initializer, BLOCK_SIZE, DIGEST_SIZE> 
+impl<
+    Word, Length, Core, Initializer,
+    const BLOCK_SIZE: usize, const DIGEST_SIZE: usize
+> Sha2Variant<Word, Length, Core, Initializer, BLOCK_SIZE, DIGEST_SIZE> 
 where
     Core: Sha2Core<Word, BLOCK_SIZE>,
     Length: PrimInt + 'static,
     usize: AsPrimitive<Length>,
     Initializer: Sha2Initializer<Word>
 {
-    fn pad(&mut self) {
-        let length = self.length << 3;
-
-        let mut block = [0u8; BLOCK_SIZE];
-        block[0] = 0x80;
-
-        let mut remaining_capacity = self.buffer.remaining_capacity();
-        if remaining_capacity < size_of::<Length>() + 1 {
-            self.update(&block[..remaining_capacity]);
-            block[0] = 0;
-            remaining_capacity = BLOCK_SIZE;
-        }
-
-        let field = &mut block[remaining_capacity - size_of::<Length>()]
-            as *mut u8 as *mut Length;
-        unsafe {
-            write_unaligned(field, length.to_be());
-        }
-        self.update(&block[..remaining_capacity]);
-    }
-}
-
-impl<Word, Length, Core, Initializer,
-    const BLOCK_SIZE: usize, const DIGEST_SIZE: usize> 
-Default for
-Sha2Variant<Word, Length, Core, Initializer, BLOCK_SIZE, DIGEST_SIZE>
-where
-    Core: Sha2Core<Word, BLOCK_SIZE>,
-    Length: PrimInt + 'static,
-    usize: AsPrimitive<Length>,
-    Initializer: Sha2Initializer<Word>
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<Word, Length, Core, Initializer,
-    const BLOCK_SIZE: usize, const DIGEST_SIZE: usize> 
-Hash for
-Sha2Variant<Word, Length, Core, Initializer, BLOCK_SIZE, DIGEST_SIZE> 
-where
-    Core: Sha2Core<Word, BLOCK_SIZE>,
-    Length: PrimInt + 'static,
-    usize: AsPrimitive<Length>,
-    Initializer: Sha2Initializer<Word>
-{
-    type Digest = [u8; DIGEST_SIZE];
-
     fn new() -> Self {
         Self {
             core: Core::new(&Initializer::H),
@@ -420,29 +364,54 @@ where
         }
     }
 
-    fn finalize(mut self) -> Self::Digest {
+    fn pad(&mut self) {
+        let length = self.length << 3;
+
+        let mut block = [0u8; BLOCK_SIZE];
+        let mut offset = self.buffer.len();
+
+        block[offset] = 0x80;
+        if BLOCK_SIZE - offset < size_of::<Length>() + 1 {
+            self.update(&block[offset..]);
+            block[offset] = 0;
+            offset = 0;
+        }
+
+        let field: *mut Length =
+            (&mut block[BLOCK_SIZE - size_of::<Length>()] as *mut u8).cast();
+        unsafe {
+            write_unaligned(field, length.to_be());
+        }
+        self.update(&block[offset..]);
+    }
+
+    fn finalize(&mut self) -> [u8; DIGEST_SIZE] {
         self.pad();
         unsafe {
-            debug_assert!(size_of::<State<Word>>()
-                >= size_of::<Self::Digest>());
+            debug_assert!(size_of::<State<Word>>() >= DIGEST_SIZE);
             transmute_copy(&self.core.finalize())
         }
     }
+}
 
-    fn finalize_and_reset(&mut self) -> Self::Digest {
-        self.pad();
-        let digest = unsafe {
-            debug_assert!(size_of::<State<Word>>()
-                >= size_of::<Self::Digest>());
-            transmute_copy(&self.core.finalize())
-        };
-        self.core.reset(&Initializer::H);
-        digest
+impl<
+    Word, Length, Core, Initializer,
+    const BLOCK_SIZE: usize, const DIGEST_SIZE: usize
+> Default
+    for Sha2Variant<Word, Length, Core, Initializer, BLOCK_SIZE, DIGEST_SIZE>
+where
+    Core: Sha2Core<Word, BLOCK_SIZE>,
+    Length: PrimInt + 'static,
+    usize: AsPrimitive<Length>,
+    Initializer: Sha2Initializer<Word>
+{
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-type Sha256Core = Core<u32, Sha256Functions, Sha256Constants, 64, 16, 64>;
-type Sha512Core = Core<u64, Sha512Functions, Sha512Constants, 128, 16, 80>;
+type Sha256Core = Core<u32, Sha256Functions, Sha256Constants, 64, 64>;
+type Sha512Core = Core<u64, Sha512Functions, Sha512Constants, 128, 80>;
 
 type Sha224Variant =
     Sha2Variant<u32, u64, Sha256Core, Sha224Initializer, 64, 28>;
@@ -460,37 +429,37 @@ type Sha512_256Variant =
 /// SHA-224 hash algorithm.
 #[derive(Clone, Debug, Default)]
 pub struct Sha224(Sha224Variant);
-hash_delegate!{Sha224, 0, [u8; 28]}
-hash_write!{Sha224}
+impl_hash_for_newtype!{Sha224, [u8; 64], [u8; 28]}
+impl_write_for_hash!{Sha224}
 
 /// SHA-256 hash algorithm.
 #[derive(Clone, Debug, Default)]
 pub struct Sha256(Sha256Variant);
-hash_delegate!{Sha256, 0, [u8; 32]}
-hash_write!{Sha256}
+impl_hash_for_newtype!{Sha256, [u8; 64], [u8; 32]}
+impl_write_for_hash!{Sha256}
 
 /// SHA-384 hash algorithm.
 #[derive(Clone, Debug, Default)]
 pub struct Sha384(Sha384Variant);
-hash_delegate!{Sha384, 0, [u8; 48]}
-hash_write!{Sha384}
+impl_hash_for_newtype!{Sha384, [u8; 128], [u8; 48]}
+impl_write_for_hash!{Sha384}
 
 /// SHA-512 hash algorithm.
 #[derive(Clone, Debug, Default)]
 pub struct Sha512(Sha512Variant);
-hash_delegate!{Sha512, 0, [u8; 64]}
-hash_write!{Sha512}
+impl_hash_for_newtype!{Sha512, [u8; 128], [u8; 64]}
+impl_write_for_hash!{Sha512}
 
 /// SHA-512/224 hash algorithm.
 #[derive(Clone, Debug, Default)]
 pub struct Sha512_224(Sha512_224Variant);
-hash_delegate!{Sha512_224, 0, [u8; 28]}
-hash_write!{Sha512_224}
+impl_hash_for_newtype!{Sha512_224, [u8; 128], [u8; 28]}
+impl_write_for_hash!{Sha512_224}
 
 /// SHA-512/256 hash algorithm.
 #[derive(Clone, Debug, Default)]
 pub struct Sha512_256(Sha512_256Variant);
-hash_delegate!{Sha512_256, 0, [u8; 32]}
-hash_write!{Sha512_256}
+impl_hash_for_newtype!{Sha512_256, [u8; 128], [u8; 32]}
+impl_write_for_hash!{Sha512_256}
 
 #[cfg(test)] mod test;

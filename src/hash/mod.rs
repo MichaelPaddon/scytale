@@ -4,6 +4,9 @@ use core::convert::AsRef;
 
 /// A cryptographic hash algorithm.
 pub trait Hash: {
+    /// The block type
+    type Block: AsMut<[u8]>;
+
     /// The digest type.
     type Digest: AsRef<[u8]>;
 
@@ -23,19 +26,20 @@ pub trait Hash: {
     fn finalize_and_reset(&mut self) -> Self::Digest;
 
     /// Convenience function to hash a slice of bytes.
-    fn hash(bytes: &[u8]) -> Self::Digest
+    fn hash(message: &[u8]) -> Self::Digest
     where
         Self: Sized
     {
         let mut hash = Self::new();
-        hash.update(bytes);
+        hash.update(message);
         hash.finalize()
     }
 }
 
-macro_rules! hash_delegate {
-    ($hash: ident, $inner: tt, $digest: ty) => {
+macro_rules! impl_hash_for_newtype {
+    ($hash: ident, $block: ty, $digest: ty) => {
         impl Hash for $hash {
+            type Block = $block;
             type Digest = $digest;
 
             #[inline(always)]
@@ -45,38 +49,40 @@ macro_rules! hash_delegate {
 
             #[inline(always)]
             fn reset(&mut self) {
-                self.$inner.reset()
+                self.0.reset()
             }
 
             #[inline(always)]
-            fn update(&mut self, bytes: &[u8]){
-                self.$inner.update(bytes)
+            fn update(&mut self, data: &[u8]){
+                self.0.update(data)
             }
 
             #[inline(always)]
-            fn finalize(self) -> Self::Digest {
-                self.$inner.finalize()
+            fn finalize(mut self) -> Self::Digest {
+                self.0.finalize()
             }
 
             #[inline(always)]
             fn finalize_and_reset(&mut self) -> Self::Digest {
-                self.$inner.finalize_and_reset()
+                let digest = self.0.finalize();
+                self.0.reset();
+                digest
             }
         }
     }
 }
 
-macro_rules! hash_write {
+macro_rules! impl_write_for_hash {
     ($hash: ident) => {
-        impl Write for $hash {
+        impl std::io::Write for $hash {
             #[inline(always)]
-            fn write(&mut self, bytes: &[u8]) -> Result<usize> {
-                self.update(bytes);
-                Ok(bytes.len())
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.update(buf);
+                Ok(buf.len())
             }
 
             #[inline(always)]
-            fn flush(&mut self) -> Result<()> {
+            fn flush(&mut self) -> std::io::Result<()> {
                 Ok(())
             }
         }

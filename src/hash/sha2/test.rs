@@ -3,7 +3,7 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::error::Error;
 use crate::hash::Hash;
-use crate::hash::sha2::{Sha224, Sha256, Sha384, Sha512, Sha512_224, Sha512_256};
+use crate::hash::sha2::*;
 
 fn deserialize_hex_string<'de, D:Deserializer<'de>>(deserializer: D)
     -> Result<Vec<u8>, D::Error>
