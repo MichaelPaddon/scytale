@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::error::Error;
 use std::fs::File;
-use std::io::{Read, Write, copy, stdin, stdout};
+use std::io::{BufReader, BufWriter, Read, Write, copy, stdin, stdout};
 use std::path::PathBuf;
 use scytale::hash::Hash;
 use scytale::hash::sha2::{
@@ -66,15 +66,19 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn do_hash<H: Hash + Write>(inpath: Option<PathBuf>, outpath: Option<PathBuf>)
     -> Result<(), Box<dyn Error>>
 {
-    let mut input: Box<dyn Read> = match inpath {
-       Some(path) => Box::new(File::open(path)?),
-       None => Box::new(stdin())
-    };
+    let mut input: BufReader<Box<dyn Read>> = BufReader::new(
+        match inpath {
+           Some(path) => Box::new(File::open(path)?),
+           None => Box::new(stdin())
+        }
+    );
 
-    let mut output: Box<dyn Write> = match outpath {
-       Some(path) => Box::new(File::open(path)?),
-       None => Box::new(stdout())
-    };
+    let mut output: BufWriter<Box<dyn Write>> = BufWriter::new(
+       match outpath {
+           Some(path) => Box::new((File::open(path)?)),
+           None => Box::new(stdout())
+       }
+    );
 
     let mut hash = H::new();
     copy(&mut input, &mut hash)?;
