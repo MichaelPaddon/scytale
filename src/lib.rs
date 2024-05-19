@@ -8,3 +8,4 @@ pub mod array;
 pub mod buffer;
 
 pub mod hash;
+pub mod mac;
