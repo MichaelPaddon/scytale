@@ -75,7 +75,7 @@ fn do_hash<H: Hash + Write>(inpath: Option<PathBuf>, outpath: Option<PathBuf>)
 
     let mut output: BufWriter<Box<dyn Write>> = BufWriter::new(
        match outpath {
-           Some(path) => Box::new((File::open(path)?)),
+           Some(path) => Box::new(File::open(path)?),
            None => Box::new(stdout())
        }
     );
@@ -83,7 +83,7 @@ fn do_hash<H: Hash + Write>(inpath: Option<PathBuf>, outpath: Option<PathBuf>)
     let mut hash = H::new();
     copy(&mut input, &mut hash)?;
     let digest = hash.finalize();
-    writeln!(&mut output, "{}", hex::encode(digest))?;
+    writeln!(&mut output, "{}", hex::encode(digest.as_ref()))?;
 
     Ok(())
 }

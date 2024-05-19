@@ -12,8 +12,9 @@ use core::num::Wrapping;
 use core::ops::Add;
 use core::ptr::{read_unaligned, write_unaligned};
 use num_traits::{AsPrimitive, PrimInt};
+use crate::array::Array;
+use crate::buffer::Buffer;
 use crate::hash::Hash;
-use crate::util::block::BlockBuffer;
 
 type State<Word> = [Word; 8];
 
@@ -322,13 +323,13 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct Sha2Variant<Word, Length, Core, Initializer,
     const BLOCK_SIZE: usize, const DIGEST_SIZE: usize>
 {
     core: Core,
     length: Length,
-    buffer: BlockBuffer<u8, BLOCK_SIZE>,
+    buffer: Buffer<u8, BLOCK_SIZE>,
     _word: PhantomData<Word>,
     _initializer: PhantomData<Initializer>
 }
@@ -347,7 +348,7 @@ where
         Self {
             core: Core::new(&Initializer::H),
             length: Length::zero(),
-            buffer: BlockBuffer::new(),
+            buffer: Buffer::new(),
             _word: PhantomData,
             _initializer: PhantomData
         }
@@ -427,39 +428,40 @@ type Sha512_256Variant =
     Sha2Variant<u64, u128, Sha512Core, Sha512_256Initializer, 128, 32>;
 
 /// SHA-224 hash algorithm.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Sha224(Sha224Variant);
-impl_hash_for_newtype!{Sha224, [u8; 64], [u8; 28]}
+impl_hash_for_newtype!{Sha224, Array<u8, 64>, Array<u8, 28>}
 impl_write_for_hash!{Sha224}
 
 /// SHA-256 hash algorithm.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Sha256(Sha256Variant);
-impl_hash_for_newtype!{Sha256, [u8; 64], [u8; 32]}
+impl_hash_for_newtype!{Sha256, Array<u8, 64>, Array<u8, 32>}
 impl_write_for_hash!{Sha256}
 
 /// SHA-384 hash algorithm.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Sha384(Sha384Variant);
-impl_hash_for_newtype!{Sha384, [u8; 128], [u8; 48]}
+impl_hash_for_newtype!{Sha384, Array<u8, 128>, Array<u8, 48>}
 impl_write_for_hash!{Sha384}
 
 /// SHA-512 hash algorithm.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Sha512(Sha512Variant);
-impl_hash_for_newtype!{Sha512, [u8; 128], [u8; 64]}
+impl_hash_for_newtype!{Sha512, Array<u8, 128>, Array<u8, 64>}
 impl_write_for_hash!{Sha512}
 
 /// SHA-512/224 hash algorithm.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Sha512_224(Sha512_224Variant);
-impl_hash_for_newtype!{Sha512_224, [u8; 128], [u8; 28]}
+impl_hash_for_newtype!{Sha512_224, Array<u8, 128>, Array<u8, 28>}
 impl_write_for_hash!{Sha512_224}
 
 /// SHA-512/256 hash algorithm.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Sha512_256(Sha512_256Variant);
-impl_hash_for_newtype!{Sha512_256, [u8; 128], [u8; 32]}
+impl_hash_for_newtype!{Sha512_256, Array<u8, 128>, Array<u8, 32>}
 impl_write_for_hash!{Sha512_256}
 
-#[cfg(test)] mod test;
+#[cfg(test)]
+mod test;

@@ -1,31 +1,42 @@
 //! Cryptographic hashes.
 
-use core::convert::AsRef;
+use crate::array::{Array, Slice};
 
 /// A cryptographic hash algorithm.
-pub trait Hash: {
+pub trait Hash {
     /// The block type
-    type Block: AsMut<[u8]>;
+    type Block: Slice<u8>;
 
     /// The digest type.
-    type Digest: AsRef<[u8]>;
+    type Digest: Slice<u8>;
 
-    /// Constructs a new hash instance.
+    /// Construct a new hash instance.
     fn new() -> Self;
 
-    /// Resets the hash.
+    /// Construct a new hash instance, and update it with some initial data.
+    fn new_with_prefix(bytes: &[u8]) -> Self
+    where
+        Self: Sized
+    {
+        let mut hash = Self::new();
+        hash.update(bytes);
+        hash
+    }
+
+    /// Reset the hash.
     fn reset(&mut self);
 
-    /// Updates the hash state.
+    /// Update the hash with some data.
     fn update(&mut self, bytes: &[u8]);
 
-    /// Return the digest.
+    /// Finalize the hash and return the digest.
     fn finalize(self) -> Self::Digest;
 
-    /// Reset the hash and return the digest.
+    /// Finalize the hash and return the digest.
+    /// The hash is reset and available for reuse.
     fn finalize_and_reset(&mut self) -> Self::Digest;
 
-    /// Convenience function to hash a slice of bytes.
+    /// Return the digest of a message.
     fn hash(message: &[u8]) -> Self::Digest
     where
         Self: Sized
@@ -59,12 +70,12 @@ macro_rules! impl_hash_for_newtype {
 
             #[inline(always)]
             fn finalize(mut self) -> Self::Digest {
-                self.0.finalize()
+                self.0.finalize().into()
             }
 
             #[inline(always)]
             fn finalize_and_reset(&mut self) -> Self::Digest {
-                let digest = self.0.finalize();
+                let digest = self.0.finalize().into();
                 self.0.reset();
                 digest
             }
