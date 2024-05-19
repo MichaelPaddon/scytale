@@ -1,8 +1,6 @@
 use core::fmt::Debug;
 use core::ops::{Deref, DerefMut};
 
-pub trait Slice<T>: DerefMut<Target = [T]> {}
-
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Array<T, const N: usize> ([T; N]);
@@ -47,6 +45,3 @@ impl <T, const N: usize> From<[T; N]> for Array<T, N>
         Self(array)
     }
 }
-
-impl <T, const N: usize> Slice<T> for Array<T, N>
-{}

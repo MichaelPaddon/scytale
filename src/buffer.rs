@@ -5,7 +5,6 @@ use core::mem::{MaybeUninit, transmute_copy};
 use core::ops::{Deref, DerefMut};
 use core::option;
 use core::slice;
-use crate::array::Slice;
 
 /// A fixed capacity buffer, holding a maximum of N values of type T.
 #[derive(Copy, Debug)]
@@ -252,10 +251,6 @@ impl <T, const N: usize> Eq for Buffer<T, N>
 where
     T: PartialEq
 {}
-
-impl <T, const N: usize> Slice<T> for Buffer<T, N>
-{}
-
 
 /// An iterator over blocks.
 #[derive(Debug)]

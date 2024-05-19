@@ -1,14 +1,14 @@
 //! Cryptographic hashes.
 
-use crate::array::Slice;
+use core::ops::{Deref, DerefMut};
 
 /// A cryptographic hash algorithm.
 pub trait Hash {
     /// The block type
-    type Block: Slice<u8>;
+    type Block: DerefMut<Target = [u8]>;
 
     /// The digest type.
-    type Digest: Slice<u8>;
+    type Digest: Deref<Target = [u8]>;
 
     /// Construct a new hash instance.
     fn new() -> Self;
