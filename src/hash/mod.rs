@@ -1,6 +1,6 @@
 //! Cryptographic hashes.
 
-use crate::array::{Array, Slice};
+use crate::array::Slice;
 
 /// A cryptographic hash algorithm.
 pub trait Hash {
