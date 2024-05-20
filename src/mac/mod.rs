@@ -1,23 +1,31 @@
 use core::ops::Deref;
 
 pub trait Mac {
-    type Tag: AsRef<[u8]> + Deref<Target = [u8]>;
+    type Tag: AsRef<[u8]> + Clone + Deref<Target = [u8]>;
 
-    fn new<T: AsRef<[u8]>>(key: T) -> Self;
+    fn new<K>(key: K) -> Self
+    where
+        K: AsRef<[u8]>;
 
-    fn rekey<T: AsRef<[u8]>>(&mut self, key: T);
+    fn rekey<K>(&mut self, key: K)
+    where
+        K: AsRef<[u8]>;
 
     fn reset(&mut self);
 
-    fn update<T: AsRef<[u8]>>(&mut self, data: T);
+    fn update<T>(&mut self, data: T)
+    where
+        T: AsRef<[u8]>;
 
     fn finalize(self) -> Self::Tag;
 
     fn finalize_and_reset(&mut self) -> Self::Tag;
 
     #[inline]
-    fn new_with_prefix<T: AsRef<[u8]>, U: AsRef<[u8]>>(key: T, data: U) -> Self
+    fn new_with_prefix<K, T>(key: K, data: T) -> Self
     where
+        K: AsRef<[u8]>,
+        T: AsRef<[u8]>,
         Self: Sized
     {
         let mut mac = Self::new(key);
@@ -26,11 +34,13 @@ pub trait Mac {
     }
 
     #[inline]
-    fn tag<T: AsRef<[u8]>, U: AsRef<[u8]>>(key: T, msg: U) -> Self::Tag
+    fn mac<K, T>(key: K, message: T) -> Self::Tag
     where
+        K: AsRef<[u8]>,
+        T: AsRef<[u8]>,
         Self: Sized
     {
-        Self::new_with_prefix(key, msg).finalize()
+        Self::new_with_prefix(key, message).finalize()
     }
 }
 

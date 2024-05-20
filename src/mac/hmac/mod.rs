@@ -57,7 +57,10 @@ where
 {
     type Tag = H::Digest;
 
-    fn new<T: AsRef<[u8]>>(key: T) -> Self {
+    fn new<K>(key: K) -> Self
+    where
+        K: AsRef<[u8]>
+    {
         let initial_state = Self::keyed_hashes(key.as_ref());
         let inner_hash = initial_state.0.clone();
         Self {
@@ -66,7 +69,10 @@ where
         }
     }
 
-    fn rekey<T: AsRef<[u8]>>(&mut self, key: T) {
+    fn rekey<K>(&mut self, key: K)
+    where
+        K: AsRef<[u8]>
+    {
         self.initial_state = Self::keyed_hashes(key.as_ref());
         self.inner_hash = self.initial_state.0.clone();
     }
@@ -75,9 +81,11 @@ where
         self.inner_hash = self.initial_state.0.clone();
     }
 
-    fn update<T: AsRef<[u8]>>(&mut self, data: T){
-        // TODO: remove as_ref()
-        self.inner_hash.update(data.as_ref());
+    fn update<T>(&mut self, data: T)
+    where
+        T: AsRef<[u8]>
+    {
+        self.inner_hash.update(data);
     }
 
     fn finalize(mut self) -> Self::Tag {

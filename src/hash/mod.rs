@@ -5,7 +5,7 @@ use core::ops::Deref;
 /// A cryptographic hash algorithm.
 pub trait Hash {
     /// The digest type.
-    type Digest: AsRef<[u8]> + Deref<Target = [u8]>;
+    type Digest: AsRef<[u8]> + Clone + Deref<Target = [u8]>;
 
     /// Constructs a new hash instance.
     fn new() -> Self;
@@ -54,7 +54,7 @@ pub(crate) mod internal {
 
     pub trait BlockHash: Hash {
         /// The block type
-        type Block: AsRef<[u8]> + AsMut<[u8]> + DerefMut<Target = [u8]>;
+        type Block: AsMut<[u8]> + AsRef<[u8]> + Clone + DerefMut<Target = [u8]>;
     }
 }
 
