@@ -14,6 +14,20 @@ where
     }
 }
 
+impl <T, const N: usize> AsRef<[T]> for Array<T, N>
+{
+    fn as_ref(&self) -> &[T] {
+        self
+    }
+}
+
+impl <T, const N: usize> AsMut<[T]> for Array<T, N>
+{
+    fn as_mut(&mut self) -> &mut [T] {
+        self
+    }
+}
+
 impl <T, const N: usize> Default for Array<T, N>
 where
     T: Copy + Default
