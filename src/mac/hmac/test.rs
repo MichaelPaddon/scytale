@@ -72,8 +72,7 @@ fn test_hmac<M: Mac>(alg: &str) -> Result<(), Box<dyn Error>> {
 fn perform_aft_tests<M: Mac>(tests: &Tests) -> Result<(), Box<dyn Error>> {
     let groups = tests.test_groups.iter()
         .filter_map(|x| match x {
-            TestGroup::Aft(x) => Some(x),
-            _ => None
+            TestGroup::Aft(x) => Some(x)
         });
 
     for g in groups {
