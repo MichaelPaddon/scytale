@@ -1,14 +1,11 @@
 //! Cryptographic hashes.
 
-use core::ops::{Deref, DerefMut};
+use core::ops::DerefMut;
 
 /// A cryptographic hash algorithm.
 pub trait Hash {
-    /// The block type
-    type Block: DerefMut<Target = [u8]>;
-
     /// The digest type.
-    type Digest: AsRef<[u8]> + Deref<Target = [u8]>;
+    type Digest: AsRef<[u8]> + AsMut<[u8]> + DerefMut<Target = [u8]>;
 
     /// Construct a new hash instance.
     fn new() -> Self;
@@ -47,10 +44,19 @@ pub trait Hash {
     }
 }
 
+pub(crate) mod internal {
+    use core::ops::DerefMut;
+    use super::Hash;
+
+    pub trait BlockHash: Hash {
+        /// The block type
+        type Block: AsRef<[u8]> + AsMut<[u8]> + DerefMut<Target = [u8]>;
+    }
+}
+
 macro_rules! impl_hash_for_newtype {
     ($hash: ident, $block: ty, $digest: ty) => {
-        impl Hash for $hash {
-            type Block = $block;
+        impl crate::hash::Hash for $hash {
             type Digest = $digest;
 
             #[inline(always)]
@@ -79,6 +85,10 @@ macro_rules! impl_hash_for_newtype {
                 self.0.reset();
                 digest
             }
+        }
+
+        impl crate::hash::internal::BlockHash for $hash {
+            type Block = $block;
         }
     }
 }

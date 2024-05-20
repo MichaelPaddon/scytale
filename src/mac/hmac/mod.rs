@@ -1,6 +1,6 @@
 use core::cmp::min;
-use core::ops::Deref;
 use crate::hash::Hash;
+use crate::hash::internal::BlockHash;
 use crate::mac::Mac;
 
 #[derive(Clone, Debug)]
@@ -11,7 +11,7 @@ pub struct Hmac<H: Hash> {
 
 impl<H> Hmac<H>
 where
-    H: Clone + Hash,
+    H: Clone + BlockHash,
     H::Block: Clone + Default
 {
     fn keyed_hashes(key: &[u8]) -> (H, H) {
@@ -52,7 +52,7 @@ where
 
 impl<H> Mac for Hmac<H>
 where
-    H: Clone + Hash,
+    H: Clone + BlockHash,
     H::Block: Clone + Default
 {
     type Tag = H::Digest;
