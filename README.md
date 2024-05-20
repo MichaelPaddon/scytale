@@ -8,13 +8,19 @@ Our goal is to provide **fast** and **correct** implementations of common
 cryptographic algorithms and services.
 
 Scytale is in early development.
-The following algorithms are currently available:
+
+# Supported Algorithms
+
+Cryptographic hash algorithms:
 - SHA2-224
 - SHA2-256
 - SHA2-384
 - SHA2-512
 - SHA2-512/224
 - SHA2-512/256
+
+Message Authentication Code (MAC) algorithms:
+- HMAC
 
 See the [API documentation](https://docs.rs/scytale/latest/scytale/) for more
 information.
