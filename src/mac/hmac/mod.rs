@@ -1,5 +1,7 @@
 use core::cmp::min;
+use core::ops::Deref;
 use crate::hash::Hash;
+use crate::mac::Mac;
 
 #[derive(Clone, Debug)]
 pub struct Hmac<H: Hash> {
@@ -39,8 +41,24 @@ where
        (inner_hash, outer_hash)
     }
 
-    pub fn new(key: &[u8]) -> Self {
-        let initial_state = Self::keyed_hashes(key);
+    fn zzz(&mut self) -> H::Digest {
+        // TODO: get rid of reset
+        let digest = self.inner_hash.finalize_and_reset();
+        let mut outer_hash = self.initial_state.1.clone();
+        outer_hash.update(&digest);
+        outer_hash.finalize()
+    }
+}
+
+impl<H> Mac for Hmac<H>
+where
+    H: Clone + Hash,
+    H::Block: Clone + Default
+{
+    type Tag = H::Digest;
+
+    fn new<T: AsRef<[u8]>>(key: T) -> Self {
+        let initial_state = Self::keyed_hashes(key.as_ref());
         let inner_hash = initial_state.0.clone();
         Self {
             initial_state,
@@ -48,23 +66,30 @@ where
         }
     }
 
-    pub fn rekey(&mut self, key: &[u8]) {
-        self.initial_state = Self::keyed_hashes(key);
+    fn rekey<T: AsRef<[u8]>>(&mut self, key: T) {
+        self.initial_state = Self::keyed_hashes(key.as_ref());
         self.inner_hash = self.initial_state.0.clone();
     }
 
-    pub fn reset(&mut self) {
+    fn reset(&mut self) {
         self.inner_hash = self.initial_state.0.clone();
     }
 
-    pub fn update(&mut self, bytes: &[u8]){
-        self.inner_hash.update(bytes);
+    fn update<T: AsRef<[u8]>>(&mut self, data: T){
+        // TODO: remove as_ref()
+        self.inner_hash.update(data.as_ref());
     }
 
-    pub fn finalize(self) -> H::Digest {
-        let digest = self.inner_hash.finalize();
-        let mut outer_hash = self.initial_state.1.clone();
-        outer_hash.update(&digest);
-        outer_hash.finalize()
+    fn finalize(mut self) -> Self::Tag {
+        self.zzz()
+    }
+
+    fn finalize_and_reset(&mut self) -> Self::Tag {
+        let tag = self.zzz();
+        self.reset();
+        tag
     }
 }
+
+#[cfg(test)]
+mod test;

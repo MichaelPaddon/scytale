@@ -8,7 +8,7 @@ pub trait Hash {
     type Block: DerefMut<Target = [u8]>;
 
     /// The digest type.
-    type Digest: Deref<Target = [u8]>;
+    type Digest: AsRef<[u8]> + Deref<Target = [u8]>;
 
     /// Construct a new hash instance.
     fn new() -> Self;
