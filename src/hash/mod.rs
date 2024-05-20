@@ -1,46 +1,50 @@
 //! Cryptographic hashes.
 
-use core::ops::DerefMut;
+use core::ops::Deref;
 
 /// A cryptographic hash algorithm.
 pub trait Hash {
     /// The digest type.
-    type Digest: AsRef<[u8]> + AsMut<[u8]> + DerefMut<Target = [u8]>;
+    type Digest: AsRef<[u8]> + Deref<Target = [u8]>;
 
-    /// Construct a new hash instance.
+    /// Constructs a new hash instance.
     fn new() -> Self;
 
-    /// Construct a new hash instance, and update it with some initial data.
-    fn new_with_prefix(bytes: &[u8]) -> Self
-    where
-        Self: Sized
-    {
-        let mut hash = Self::new();
-        hash.update(bytes);
-        hash
-    }
-
-    /// Reset the hash.
+    /// Resets the hash.
     fn reset(&mut self);
 
-    /// Update the hash with some data.
-    fn update(&mut self, bytes: &[u8]);
+    /// Updates the hash with some data.
+    fn update<T>(&mut self, data: T)
+    where
+        T: AsRef<[u8]>;
 
-    /// Finalize the hash and return the digest.
+    /// Finalizes the hash and return the digest.
     fn finalize(self) -> Self::Digest;
 
-    /// Finalize the hash and return the digest.
+    /// Finalizes the hash and return the digest.
     /// The hash is reset and available for reuse.
     fn finalize_and_reset(&mut self) -> Self::Digest;
 
-    /// Return the digest of a message.
-    fn hash(message: &[u8]) -> Self::Digest
+    /// Constructs a new hash instance, and updates it with some initial data.
+    #[inline]
+    fn new_with_prefix<T>(data: T) -> Self
     where
+        T: AsRef<[u8]>,
         Self: Sized
     {
         let mut hash = Self::new();
-        hash.update(message);
-        hash.finalize()
+        hash.update(data);
+        hash
+    }
+
+    /// Returns the digest of a message.
+    #[inline]
+    fn hash<T>(message: T) -> Self::Digest
+    where
+        T: AsRef<[u8]>,
+        Self: Sized
+    {
+        Self::new_with_prefix(message).finalize()
     }
 }
 
@@ -70,8 +74,11 @@ macro_rules! impl_hash_for_newtype {
             }
 
             #[inline(always)]
-            fn update(&mut self, data: &[u8]){
-                self.0.update(data)
+            fn update<T>(&mut self, data: T)
+            where
+                T: AsRef<[u8]>
+            {
+                self.0.update(data.as_ref())
             }
 
             #[inline(always)]
