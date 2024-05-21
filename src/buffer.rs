@@ -18,10 +18,15 @@ impl<T, const N: usize> Buffer<T, N> {
     ///
     /// # Example 
     ///
+    /// ```
+    /// # use scytale::buffer::Buffer;
+    /// let buffer: Buffer<u8, 16> = Buffer::new();
+    /// ```
     #[inline]
     pub fn new() -> Self {
         Self {
             buffer: unsafe {
+                // safe because MaybeUninit<T> doesn't implement drop
                 MaybeUninit::uninit().assume_init()
             },
             length: 0
@@ -29,24 +34,64 @@ impl<T, const N: usize> Buffer<T, N> {
     }
 
     /// Returns a slice containing the buffer's values.
+    ///
+    /// # Example 
+    ///
+    /// ```
+    /// # use scytale::buffer::Buffer;
+    /// let buffer: Buffer<u8, 16> = "hello".as_bytes().into();
+    /// let data = buffer.as_slice();
+    /// assert_eq!(data, "hello".as_bytes());
+    /// ```
     #[inline]
     pub fn as_slice(&self) -> &[T] {
         self
     }
 
     /// Returns a mutable slice containing the buffer's values.
+    ///
+    /// # Example 
+    ///
+    /// ```
+    /// # use scytale::buffer::Buffer;
+    /// let mut buffer: Buffer<u8, 16> = "hello".as_bytes().into();
+    /// let data = buffer.as_mut_slice();
+    /// assert_eq!(data, "hello".as_bytes());
+    /// ```
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         self
     }
 
     /// Returns a pointer to the buffer's values.
+    ///
+    /// # Example 
+    ///
+    /// ```
+    /// # use core::slice;
+    /// # use scytale::buffer::Buffer;
+    /// let buffer: Buffer<u8, 16> = "hello".as_bytes().into();
+    /// let ptr = buffer.as_ptr();
+    /// let data = unsafe { slice::from_raw_parts(ptr, 5) };
+    /// assert_eq!(data, "hello".as_bytes());
+    /// ```
     #[inline]
     pub fn as_ptr(&self) -> *const T {
         self.buffer.as_ptr().cast()
     }
 
     /// Returns a mutable pointer to the buffer's values.
+    ///
+    /// # Example 
+    ///
+    /// ```
+    /// # use core::slice;
+    /// # use scytale::buffer::Buffer;
+    /// let mut buffer: Buffer<u8, 16> = "hello".as_bytes().into();
+    /// let ptr = buffer.as_mut_ptr();
+    /// let data = unsafe { slice::from_raw_parts_mut(ptr, 5) };
+    /// assert_eq!(data, "hello".as_bytes());
+    /// ```
     #[inline]
     pub fn as_mut_ptr(&mut self) -> *mut T {
         self.buffer.as_mut_ptr().cast()
@@ -54,51 +99,124 @@ impl<T, const N: usize> Buffer<T, N> {
 
     /// Consumes the buffer and returns the contained array.
     /// Panics if the buffer is not full.
+    ///
+    /// # Example 
+    ///
+    /// ```
+    /// # use scytale::buffer::Buffer;
+    /// let buffer: Buffer<u8, 5> = "hello".as_bytes().into();
+    /// let data = buffer.into_inner();
+    /// assert_eq!(&data, "hello".as_bytes());
+    /// ```
     #[inline]
     pub fn into_inner(self) -> [T; N] {
         assert_eq!(self.length,  N);
         unsafe {
+            // safe because we know that there are N valid values
             transmute_copy(&*self.buffer.as_ptr().cast::<[T; N]>())
         }
     }
 
     /// Clears the buffer.
+    ///
+    /// # Example 
+    ///
+    /// ```
+    /// # use scytale::buffer::Buffer;
+    /// let mut buffer: Buffer<u8, 16> = "hello".as_bytes().into();
+    /// buffer.clear();
+    /// assert_eq!(buffer.as_slice(), "".as_bytes());
+    /// ```
     #[inline]
     pub fn clear(&mut self) {
         self.truncate(0)
     }
 
     /// Returns true if the buffer is empty.
+    ///
+    /// # Example 
+    ///
+    /// ```
+    /// # use scytale::buffer::Buffer;
+    /// let mut buffer: Buffer<u8, 16> = Buffer::new();
+    /// assert!(buffer.is_empty());
+    /// buffer.push(0);
+    /// assert!(!buffer.is_empty());
+    /// ```
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.length == 0
     }
 
     /// Returns true if the buffer is full.
+    ///
+    /// # Example 
+    ///
+    /// ```
+    /// # use scytale::buffer::Buffer;
+    /// let mut buffer: Buffer<u8, 16> = Buffer::new();
+    /// buffer.fill(0);
+    /// assert!(buffer.is_full());
+    /// buffer.pop();
+    /// assert!(!buffer.is_full());
+    /// ```
     #[inline]
     pub fn is_full(&self) -> bool {
         self.length == N
     }
 
     /// Returns the number of values in the buffer.
+    ///
+    /// # Example 
+    ///
+    /// ```
+    /// # use scytale::buffer::Buffer;
+    /// let mut buffer: Buffer<u8, 16> = "hello".as_bytes().into();
+    /// assert_eq!(buffer.len(), 5);
+    /// ```
     #[inline]
     pub fn len(&self) -> usize {
         self.length
     }
 
     /// Returns the total capacity of the buffer.
+    ///
+    /// # Example 
+    ///
+    /// ```
+    /// # use scytale::buffer::Buffer;
+    /// let mut buffer: Buffer<u8, 16> = "hello".as_bytes().into();
+    /// assert_eq!(buffer.capacity(), 16);
+    /// ```
     #[inline]
     pub fn capacity(&self) -> usize {
         N
     }
 
     /// Returns the remaining capacity of the buffer.
+    ///
+    /// # Example 
+    ///
+    /// ```
+    /// # use scytale::buffer::Buffer;
+    /// let mut buffer: Buffer<u8, 16> = "hello".as_bytes().into();
+    /// assert_eq!(buffer.remaining_capacity(), 11);
+    /// ```
     #[inline]
     pub fn remaining_capacity(&self) -> usize {
         N - self.length
     }
 
     /// Appends a value to the end of the buffer.
+    ///
+    /// # Example 
+    ///
+    /// ```
+    /// # use scytale::buffer::Buffer;
+    /// let mut buffer: Buffer<u8, 16> = "hello".as_bytes().into();
+    /// buffer.push(0);
+    /// assert_eq!(buffer[buffer.len() - 1], 0);
+    /// ```
     #[inline]
     pub fn push(&mut self, value: T) {
         self.buffer[self.length].write(value);
@@ -106,6 +224,16 @@ impl<T, const N: usize> Buffer<T, N> {
     }
 
     /// Removes and returns the last value in the buffer (if any).
+    ///
+    /// # Example 
+    ///
+    /// ```
+    /// # use scytale::buffer::Buffer;
+    /// let mut buffer: Buffer<u8, 16> = "hello".as_bytes().into();
+    /// assert_eq!(buffer.pop(), Some(0x6f));
+    /// buffer.clear();
+    /// assert_eq!(buffer.pop(), None);
+    /// ```
     pub fn pop(&mut self) -> Option<T> {
         if self.length == 0 {
             None
@@ -113,14 +241,43 @@ impl<T, const N: usize> Buffer<T, N> {
         else {
             self.length -= 1;
             let value = unsafe {
+                // safe because we know that self.buffer[self.length] is valid
                 self.buffer[self.length].assume_init_read()
             };
             Some(value)
         }
     }
 
+    /// Fills the remaining capacity in the buffer with a value.
+    ///
+    /// # Example 
+    ///
+    /// ```
+    /// # use scytale::buffer::Buffer;
+    /// let mut buffer: Buffer<u8, 5> = Buffer::new() ;
+    /// buffer.fill(0x6f);
+    /// assert_eq!(buffer, "ooooo".as_bytes());
+    /// ```
+    pub fn fill(&mut self, value: T)
+    where
+        T: Clone
+    {
+        while !self.is_full() {
+            self.push(value.clone());
+        }
+    }
+
     /// Extends the buffer by cloning values from a slice.
     /// Panics if there is not enough room in the buffer.
+    ///
+    /// # Example 
+    ///
+    /// ```
+    /// # use scytale::buffer::Buffer;
+    /// let mut buffer: Buffer<u8, 16> = Buffer::new() ;
+    /// buffer.extend_from_slice("hello".as_bytes());
+    /// assert_eq!(buffer, "hello".as_bytes());
+    /// ```
     pub fn extend_from_slice(&mut self, other: &[T])
     where
         T: Clone
@@ -131,9 +288,19 @@ impl<T, const N: usize> Buffer<T, N> {
     }
 
     /// Truncates the buffer to a given length.
+    ///
+    /// # Example 
+    ///
+    /// ```
+    /// # use scytale::buffer::Buffer;
+    /// let mut buffer: Buffer<u8, 16> = "hello world".as_bytes().into();
+    /// buffer.truncate(5);
+    /// assert_eq!(buffer, "hello".as_bytes());
+    /// ```
     pub fn truncate(&mut self, len: usize) {
         for i in len..self.length {
             unsafe {
+                // safe because we know that self.buffer[i] is valid
                 self.buffer[i].assume_init_drop();
             }
         }
@@ -149,16 +316,14 @@ impl<T, const N: usize> Buffer<T, N> {
     ///
     /// # Example
     /// 
-    /// '''
-    /// let buffer = Buffer::<u8; 4>::new();
-    /// let mut n = 0;
-    /// for block in buffer.blocks("012345678".as_bytes()) {
-    ///     // process block
-    ///     n += 1
+    /// ```
+    /// # use scytale::buffer::Buffer;
+    /// let mut buffer: Buffer<u8, 4> = Buffer::new();
+    /// for block in buffer.blocks("hello world".as_bytes()) {
+    ///     assert_eq!(block.len(), 4);
     /// }
-    /// assert_eq!(n, 2);
-    /// assert_eq!(buffer.len(), 1);
-    /// '''
+    /// assert_eq!(buffer.len(), 3);
+    /// ```
     pub fn blocks<'a: 'b, 'b>(&'a mut self, values: &'b [T])
         -> Blocks<'a, 'b, T, N>
     where
@@ -203,6 +368,7 @@ impl <T, const N: usize> Deref for Buffer<T, N> {
     #[inline]
     fn deref(&self) -> &Self::Target {
         unsafe {
+            // safe because we know there are self.length valid values
             slice::from_raw_parts(self.as_ptr().cast(), self.length)
         }
     }
@@ -212,6 +378,7 @@ impl <T, const N: usize> DerefMut for Buffer<T, N> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe {
+            // safe because we know there are self.length valid values
             slice::from_raw_parts_mut(self.as_mut_ptr().cast(), self.length)
         }
     }
@@ -232,6 +399,17 @@ impl <T, const N: usize> From<[T; N]> for Buffer<T, N> {
     fn from(values: [T; N]) -> Self {
         let mut buffer = Self::new();
         buffer.extend(values);
+        buffer
+    }
+}
+
+impl <T, const N: usize> From<&[T]> for Buffer<T, N>
+where
+    T: Clone
+{
+    fn from(values: &[T]) -> Self {
+        let mut buffer = Self::new();
+        buffer.extend_from_slice(values);
         buffer
     }
 }
