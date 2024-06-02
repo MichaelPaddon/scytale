@@ -13,9 +13,11 @@ exclude = ["/resources"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+arrayvec = "0.7.4"
 clap = { version = "4.5.4", features = ["derive"] }
 hex = "0.4.3"
 num-traits = "0.2.18"
+smallvec = { version = "1.13.2", features = ["const_new"] }
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["html_reports"] }

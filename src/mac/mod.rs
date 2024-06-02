@@ -1,31 +1,35 @@
-use core::ops::Deref;
+//! Message Authentication Code (MAC) algorithms.
+//!
+//! A MAC algorithm takes a secret key and a message, and
+//! generates an authentication tag.
+//! Anyone with the secret key can verify this tag.
+//! MACs are useful for data origin authentication, which also
+//! implies data integrity.
 
+/// A Message Authentication Code algorithm.
 pub trait Mac {
-    type Tag: AsRef<[u8]> + Clone + Deref<Target = [u8]>;
-
-    fn new<K>(key: K) -> Self
+    /// Constructs a new instance of the MAC algorithm.
+    fn new(key: &[u8]) -> Self
     where
-        K: AsRef<[u8]>;
+        Self: Sized;
 
-    fn rekey<K>(&mut self, key: K)
-    where
-        K: AsRef<[u8]>;
+    /// Changes the key, and resets the MAC algorithm,
+    fn rekey(&mut self, key: &[u8]);
 
+    /// Resets the MAC algorithm, to its orginal state.
     fn reset(&mut self);
 
-    fn update<T>(&mut self, data: T)
-    where
-        T: AsRef<[u8]>;
+    /// Updates the MAC algorithm with some data.
+    fn update(&mut self, data: &[u8]);
 
-    fn finalize(self) -> Self::Tag;
+    /// Finalizes the MAC algorithm, generating an authentication code.
+    fn finalize<'a>(&'a mut self) -> &'a [u8];
 
-    fn finalize_and_reset(&mut self) -> Self::Tag;
-
+    /// Constructs a new instance of the MAC algorithm
+    /// and updates it with some data.
     #[inline]
-    fn new_with_prefix<K, T>(key: K, data: T) -> Self
+    fn new_with_prefix(key: &[u8], data: &[u8]) -> Self
     where
-        K: AsRef<[u8]>,
-        T: AsRef<[u8]>,
         Self: Sized
     {
         let mut mac = Self::new(key);
@@ -33,14 +37,13 @@ pub trait Mac {
         mac
     }
 
+    /// Generates an authentciation code, given a key and a message.
     #[inline]
-    fn mac<K, T>(key: K, message: T) -> Self::Tag
+    fn mac(key: &[u8], message: &[u8]) -> Vec<u8>
     where
-        K: AsRef<[u8]>,
-        T: AsRef<[u8]>,
         Self: Sized
     {
-        Self::new_with_prefix(key, message).finalize()
+        Self::new_with_prefix(key, message).finalize().to_vec()
     }
 }
 

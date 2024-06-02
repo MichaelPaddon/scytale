@@ -1,35 +1,29 @@
 //! Cryptographic hashes.
 
-use core::ops::Deref;
-
 /// A cryptographic hash algorithm.
 pub trait Hash {
-    /// The digest type.
-    type Digest: AsRef<[u8]> + Clone + Deref<Target = [u8]>;
+    /// Constructs a new hash algorithm instance.
+    fn new() -> Self
+    where
+        Self: Sized;
 
-    /// Constructs a new hash instance.
-    fn new() -> Self;
+    fn block_size() -> usize
+    where
+        Self: Sized;
 
     /// Resets the hash.
     fn reset(&mut self);
 
     /// Updates the hash with some data.
-    fn update<T>(&mut self, data: T)
-    where
-        T: AsRef<[u8]>;
+    fn update(&mut self, data: &[u8]);
 
     /// Finalizes the hash and return the digest.
-    fn finalize(self) -> Self::Digest;
-
-    /// Finalizes the hash and return the digest.
-    /// The hash is reset and available for reuse.
-    fn finalize_and_reset(&mut self) -> Self::Digest;
+    fn finalize<'a>(&'a mut self) -> &'a [u8];
 
     /// Constructs a new hash instance, and updates it with some initial data.
     #[inline]
-    fn new_with_prefix<T>(data: T) -> Self
+    fn new_with_prefix(data: &[u8]) -> Self
     where
-        T: AsRef<[u8]>,
         Self: Sized
     {
         let mut hash = Self::new();
@@ -38,83 +32,76 @@ pub trait Hash {
     }
 
     /// Returns the digest of a message.
-    #[inline]
-    fn hash<T>(message: T) -> Self::Digest
+    fn hash(message: &[u8]) -> Vec<u8>
     where
-        T: AsRef<[u8]>,
         Self: Sized
     {
-        Self::new_with_prefix(message).finalize()
+        let mut hash = Self::new_with_prefix(message);
+        hash.finalize().to_vec()
     }
 }
 
-pub(crate) mod internal {
-    use core::ops::DerefMut;
-    use super::Hash;
-
-    pub trait BlockHash: Hash {
-        /// The block type
-        type Block: AsMut<[u8]> + AsRef<[u8]> + Clone + DerefMut<Target = [u8]>;
-    }
-}
-
-macro_rules! impl_hash_for_newtype {
-    ($hash: ident, $block: ty, $digest: ty) => {
-        impl crate::hash::Hash for $hash {
-            type Digest = $digest;
-
-            #[inline(always)]
-            fn new() -> Self {
-                Self::default()
+macro_rules! impl_hash_newtype {
+    ($name: ident, $inner: ty) => {
+        impl crate::hash::Hash for $name {
+            #[inline]
+            fn new() -> Self
+            where
+                Self: Sized
+            {
+                Self(<$inner>::new())
             }
 
-            #[inline(always)]
+            #[inline]
+            fn block_size() -> usize
+            where
+                Self: Sized
+            {
+                <$inner>::block_size()
+            }
+
+            #[inline]
             fn reset(&mut self) {
                 self.0.reset()
             }
 
-            #[inline(always)]
-            fn update<T>(&mut self, data: T)
-            where
-                T: AsRef<[u8]>
-            {
-                self.0.update(data.as_ref())
+            #[inline]
+            fn update(&mut self, data: &[u8]) {
+                self.0.update(data)
             }
 
-            #[inline(always)]
-            fn finalize(mut self) -> Self::Digest {
-                self.0.finalize().into()
-            }
-
-            #[inline(always)]
-            fn finalize_and_reset(&mut self) -> Self::Digest {
-                let digest = self.0.finalize().into();
-                self.0.reset();
-                digest
+            #[inline]
+            fn finalize<'a>(&'a mut self) -> &'a [u8] {
+                self.0.finalize()
             }
         }
 
-        impl crate::hash::internal::BlockHash for $hash {
-            type Block = $block;
-        }
-    }
-}
-
-macro_rules! impl_write_for_hash {
-    ($hash: ident) => {
-        impl std::io::Write for $hash {
-            #[inline(always)]
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.update(buf);
-                Ok(buf.len())
+        impl std::io::Write for $name {
+            #[inline]
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.0.update(data);
+                Ok(data.len())
             }
 
-            #[inline(always)]
+            #[inline]
             fn flush(&mut self) -> std::io::Result<()> {
                 Ok(())
             }
         }
     }
+}
+
+const ALGORITHMS: [(&str, fn() -> Box<dyn Hash>); 6] = [
+    ("sha224", || Box::new(sha2::Sha224::new())),
+    ("sha256", || Box::new(sha2::Sha256::new())),
+    ("sha384", || Box::new(sha2::Sha384::new())),
+    ("sha512", || Box::new(sha2::Sha512::new())),
+    ("sha512_224", || Box::new(sha2::Sha512_224::new())),
+    ("sha512_256", || Box::new(sha2::Sha512_256::new()))
+];
+
+pub fn algorithms() -> impl Iterator {
+    ALGORITHMS.iter().map(|x| x.0)
 }
 
 pub mod sha2;

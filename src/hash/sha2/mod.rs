@@ -7,14 +7,14 @@
 //! [FIPS 180-4](https://csrc.nist.gov/pubs/fips/180-4/upd1/final).
 
 use core::marker::PhantomData;
-use core::mem::{size_of, transmute_copy};
+use core::mem::size_of;
 use core::num::Wrapping;
 use core::ops::Add;
 use core::ptr::{read_unaligned, write_unaligned};
+use core::slice;
 use num_traits::{AsPrimitive, PrimInt};
-use crate::array::Array;
-use crate::buffer::Buffer;
-use crate::hash::Hash;
+use crate::block::{Buffer, Blocks};
+//use crate::hash::Hash;
 
 type State<Word> = [Word; 8];
 
@@ -212,7 +212,7 @@ trait Sha2Core<Word, const BLOCK_SIZE: usize> {
     fn new(h: &State<Word>) -> Self;
     fn reset(&mut self, h: &State<Word>);
     fn update(&mut self, bytes: &[u8; BLOCK_SIZE]);
-    fn finalize(&mut self) -> State<Word>;
+    fn finalize<'a>(&'a mut self) -> &'a [u8];
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -239,8 +239,8 @@ where
     fn new(h: &State<Word>) -> Self {
         Self {
             h: *h,
-             _functions: PhantomData,
-             _constants: PhantomData
+            _functions: PhantomData,
+            _constants: PhantomData
         }
     }
 
@@ -314,16 +314,20 @@ where
         self.h[7] = (Wrapping(self.h[7]) + Wrapping(h)).0;
     }
 
-    fn finalize(&mut self) -> State<Word> {
-        let mut h = State::<Word>::default();
-        for i in 0.. 8 {
-            h[i] = Word::to_be(self.h[i]);
+    fn finalize<'a>(&'a mut self) -> &'a [u8] {
+        for i in 0..8 {
+            self.h[i] = Word::to_be(self.h[i]);
         }
-        h
+
+        let ptr: *const u8 = self.h.as_ptr().cast();
+        let length = size_of::<Word>() * 8;
+        unsafe {
+            slice::from_raw_parts(ptr, length)
+        }
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Sha2Variant<Word, Length, Core, Initializer,
     const BLOCK_SIZE: usize, const DIGEST_SIZE: usize>
 {
@@ -348,20 +352,24 @@ where
         Self {
             core: Core::new(&Initializer::H),
             length: Length::zero(),
-            buffer: Buffer::new(),
+            buffer: Buffer::default(),
             _word: PhantomData,
             _initializer: PhantomData
         }
+    }
+
+    fn block_size() -> usize {
+        BLOCK_SIZE
     }
 
     fn reset(&mut self) {
         self.core.reset(&Initializer::H);
     }
 
-    fn update(&mut self, bytes: &[u8]) {
-        self.length = self.length + bytes.len().as_();
-        for b in self.buffer.blocks(bytes) {
-            self.core.update(b)
+    fn update(&mut self, data: &[u8]) {
+        self.length = self.length + data.len().as_();
+        for block in Blocks::new(&mut self.buffer, data) {
+            self.core.update(block)
         }
     }
 
@@ -386,12 +394,10 @@ where
         self.update(&block[offset..]);
     }
 
-    fn finalize(&mut self) -> [u8; DIGEST_SIZE] {
+    fn finalize<'a>(&'a mut self) -> &'a [u8] {
         self.pad();
-        unsafe {
-            debug_assert!(size_of::<State<Word>>() >= DIGEST_SIZE);
-            transmute_copy(&self.core.finalize())
-        }
+        let digest = self.core.finalize();
+        &digest[..DIGEST_SIZE]
     }
 }
 
@@ -428,40 +434,34 @@ type Sha512_256Variant =
     Sha2Variant<u64, u128, Sha512Core, Sha512_256Initializer, 128, 32>;
 
 /// SHA-224 hash algorithm.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Sha224(Sha224Variant);
-impl_hash_for_newtype!{Sha224, Array<u8, 64>, Array<u8, 28>}
-impl_write_for_hash!{Sha224}
+impl_hash_newtype!{Sha224, Sha224Variant}
 
 /// SHA-256 hash algorithm.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Sha256(Sha256Variant);
-impl_hash_for_newtype!{Sha256, Array<u8, 64>, Array<u8, 32>}
-impl_write_for_hash!{Sha256}
+impl_hash_newtype!{Sha256, Sha256Variant}
 
 /// SHA-384 hash algorithm.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Sha384(Sha384Variant);
-impl_hash_for_newtype!{Sha384, Array<u8, 128>, Array<u8, 48>}
-impl_write_for_hash!{Sha384}
+impl_hash_newtype!{Sha384, Sha384Variant}
 
 /// SHA-512 hash algorithm.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Sha512(Sha512Variant);
-impl_hash_for_newtype!{Sha512, Array<u8, 128>, Array<u8, 64>}
-impl_write_for_hash!{Sha512}
+impl_hash_newtype!{Sha512, Sha512Variant}
 
 /// SHA-512/224 hash algorithm.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Sha512_224(Sha512_224Variant);
-impl_hash_for_newtype!{Sha512_224, Array<u8, 128>, Array<u8, 28>}
-impl_write_for_hash!{Sha512_224}
+impl_hash_newtype!{Sha512_224, Sha512_224Variant}
 
 /// SHA-512/256 hash algorithm.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Sha512_256(Sha512_256Variant);
-impl_hash_for_newtype!{Sha512_256, Array<u8, 128>, Array<u8, 32>}
-impl_write_for_hash!{Sha512_256}
+impl_hash_newtype!{Sha512_256, Sha512_256Variant}
 
 #[cfg(test)]
 mod test;

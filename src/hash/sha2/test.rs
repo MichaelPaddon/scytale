@@ -166,7 +166,8 @@ fn do_aft_tests<H: Hash>(tests: &Tests) -> Result<(), Box<dyn Error>> {
 
     for g in groups {
         for t in &g.tests {
-            let md = H::hash(&t.msg);
+            let mut hash = H::new_with_prefix(&t.msg);
+            let md = hash.finalize();
             assert_eq!(md.as_ref(), t.md);
         }
     }
@@ -192,10 +193,11 @@ fn do_mct_tests<H: Hash>(tests: &Tests) -> Result<(), Box<dyn Error>> {
                    let mut msg = a;
                    msg.extend(&b);
                    msg.extend(&c);
-                   let md = H::hash(&msg);
+                   let mut hash = H::new_with_prefix(&msg);
+                   let md = hash.finalize();
                    a = b;
                    b = c;
-                   c = md.as_ref().to_vec();
+                   c = md.to_vec();
                    c.resize(length, 0);
                }
                assert_eq!(c[..result.md.len()], result.md);
