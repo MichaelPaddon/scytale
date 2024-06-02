@@ -1,89 +1,78 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
+use patharg::{InputArg, OutputArg};
 use std::error::Error;
-use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write, copy, stdin, stdout};
+use std::io;
+use std::io::Write;
 use std::path::PathBuf;
-use scytale::hash::Hash;
-use scytale::hash::sha2::{
-    Sha224, Sha256, Sha384, Sha512, Sha512_224, Sha512_256
-};
+use scytale::hash;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
+    #[command(subcommand)]
+    command: Command
+}
+
+#[derive(Args)]
+struct InputOption {
     /// input file (defaults to stdin)
     #[arg(short, long)]
     input: Option<PathBuf>,
+}
 
+#[derive(Args)]
+struct OutputOption {
     /// output file (defaults to stdout)
     #[arg(short, long)]
     output: Option<PathBuf>,
-
-    #[command(subcommand)]
-    command: Option<Command>
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// compute a SHA2-224 digest
-    Sha224,
+    /// compute a hash
+    Hash {
+        #[command(flatten)]
+        input: InputOption,
 
-    /// compute a SHA2-256 digest
-    Sha256,
+        #[command(flatten)]
+        output: OutputOption,
 
-    /// compute a SHA2-384 digest
-    Sha384,
-
-    /// compute a SHA2-512 digest
-    Sha512,
-
-    /// compute a SHA2-512/224 digest
-    Sha512_224,
-
-    /// compute a SHA2-512/256 digest
-    Sha512_256,
+        /// name of hash algorithm
+        algorithm: Option<String>
+    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
     match cli.command {
-        Some(Command::Sha224) =>
-            do_hash::<Sha224>(cli.input, cli.output),
-        Some(Command::Sha256) =>
-            do_hash::<Sha256>(cli.input, cli.output),
-        Some(Command::Sha384) =>
-            do_hash::<Sha384>(cli.input, cli.output),
-        Some(Command::Sha512) =>
-            do_hash::<Sha512>(cli.input, cli.output),
-        Some(Command::Sha512_224) =>
-            do_hash::<Sha512_224>(cli.input, cli.output),
-        Some(Command::Sha512_256) =>
-            do_hash::<Sha512_256>(cli.input, cli.output),
-        None => Ok(())
+        Command::Hash{input, output, algorithm}
+            => hash_command(input.input, output.output, algorithm),
     }
 }
 
-fn do_hash<H: Hash + Write>(inpath: Option<PathBuf>, outpath: Option<PathBuf>)
-    -> Result<(), Box<dyn Error>>
-{
-    let mut input: BufReader<Box<dyn Read>> = BufReader::new(
-        match inpath {
-           Some(path) => Box::new(File::open(path)?),
-           None => Box::new(stdin())
+fn hash_command(
+    inpath: Option<PathBuf>,
+    outpath: Option<PathBuf>,
+    algorithm: Option<String>
+) -> Result<(), Box<dyn Error>> {
+    let input = inpath.map_or(InputArg::default(),
+        |x| InputArg::from_arg(x));
+    let output = outpath.map_or(OutputArg::default(),
+        |x| OutputArg::from_arg(x));
+
+    match algorithm {
+        Some(name) => {
+            let mut h = hash::from_string(&name)?;
+            let mut reader = input.open()?;
+            io::copy(&mut reader, &mut h)?;
+            let mut writer = output.create()?;
+            writeln!(&mut writer, "{}", hex::encode(h.finalize()))?;
+        },
+        None => {
+            for name in hash::algorithms() {
+                println!("{}", name)
+            }
         }
-    );
-
-    let mut output: BufWriter<Box<dyn Write>> = BufWriter::new(
-       match outpath {
-           Some(path) => Box::new(File::open(path)?),
-           None => Box::new(stdout())
-       }
-    );
-
-    let mut hash = H::new();
-    copy(&mut input, &mut hash)?;
-    let digest = hash.finalize();
-    writeln!(&mut output, "{}", hex::encode(digest.as_ref()))?;
-
+    };
     Ok(())
 }

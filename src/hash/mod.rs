@@ -1,7 +1,16 @@
 //! Cryptographic hashes.
 
+use std::io::Write;
+use derive_more::{Constructor, Display, Error};
+
+#[derive(Clone, Constructor, Debug, Display, Error)]
+#[display(fmt = "{}: unknown algorithm", name)]
+pub struct UnknownAlgorithmError {
+    name: String
+}
+
 /// A cryptographic hash algorithm.
-pub trait Hash {
+pub trait Hash: Write {
     /// Constructs a new hash algorithm instance.
     fn new() -> Self
     where
@@ -91,6 +100,8 @@ macro_rules! impl_hash_newtype {
     }
 }
 
+pub mod sha2;
+
 const ALGORITHMS: [(&str, fn() -> Box<dyn Hash>); 6] = [
     ("sha224", || Box::new(sha2::Sha224::new())),
     ("sha256", || Box::new(sha2::Sha256::new())),
@@ -100,8 +111,15 @@ const ALGORITHMS: [(&str, fn() -> Box<dyn Hash>); 6] = [
     ("sha512_256", || Box::new(sha2::Sha512_256::new()))
 ];
 
-pub fn algorithms() -> impl Iterator {
+pub fn algorithms() -> impl Iterator<Item = &'static str> {
     ALGORITHMS.iter().map(|x| x.0)
 }
 
-pub mod sha2;
+pub fn from_string(name: &str)
+    -> Result<Box<dyn Hash>, UnknownAlgorithmError>
+{
+    match ALGORITHMS.binary_search_by(|x| x.0.cmp(name)) {
+        Ok(i) => Ok(ALGORITHMS[i].1()),
+        _ => Err(UnknownAlgorithmError::new(name.to_string()))
+    }
+}
