@@ -1,4 +1,5 @@
-use clap::{Args, Parser, Subcommand};
+use base64::prelude::{Engine as _, BASE64_STANDARD};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use patharg::{InputArg, OutputArg};
 use std::error::Error;
 use std::io;
@@ -14,18 +15,50 @@ struct Cli {
     command: Command
 }
 
+#[derive(Clone, Default, ValueEnum)]
+enum Format {
+        /// a Base64 encoded string
+        Base64,
+
+        /// a hexadecimal encoded string
+        Hex,
+
+        /// raw bytes
+        #[default]
+        Raw
+}
+
 #[derive(Args)]
-struct InputOption {
+struct Input {
     /// input file (defaults to stdin)
     #[arg(short, long)]
     input: Option<PathBuf>,
 }
 
 #[derive(Args)]
-struct OutputOption {
+struct Output {
     /// output file (defaults to stdout)
     #[arg(short, long)]
     output: Option<PathBuf>,
+}
+
+#[derive(Args)]
+#[group(required = true, multiple = false)]
+struct Key {
+    /// key string
+    #[arg(long)]
+    key: Option<String>,
+
+    /// key input file
+    #[arg(long)]
+    key_input: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct KeyFormat {
+    /// key format
+    #[arg(long)]
+    key_format: Option<Format>,
 }
 
 #[derive(Subcommand)]
@@ -33,10 +66,10 @@ enum Command {
     /// compute a hash
     Hash {
         #[command(flatten)]
-        input: InputOption,
+        input: Input,
 
         #[command(flatten)]
-        output: OutputOption,
+        output: Output,
 
         /// name of hash algorithm
         algorithm: Option<String>
@@ -45,43 +78,30 @@ enum Command {
     /// compute a mac
     Mac {
         #[command(flatten)]
-        input: InputOption,
+        input: Input,
 
         #[command(flatten)]
-        output: OutputOption,
+        output: Output,
 
-        /// name of hash algorithm
-        #[clap(requires_all = ["key"])]
+        #[command(flatten)]
+        key: Key,
+
+        #[command(flatten)]
+        key_format: KeyFormat,
+
+        /// name of mac algorithm
         algorithm: Option<String>,
- 
-        /// name of hash algorithm
-        key: Option<String>
-    }
-}
-
-fn main() -> Result<(), Box<dyn Error>> {
-    let cli = Cli::parse();
-    match cli.command {
-        Command::Hash{input, output, algorithm}
-            => hash_command(input.input, output.output, algorithm),
-        Command::Mac{input, output, algorithm, key}
-            => mac_command(input.input, output.output, algorithm, key)
     }
 }
 
 fn hash_command(
-    inpath: Option<PathBuf>,
-    outpath: Option<PathBuf>,
+    input: InputArg,
+    output: OutputArg,
     algorithm: Option<String>
 ) -> Result<(), Box<dyn Error>> {
-    let input = inpath.map_or(InputArg::default(),
-        |x| InputArg::from_arg(x));
-    let output = outpath.map_or(OutputArg::default(),
-        |x| OutputArg::from_arg(x));
-
     match algorithm {
-        Some(name) => {
-            let mut h = hash::from_name(&name)?;
+        Some(algorithm) => {
+            let mut h = hash::from_name(&algorithm)?;
             let mut reader = input.open()?;
             io::copy(&mut reader, &mut h)?;
             let mut writer = output.create()?;
@@ -97,18 +117,14 @@ fn hash_command(
 }
 
 fn mac_command(
-    inpath: Option<PathBuf>,
-    outpath: Option<PathBuf>,
-    algorithm: Option<String>,
-    key: Option<String>
+    input: InputArg,
+    output: OutputArg,
+    key: &[u8],
+    algorithm: Option<String>
 ) -> Result<(), Box<dyn Error>> {
     match algorithm {
-        Some(name) => {
-            let input = inpath.map_or(InputArg::default(),
-                |x| InputArg::from_arg(x));
-            let output = outpath.map_or(OutputArg::default(),
-                |x| OutputArg::from_arg(x));
-            let mut m = mac::from_name(&name, key.unwrap().as_bytes())?;
+        Some(algorithm) => {
+            let mut m = mac::from_name(&algorithm, key)?;
             let mut reader = input.open()?;
             io::copy(&mut reader, &mut m)?;
             let mut writer = output.create()?;
@@ -121,4 +137,60 @@ fn mac_command(
         }
     };
     Ok(())
+}
+
+fn input_arg(path: Option<PathBuf>) -> InputArg {
+    path.map_or(InputArg::default(), |x| InputArg::from_arg(x))
+}
+
+fn output_arg(path: Option<PathBuf>) -> OutputArg {
+    path.map_or(OutputArg::default(), |x| OutputArg::from_arg(x))
+}
+
+fn decode(encoded: &[u8], format: Format) 
+    -> Result<Vec<u8>, Box<dyn Error>>
+{
+    let decoded = match format {
+        Format::Base64 => BASE64_STANDARD.decode(encoded)?,
+        Format::Hex => hex::decode(encoded)?,
+        Format::Raw => encoded.to_vec()
+    };
+    Ok(decoded)
+}
+
+fn make_key(key: &Key, key_format: &KeyFormat)
+    -> Result<Vec<u8>, Box<dyn Error>>
+{
+    let encoded = if let Some(ref string) = key.key {
+        string.clone()
+    }
+    else if let Some(ref path) = key.key_input {
+        let input = InputArg::from_arg(path);
+        input.read_to_string()?
+    }
+    else {
+        panic!();
+    };
+
+    let format = key_format.key_format.clone().unwrap_or(Format::default());
+    decode(encoded.as_bytes(), format)
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Hash{input, output, algorithm}
+            => hash_command(
+                input_arg(input.input),
+                output_arg(output.output),
+                algorithm
+            ),
+        Command::Mac{input, output, key, key_format, algorithm}
+            => mac_command(
+                input_arg(input.input),
+                output_arg(output.output),
+                &make_key(&key, &key_format)?,
+                algorithm
+            )
+    }
 }
