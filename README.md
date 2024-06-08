@@ -27,7 +27,7 @@ information.
 
 Scytale also provides a CLI.
 
-# Licence
+# License
 
 Scytale is licensed under the BSD+Patent License
 (SPDX short identifier: BSD-2-Clause-Patent).
