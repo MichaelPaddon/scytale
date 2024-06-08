@@ -42,8 +42,8 @@ const HASHES: [(&str, fn() -> Box<dyn Hash>); 6] = [
     ("sha256", || Box::new(sha2::Sha256::new())),
     ("sha384", || Box::new(sha2::Sha384::new())),
     ("sha512", || Box::new(sha2::Sha512::new())),
-    ("sha512_224", || Box::new(sha2::Sha512_224::new())),
-    ("sha512_256", || Box::new(sha2::Sha512_256::new()))
+    ("sha512/224", || Box::new(sha2::Sha512_224::new())),
+    ("sha512/256", || Box::new(sha2::Sha512_256::new()))
 ];
 
 /// Returns a iterator over the names of the supported hash algorithms.
