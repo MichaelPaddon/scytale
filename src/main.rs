@@ -15,7 +15,7 @@ struct Cli {
     command: Command
 }
 
-#[derive(Clone, Default, ValueEnum)]
+#[derive(Clone, ValueEnum)]
 enum Format {
         /// a Base64 encoded string
         Base64,
@@ -24,7 +24,6 @@ enum Format {
         Hex,
 
         /// raw bytes
-        #[default]
         Raw
 }
 
@@ -32,14 +31,18 @@ enum Format {
 struct Input {
     /// input file (defaults to stdin)
     #[arg(short, long)]
-    input: Option<PathBuf>,
+    #[arg(value_parser = clap::value_parser!(InputArg))]
+    #[arg(default_value_t)]
+    input: InputArg,
 }
 
 #[derive(Args)]
 struct Output {
     /// output file (defaults to stdout)
     #[arg(short, long)]
-    output: Option<PathBuf>,
+    #[arg(value_parser = clap::value_parser!(OutputArg))]
+    #[arg(default_value_t)]
+    output: OutputArg,
 }
 
 #[derive(Args)]
@@ -49,21 +52,23 @@ struct Key {
     #[arg(long)]
     key: Option<String>,
 
-    /// key input file
+    /// key file
     #[arg(long)]
-    key_input: Option<PathBuf>,
+    #[arg(value_parser = clap::value_parser!(InputArg))]
+    key_file: Option<InputArg>,
 }
 
 #[derive(Args)]
 struct KeyFormat {
     /// key format
     #[arg(long)]
-    key_format: Option<Format>,
+    #[arg(default_value = "raw")]
+    key_format: Format,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// compute a hash
+    /// compute a hash function
     Hash {
         #[command(flatten)]
         input: Input,
@@ -71,11 +76,11 @@ enum Command {
         #[command(flatten)]
         output: Output,
 
-        /// name of hash algorithm
+        /// name of hash function
         algorithm: Option<String>
     },
 
-    /// compute a mac
+    /// compute a MAC function
     Mac {
         #[command(flatten)]
         input: Input,
@@ -89,9 +94,20 @@ enum Command {
         #[command(flatten)]
         key_format: KeyFormat,
 
-        /// name of mac algorithm
+        /// name of MAC function
         algorithm: Option<String>,
     }
+}
+
+fn decode(encoded: &[u8], format: &Format) 
+    -> Result<Vec<u8>, Box<dyn Error>>
+{
+    let decoded = match format {
+        Format::Base64 => BASE64_STANDARD.decode(encoded)?,
+        Format::Hex => hex::decode(encoded)?,
+        Format::Raw => encoded.to_vec()
+    };
+    Ok(decoded)
 }
 
 fn hash_command(
@@ -139,41 +155,20 @@ fn mac_command(
     Ok(())
 }
 
-fn input_arg(path: Option<PathBuf>) -> InputArg {
-    path.map_or(InputArg::default(), |x| InputArg::from_arg(x))
-}
-
-fn output_arg(path: Option<PathBuf>) -> OutputArg {
-    path.map_or(OutputArg::default(), |x| OutputArg::from_arg(x))
-}
-
-fn decode(encoded: &[u8], format: Format) 
-    -> Result<Vec<u8>, Box<dyn Error>>
-{
-    let decoded = match format {
-        Format::Base64 => BASE64_STANDARD.decode(encoded)?,
-        Format::Hex => hex::decode(encoded)?,
-        Format::Raw => encoded.to_vec()
-    };
-    Ok(decoded)
-}
-
 fn make_key(key: &Key, key_format: &KeyFormat)
     -> Result<Vec<u8>, Box<dyn Error>>
 {
     let encoded = if let Some(ref string) = key.key {
         string.clone()
     }
-    else if let Some(ref path) = key.key_input {
-        let input = InputArg::from_arg(path);
+    else if let Some(ref input) = key.key_file {
         input.read_to_string()?
     }
     else {
         panic!();
     };
 
-    let format = key_format.key_format.clone().unwrap_or(Format::default());
-    decode(encoded.as_bytes(), format)
+    decode(encoded.as_bytes(), &key_format.key_format)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -181,14 +176,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     match cli.command {
         Command::Hash{input, output, algorithm}
             => hash_command(
-                input_arg(input.input),
-                output_arg(output.output),
+                input.input,
+                output.output,
                 algorithm
             ),
         Command::Mac{input, output, key, key_format, algorithm}
             => mac_command(
-                input_arg(input.input),
-                output_arg(output.output),
+                input.input,
+                output.output,
                 &make_key(&key, &key_format)?,
                 algorithm
             )
