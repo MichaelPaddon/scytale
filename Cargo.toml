@@ -15,8 +15,10 @@ exclude = ["/resources"]
 [dependencies]
 arrayvec = "0.7.4"
 clap = { version = "4.5.4", features = ["derive"] }
+delegate = "0.12.0"
 derive_more = "0.99.17"
 hex = "0.4.3"
+lazy_static = "1.4.0"
 num-traits = "0.2.18"
 patharg = "0.4.0"
 smallvec = { version = "1.13.2", features = ["const_new"] }

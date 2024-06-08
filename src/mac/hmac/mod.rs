@@ -7,93 +7,95 @@
 //! [RFC 2104](https://www.ietf.org/rfc/rfc2104.txt) and
 //! [FIPS-198](https://nvlpubs.nist.gov/nistpubs/fips/nist.fips.198-1.pdf).
 
+use core::cmp::min;
 use smallvec::SmallVec;
+use std::io::{Result, Write};
 use crate::hash::Hash;
 use crate::mac::Mac;
 
-const MAX_BLOCK_SIZE: usize = 64;
+type Key = SmallVec<[u8; 64]>;
 
 #[derive(Clone, Debug)]
 pub struct Hmac<H: Hash> {
-    initial_state: (H, H),
-    inner_hash: H,
-    outer_hash: H
+    inner_key: Key,
+    outer_key: Key,
+    hash: H
 }
 
-impl<H> Hmac<H>
-where
-    H: Clone + Hash,
-{
-    fn keyed_hashes(key: &[u8]) -> (H, H) {
+impl<H: Hash> Hmac<H> {
+    fn generate_keys(key: &[u8]) -> (Key, Key) {
         let block_size = H::block_size();
-        let mut block = SmallVec::<[u8; MAX_BLOCK_SIZE]>::new();
-        if key.len() <= block_size {
-            block.extend_from_slice(key);
-            for _ in key.len()..block_size {
-                block.push(0);
-            }
+
+        let mut inner_key = if key.len() <= block_size {
+            Key::from_slice(key)
         }
         else {
             let mut hash = H::new_with_prefix(key);
             let digest = hash.finalize();
-            block.extend_from_slice(digest);
-            for _ in digest.len()..block_size {
-                block.push(0);
-            }
+            let n = min(digest.len(), block_size);
+            Key::from_slice(&digest[..n])
         };
+        for _ in inner_key.len()..block_size {
+            inner_key.push(0);
+        }
 
-        let mut inner_key = block.clone();
-        let mut outer_key = block;
-        for i in 0..inner_key.len() {
+        let mut outer_key = inner_key.clone();
+
+        for i in 0..block_size {
             inner_key[i] ^= 0x36;
             outer_key[i] ^= 0x5c;
         }
 
-       let inner_hash = H::new_with_prefix(&inner_key);
-       let outer_hash = H::new_with_prefix(&outer_key);
-
-       (inner_hash, outer_hash)
+       (inner_key, outer_key)
     }
 }
 
-impl<H> Mac for Hmac<H>
-where
-    H: Clone + Hash,
-{
-    fn new(key: &[u8]) -> Self
-    where
-        Self: Sized
-    {
-        let initial_state = Self::keyed_hashes(key.as_ref());
-        let inner_hash = initial_state.0.clone();
-        let outer_hash = initial_state.1.clone();
+impl<H: Hash> Mac for Hmac<H> {
+    fn new(key: &[u8]) -> Self {
+        let (inner_key, outer_key) = Self::generate_keys(key);
+        let hash = H::new_with_prefix(&inner_key);
         Self {
-            initial_state,
-            inner_hash,
-            outer_hash
+            inner_key,
+            outer_key,
+            hash
         }
     }
 
-    fn rekey(&mut self, key: &[u8])
-    {
-        self.initial_state = Self::keyed_hashes(key.as_ref());
-        self.inner_hash = self.initial_state.0.clone();
-        self.outer_hash = self.initial_state.1.clone();
-    }
-
+    #[inline(always)]
     fn reset(&mut self) {
-        self.inner_hash = self.initial_state.0.clone();
-        self.outer_hash = self.initial_state.1.clone();
+        self.hash.reset();
+        self.hash.update(&self.inner_key);
     }
 
+    fn rekey(&mut self, key: &[u8]) {
+        (self.inner_key, self.outer_key) = Self::generate_keys(key);
+        self.reset();
+    }
+
+    #[inline(always)]
     fn update(&mut self, data: &[u8]) {
-        self.inner_hash.update(data);
+        self.hash.update(data);
     }
 
     fn finalize<'a>(&'a mut self) -> &'a [u8] {
-        let digest = self.inner_hash.finalize();
-        self.outer_hash.update(digest);
-        self.outer_hash.finalize()
+        let digest = Key::from_slice(self.hash.finalize());
+        self.hash.reset();
+        self.hash.update(&self.outer_key);
+        self.hash.update(&digest);
+        self.hash.finalize()
+    }
+}
+
+impl<H: Hash> Write for Hmac<H> {
+    #[inline]
+    fn write(&mut self, data: &[u8]) -> Result<usize> {
+        self.update(data);
+        Ok(data.len())
+    }
+
+    #[inline]
+    fn flush(&mut self) -> Result<()> {
+        Ok(())
     }
 }
 
