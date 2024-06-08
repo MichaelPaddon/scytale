@@ -9,7 +9,7 @@
 
 use core::cmp::min;
 use smallvec::SmallVec;
-use std::io::{Result, Write};
+use std::io::Write;
 use crate::hash::Hash;
 use crate::mac::Mac;
 
@@ -88,13 +88,13 @@ impl<H: Hash> Mac for Hmac<H> {
 
 impl<H: Hash> Write for Hmac<H> {
     #[inline]
-    fn write(&mut self, data: &[u8]) -> Result<usize> {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         self.update(data);
         Ok(data.len())
     }
 
     #[inline]
-    fn flush(&mut self) -> Result<()> {
+    fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
 }
