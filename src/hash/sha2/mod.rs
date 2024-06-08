@@ -15,7 +15,7 @@ use core::slice;
 use delegate::delegate;
 use num_traits::{AsPrimitive, PrimInt};
 use std::io::Write;
-use crate::block::{Buffer, Blocks};
+use crate::util::block::{Buffer, Blocks};
 use crate::hash::Hash;
 
 type State<Word> = [Word; 8];
