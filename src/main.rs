@@ -4,7 +4,6 @@ use patharg::{InputArg, OutputArg};
 use std::error::Error;
 use std::io;
 use std::io::Write;
-use std::path::PathBuf;
 use scytale::hash;
 use scytale::mac;
 
