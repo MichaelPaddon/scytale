@@ -1,13 +1,8 @@
 //! Cryptographic hashes.
 
 use std::io::Write;
-use derive_more::{Constructor, Display, Error};
 
-#[derive(Clone, Constructor, Debug, Display, Error)]
-#[display(fmt = "{}: unknown algorithm", name)]
-pub struct UnknownAlgorithmError {
-    name: String
-}
+use crate::UnknownAlgorithmError;
 
 /// A cryptographic hash algorithm.
 pub trait Hash: Write {

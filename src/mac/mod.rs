@@ -9,7 +9,7 @@
 use std::io::Write;
 use crate::hash::sha2::{Sha224, Sha256, Sha384, Sha512, Sha512_224, Sha512_256};
 use crate::mac::hmac::Hmac;
-use crate::hash::UnknownAlgorithmError;
+use crate::UnknownAlgorithmError;
 
 /// A Message Authentication Code algorithm.
 pub trait Mac: Write {
