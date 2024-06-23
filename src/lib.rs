@@ -9,6 +9,11 @@ pub struct UnknownAlgorithmError {
     name: String
 }
 
+#[derive(Clone, Constructor, Debug, Display, Error)]
+#[display(fmt = "invalid key length")]
+pub struct InvalidKeyLengthError;
+
+pub mod cipher;
 pub mod hash;
 pub mod mac;
 pub(crate) mod util;
