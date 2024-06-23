@@ -24,7 +24,7 @@ hybrid-array = { version = "0.2.0-RC.8" }
 num-traits = "0.2.18"
 patharg = "0.4.0"
 smallvec = { version = "1.13.2", features = ["const_new"] }
-zeroize = { versions = "1.8.1", features = ["zeroize_derive"] }
+#zeroize = { versions = "1.8.1", features = ["zeroize_derive"] }
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["html_reports"] }
