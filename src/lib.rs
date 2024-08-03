@@ -14,6 +14,10 @@ pub struct UnknownAlgorithmError {
 pub struct InvalidKeyLengthError;
 
 pub mod cipher;
+pub mod error;
 pub mod hash;
 pub mod mac;
 pub(crate) mod util;
+
+#[cfg(test)]
+pub mod test;

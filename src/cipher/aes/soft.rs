@@ -392,7 +392,7 @@ fn inv_mix_columns(s: &mut State) {
     }
 }
 
-pub struct Aes<NK, NR>
+struct Aes<NK, NR>
 where
    NR: Unsigned + Add<U1>,
    <NR as Add<U1>>::Output: Mul<U4> + ArraySize,
@@ -457,26 +457,6 @@ where
     }
 }
 
-impl<NR, NK> TryFrom<&[u8]> for Aes<NK, NR>
-where
-   NK: Unsigned,
-   NR: Unsigned + Add<U1>,
-   NR: IsGreaterOrEqual<NK, Output = True>,
-   <NR as Add<U1>>::Output: ArraySize + Mul<U4>,
-   <<NR as Add<U1>>::Output as Mul<U4>>::Output: ArraySize,
-{
-    type Error = InvalidKeyLengthError;
-
-    fn try_from(key: &[u8]) -> Result<Self, Self::Error> {
-        Ok(
-            Self {
-                w: Self::key_expansion(key)?,
-                _nk: PhantomData,
-            }
-        )
-    }
-}
-
 impl<NR, NK> BlockCipher for Aes<NK, NR>
 where
    NK: Unsigned,
@@ -487,6 +467,7 @@ where
 {
     type BlockSize = U16;
 
+    #[inline(always)]
     fn new(key: impl AsRef<[u8]>) -> Result<Self, InvalidKeyLengthError> {
         let aes = Self {
             w: Self::key_expansion(key.as_ref())?,
@@ -495,6 +476,7 @@ where
         Ok(aes)
     }
 
+    #[inline(always)]
     fn encrypt(&self, block: &Array<u8,Self::BlockSize>)
         -> Array<u8,Self::BlockSize>
     {
@@ -518,6 +500,7 @@ where
         }
     }
 
+    #[inline(always)]
     fn decrypt(&self, block: &Array<u8,Self::BlockSize>)
         -> Array<u8,Self::BlockSize>
     {
@@ -542,6 +525,6 @@ where
     }
 }
 
-pub type Aes128 = Aes<U4, U10>;
-pub type Aes192 = Aes<U6, U12>;
-pub type Aes256 = Aes<U8, U14>;
+wrap_block_cipher!{pub, Aes128, U16, Aes<U4, U10>}
+wrap_block_cipher!{pub, Aes192, U16, Aes<U6, U12>}
+wrap_block_cipher!{pub, Aes256, U16, Aes<U8, U14>}
