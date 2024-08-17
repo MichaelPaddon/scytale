@@ -1,27 +1,40 @@
-use typenum::Unsigned;
+use hybrid_array::{Array, ArraySize};
 use crate::error::Error;
 
 pub trait KeySize {
-    type KeySize: Unsigned;
+    type KeySize: ArraySize;
 }
 
 pub trait BlockSize {
-    type BlockSize: Unsigned;
+    type BlockSize: ArraySize;
 }
 
-pub trait BlockCipher: KeySize + BlockSize {
+pub trait NewFromKey: KeySize {
     fn new(key: &[u8]) -> Result<Self, Error> where Self: Sized;
-
-    fn new_encrypt_only(key: &[u8]) -> Result<Self, Error> where Self: Sized {
-        Self::new(key)
-    }
-
-    fn new_decrypt_only(key: &[u8]) -> Result<Self, Error> where Self: Sized {
-        Self::new(key)
-    }
-
-    fn encrypt(&self, plaintext: &[u8], ciphertext: &mut [u8]);
-    fn decrypt(&self, ciphertext: &[u8], plaintext: &mut [u8]);
 }
+
+pub trait Rekey: KeySize {
+    fn rekey(&mut self, key: &[u8]) -> Result<(), Error>;
+}
+
+pub trait EncryptBlocks: BlockSize {
+    fn encrypt_blocks(
+        &self,
+        plaintext: &[Array<u8, Self::BlockSize>],
+        ciphertext: &mut [Array<u8, Self::BlockSize>]
+    );
+}
+
+pub trait DecryptBlocks: BlockSize {
+    fn decrypt_blocks(
+        &self,
+        ciphertext: &[Array<u8, Self::BlockSize>],
+        plaintext: &mut [Array<u8, Self::BlockSize>]
+    );
+}
+
+pub trait EncryptingBlockCipher: NewFromKey + Rekey + EncryptBlocks {}
+pub trait DecryptingBlockCipher: NewFromKey + Rekey + DecryptBlocks {}
+pub trait BlockCipher: EncryptingBlockCipher + DecryptingBlockCipher {}
 
 pub mod aes;

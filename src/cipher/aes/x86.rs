@@ -1,7 +1,12 @@
 //! Hardware accelerated implementation of AES for Intel x86 and x86_64.
 
-use core::arch::asm;
+#[cfg(target_arch = "x86")]
+use core::arch::x86::*;
+
+#[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
+
+use core::arch::asm;
 use core::mem::{self, MaybeUninit};
 use seq_macro::seq;
 use typenum::U16;

@@ -14,6 +14,7 @@ pub struct UnknownAlgorithmError {
 pub struct InvalidKeyLengthError;
 
 pub mod cipher;
+pub mod convert;
 pub mod error;
 pub mod hash;
 pub mod mac;

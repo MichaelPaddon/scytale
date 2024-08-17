@@ -19,14 +19,16 @@ pub fn deserialize_hex_string_opt<'de, D: Deserializer<'de>>(deserializer: D)
 pub fn read_tests<T: for<'de> Deserialize<'de>>(name: &str)
     -> Result<Option<T>, Box<dyn Error>>
 {
-    let path: PathBuf = [
+    let mut path: PathBuf = [
         env!("CARGO_MANIFEST_DIR"),
         "resources",
-        "acvp",
-        name,
-        "internalProjection.json"
+        "acvp"
     ].into_iter().collect();
+
     if path.exists() {
+        path.push(name);
+        path.push("internalProjection.json");
+
         let file = File::open(path)?;
         let tests = serde_json::from_reader(file)?;
         Ok(Some(tests))

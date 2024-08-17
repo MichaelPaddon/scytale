@@ -1,26 +1,30 @@
 //! AES
 //! https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.197-upd1.pdf
 
-use core::marker::PhantomData;
-use core::mem;
-use core::ops::{Add, Mul};
+use core::iter;
+use core::mem::{self, MaybeUninit};
 use core::ptr;
-use hybrid_array::{Array, ArraySize};
-use hybrid_array::sizes::*;
-use hybrid_array::typenum::{IsGreaterOrEqual, True, Unsigned, op};
-
-use crate::cipher::BlockCipher;
-
-use crate::InvalidKeyLengthError;
+use hybrid_array::Array;
+use seq_macro::seq;
+use typenum::U;
+use crate::cipher::{
+    KeySize,
+    BlockSize,
+    NewFromKey,
+    Rekey,
+    EncryptBlocks,
+    DecryptBlocks,
+    EncryptingBlockCipher,
+    DecryptingBlockCipher,
+    BlockCipher
+};
+use crate::error::Error;
 
 type Word = u32;
-
-// number of words in a block
-const NB: usize = 4;
-
+const WORD_SIZE: usize = mem::size_of::<Word>();
 
 // encryption/decryption state
-type State = [[u8; 4]; NB];
+type State<const NB: usize> = [[u8; WORD_SIZE]; NB];
 
 const SBOX: [u8; 256] = [
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5,
@@ -302,12 +306,6 @@ const GF_MUL_14: [u8; 256] = [
     0xa7, 0xa9, 0xbb, 0xb5, 0x9f, 0x91, 0x83, 0x8d
 ];
 
-const RCON: [Word; 10] = [
-    0x01000000, 0x02000000, 0x04000000, 0x08000000,
-    0x10000000, 0x20000000, 0x40000000, 0x80000000,
-    0x1b000000, 0x36000000
-];
-
 #[inline(always)]
 fn rot_word(x: Word) -> Word {
     x.rotate_left(8)
@@ -323,45 +321,25 @@ fn sub_word(x: Word) -> Word {
 }
 
 #[inline(always)]
-fn sub_bytes(s: &mut State) {
+fn sub_bytes<const NB: usize>(s: &mut State<NB>) {
     for c in 0..NB {
-        for r in 0..4 {
+        for r in 0..WORD_SIZE {
             s[c][r] = SBOX[s[c][r] as usize];
         }
     }
 }
 
 #[inline(always)]
-fn inv_sub_bytes(s: &mut State) {
+fn inv_sub_bytes<const NB: usize>(s: &mut State<NB>) {
     for c in 0..NB {
-        for r in 0..4 {
+        for r in 0..WORD_SIZE {
             s[c][r] = INV_SBOX[s[c][r] as usize];
         }
     }
 }
 
 #[inline(always)]
-fn shift_rows(s: &mut State) {
-    (s[0][1], s[1][1], s[2][1], s[3][1]) =
-        (s[1][1], s[2][1], s[3][1], s[0][1]);
-    (s[0][2], s[1][2], s[2][2], s[3][2]) =
-        (s[2][2], s[3][2], s[0][2], s[1][2]);
-    (s[0][3], s[1][3], s[2][3], s[3][3]) =
-        (s[3][3], s[0][3], s[1][3], s[2][3]);
-}
-
-#[inline(always)]
-fn inv_shift_rows(s: &mut State) {
-    (s[0][1], s[1][1], s[2][1], s[3][1]) =
-        (s[3][1], s[0][1], s[1][1], s[2][1]);
-    (s[0][2], s[1][2], s[2][2], s[3][2]) =
-        (s[2][2], s[3][2], s[0][2], s[1][2]);
-    (s[0][3], s[1][3], s[2][3], s[3][3]) =
-        (s[1][3], s[2][3], s[3][3], s[0][3]);
-}
-
-#[inline(always)]
-fn mix_columns(s: &mut State) {
+fn mix_columns<const NB: usize>(s: &mut State<NB>) {
     for c in 0..NB {
         (s[c][0], s[c][1], s[c][2], s[c][3]) = (
             GF_MUL_2[s[c][0] as usize] ^ GF_MUL_3[s[c][1] as usize]
@@ -377,7 +355,7 @@ fn mix_columns(s: &mut State) {
 }
 
 #[inline(always)]
-fn inv_mix_columns(s: &mut State) {
+fn inv_mix_columns<const NB: usize>(s: &mut State<NB>) {
     for c in 0..NB {
         (s[c][0], s[c][1], s[c][2], s[c][3]) = (
             GF_MUL_14[s[c][0] as usize] ^ GF_MUL_11[s[c][1] as usize]
@@ -392,139 +370,228 @@ fn inv_mix_columns(s: &mut State) {
     }
 }
 
-struct Aes<NK, NR>
-where
-   NR: Unsigned + Add<U1>,
-   <NR as Add<U1>>::Output: Mul<U4> + ArraySize,
-   <<NR as Add<U1>>::Output as Mul<U4>>::Output: ArraySize,
-{
-    w: Array<Word, op!((NR + U1) * U4)>,
-    _nk: PhantomData<NK>,
+#[inline(always)]
+fn add_round_key<const NB: usize>(s: &mut State<NB>, w: &[Word; NB]) {
+    for c in 0..NB {
+        let x = w[c].to_be_bytes();
+        s[c][0] ^= x[0];
+        s[c][1] ^= x[1];
+        s[c][2] ^= x[2];
+        s[c][3] ^= x[3];
+    }
 }
 
-impl<NR, NK> Aes<NK, NR>
-where
-   NK: Unsigned,
-   NR: Unsigned + Add<U1>,
-   NR: IsGreaterOrEqual<NK, Output = True>,
-   <NR as Add<U1>>::Output: ArraySize + Mul<U4>,
-   <<NR as Add<U1>>::Output as Mul<U4>>::Output: ArraySize,
-{
-    fn key_expansion(key: &[u8])
-        -> Result<Array<Word, op!((NR + U1) * U4)>, InvalidKeyLengthError>
-    {
-        if key.len() != NK::USIZE * mem::size_of::<Word>() {
-            return Err(InvalidKeyLengthError);
-        }
-
-        let mut w: Array<Word, op!((NR + U1) * U4)> = Array::default();
-        let p: *const Word = key.as_ptr().cast();
-        for i in 0..NK::USIZE {
-            w[i] = Word::from_be(unsafe {
-                // SAFETY: we know that there are NK words of key
-                ptr::read_unaligned(p.add(i))
+macro_rules! shift_rows {
+    ($s: expr, $nb: literal) => {
+        {
+            seq!(N in 0..$nb {
+                ( #( $s[N][1], )* ) = ( #( $s[(N + 1) % WORD_SIZE][1], )* );
+                ( #( $s[N][2], )* ) = ( #( $s[(N + 2) % WORD_SIZE][2], )* );
+                ( #( $s[N][3], )* ) = ( #( $s[(N + 3) % WORD_SIZE][3], )* );
             });
         }
-
-        for i in NK::USIZE..<op!((NR + U1) * U4)>::USIZE {
-            let t = if i % NK::USIZE == 0 {
-                sub_word(rot_word(w[i - 1])) ^ RCON[i / NK::USIZE - 1]
-            }
-            else if NK::USIZE > 6 && i % NK::USIZE == 4 {
-                sub_word(w[i - 1])
-            }
-            else {
-                w[i - 1]
-            };
-
-            w[i] = w[i - NK::USIZE] ^ t;
-        }
-
-        Ok(w)
     }
+}
 
-    #[inline(always)]
-    fn add_round_key(&self, s: &mut State, round: usize) {
-        let mut i = round << 2;
-        for c in 0..NB {
-            let x = self.w[i].to_be_bytes();
-            s[c][0] ^= x[0];
-            s[c][1] ^= x[1];
-            s[c][2] ^= x[2];
-            s[c][3] ^= x[3];
-            i += 1;
+macro_rules! inv_shift_rows {
+    ($s: expr, $nb: literal) => {
+        {
+            seq!(N in 0..$nb {
+                ( #( $s[N][1], )* ) = ( #( $s[(N + 3) % WORD_SIZE][1], )* );
+                ( #( $s[N][2], )* ) = ( #( $s[(N + 2) % WORD_SIZE][2], )* );
+                ( #( $s[N][3], )* ) = ( #( $s[(N + 1) % WORD_SIZE][3], )* );
+            });
         }
     }
 }
 
-impl<NR, NK> BlockCipher for Aes<NK, NR>
-where
-   NK: Unsigned,
-   NR: Unsigned + Add<U1>,
-   NR: IsGreaterOrEqual<NK, Output = True>,
-   <NR as Add<U1>>::Output: ArraySize + Mul<U4>,
-   <<NR as Add<U1>>::Output as Mul<U4>>::Output: ArraySize,
-{
-    type BlockSize = U16;
-
-    #[inline(always)]
-    fn new(key: impl AsRef<[u8]>) -> Result<Self, InvalidKeyLengthError> {
-        let aes = Self {
-            w: Self::key_expansion(key.as_ref())?,
-            _nk: PhantomData,
-        };
-        Ok(aes)
-    }
-
-    #[inline(always)]
-    fn encrypt(&self, block: &Array<u8,Self::BlockSize>)
-        -> Array<u8,Self::BlockSize>
-    {
-        let mut state: State = unsafe {
-            mem::transmute(*block)
-        };
-
-        self.add_round_key(&mut state, 0);
-        for round in 1..NR::USIZE {
-            sub_bytes(&mut state);
-            shift_rows(&mut state);
-            mix_columns(&mut state);
-            self.add_round_key(&mut state, round);
+macro_rules! aes {
+    (
+        $name: ident,
+        $nb: literal,
+        $nk: literal,
+        $nr: literal
+    ) => {
+        pub struct $name {
+            w: [Word; $nb * ($nr + 1)]
         }
-        sub_bytes(&mut state);
-        shift_rows(&mut state);
-        self.add_round_key(&mut state, NR::USIZE);
 
-        unsafe {
-            mem::transmute(state)
+        impl $name {
+            fn expand_key(key: &Array<u8, <Self as KeySize>::KeySize>)
+                -> [Word; $nb * ($nr + 1)]
+            {
+                let mut w = [MaybeUninit::<Word>::uninit(); $nb * ($nr + 1)];
+                let k: *const Word = key.as_ptr().cast();
+                for i in 0..$nk {
+                    w[i].write(unsafe{
+                        Word::from_be(ptr::read_unaligned(k.add(i)))
+                    });
+                }
+
+                let mut rc: Word = 0x8d;
+                let mut rcon = iter::from_fn(move || {
+                    rc = if rc < 0x80 {
+                        rc << 1
+                    }
+                    else {
+                        rc << 1 ^ 0x11b
+                    };
+                    Some(rc << 24)
+                });
+
+                for i in $nk..($nb * ($nr + 1)) {
+                    let mut t = unsafe {
+                        w[i - 1].assume_init_read()
+                    };
+                    if i % $nk == 0 {
+                        t = sub_word(rot_word(t)) ^ rcon.next().unwrap();
+                    }
+                    else if $nk > 6 && i % $nk == WORD_SIZE {
+                        t = sub_word(t);
+                    }
+                    w[i].write(unsafe{
+                        w[i - $nk].assume_init_read() ^ t
+                    });
+                }
+
+                unsafe {
+                    mem::transmute(w)
+                }
+            }
         }
-    }
 
-    #[inline(always)]
-    fn decrypt(&self, block: &Array<u8,Self::BlockSize>)
-        -> Array<u8,Self::BlockSize>
-    {
-        let mut state: State = unsafe {
-            mem::transmute(*block)
-        };
-
-        self.add_round_key(&mut state, NR::USIZE);
-        for round in (1..NR::USIZE).rev() {
-            inv_shift_rows(&mut state);
-            inv_sub_bytes(&mut state);
-            self.add_round_key(&mut state, round);
-            inv_mix_columns(&mut state);
+        impl BlockSize for $name {
+            type BlockSize = U<{ $nb * WORD_SIZE }>;
         }
-        inv_shift_rows(&mut state);
-        inv_sub_bytes(&mut state);
-        self.add_round_key(&mut state, 0);
 
-        unsafe {
-            mem::transmute(state)
+        impl KeySize for $name {
+            type KeySize = U<{ $nk * WORD_SIZE }>;
         }
+
+        impl NewFromKey for $name {
+            fn new(key: &[u8]) -> Result<Self, Error> {
+                let key = key.try_into().map_err(|_| Error::InvalidKeyLength)?;
+                Ok(Self {
+                    w: Self::expand_key(key)
+                })
+            }
+        }
+
+        impl Rekey for $name {
+            fn rekey(&mut self, key: &[u8]) -> Result<(), Error> {
+                let key = key.try_into().map_err(|_| Error::InvalidKeyLength)?;
+                self.w = Self::expand_key(key);
+                Ok(())
+            }
+        }
+
+        impl EncryptBlocks for $name {
+            fn encrypt_blocks(
+                &self,
+                plaintext: &[Array<u8, Self::BlockSize>],
+                ciphertext: &mut [Array<u8, Self::BlockSize>]
+            ) {
+                assert_eq!(plaintext.len(), ciphertext.len());
+
+                let plaintext: &[State<$nb>] = unsafe {
+                    &*(plaintext
+                        as *const [Array<u8, Self::BlockSize>]
+                        as *const [State<$nb>])
+                };
+
+                let ciphertext: &mut [State<$nb>] = unsafe {
+                    &mut *(ciphertext
+                        as *mut [Array<u8, Self::BlockSize>]
+                        as *mut [State<$nb>])
+                };
+
+                let w: &[[Word; $nb]; $nr + 1] = unsafe {
+                    &*self.w.as_ptr().cast()
+                };
+
+                for (src, dst) in iter::zip(plaintext, ciphertext) {
+                    *dst = *src;
+                    add_round_key(dst, &w[0]);
+                    for r in 1..$nr {
+                        sub_bytes(dst);
+                        shift_rows!(dst, $nb);
+                        mix_columns(dst);
+                        add_round_key(dst, &w[r]);
+                    }
+                    sub_bytes(dst);
+                    shift_rows!(dst, $nb);
+                    add_round_key(dst, &w[$nr]);
+                }
+            }
+        }
+
+        impl DecryptBlocks for $name {
+            fn decrypt_blocks(
+                &self,
+                ciphertext: &[Array<u8, Self::BlockSize>],
+                plaintext: &mut [Array<u8, Self::BlockSize>]
+            ) {
+                assert_eq!(ciphertext.len(), plaintext.len());
+
+                let ciphertext: &[State<$nb>] = unsafe {
+                    &*(ciphertext
+                        as *const [Array<u8, Self::BlockSize>]
+                        as *const [State<$nb>])
+                };
+
+                let plaintext: &mut [State<$nb>] = unsafe {
+                    &mut *(plaintext
+                        as *mut [Array<u8, Self::BlockSize>]
+                        as *mut [State<$nb>])
+                };
+
+                let w: &[[Word; $nb]; $nr + 1] = unsafe {
+                    &*self.w.as_ptr().cast()
+                };
+
+                for (src, dst) in iter::zip(ciphertext, plaintext) {
+                    *dst = *src;
+                    add_round_key(dst, &w[$nr]);
+                    for r in (1..$nr).rev() {
+                        inv_shift_rows!(dst, $nb);
+                        inv_sub_bytes(dst);
+                        add_round_key(dst, &w[r]);
+                        inv_mix_columns(dst);
+                    }
+                    inv_shift_rows!(dst, $nb);
+                    inv_sub_bytes(dst);
+                    add_round_key(dst, &w[0]);
+                }
+            }
+        }
+
+        impl EncryptingBlockCipher for $name {}
+        impl DecryptingBlockCipher for $name {}
+        impl BlockCipher for $name {}
     }
 }
 
-wrap_block_cipher!{pub, Aes128, U16, Aes<U4, U10>}
-wrap_block_cipher!{pub, Aes192, U16, Aes<U6, U12>}
-wrap_block_cipher!{pub, Aes256, U16, Aes<U8, U14>}
+aes!{Aes128, 4, 4, 10}
+aes!{Aes192, 4, 6, 12}
+aes!{Aes256, 4, 8, 14}
+
+#[cfg(test)]
+mod test {
+    use crate::test::acvp::block;
+    use super::{Aes128, Aes192, Aes256};
+
+    #[test]
+    fn test_aes128() {
+        block::test::<Aes128>("aes_ecb");
+    }
+
+    #[test]
+    fn test_aes192() {
+        block::test::<Aes192>("aes_ecb");
+    }
+
+    #[test]
+    fn test_aes256() {
+        block::test::<Aes256>("aes_ecb");
+    }
+}
