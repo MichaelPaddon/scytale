@@ -1,5 +1,4 @@
-//! AES
-//! https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.197-upd1.pdf
+//! Software implementation of AES.
 
 use core::iter;
 use core::mem::{self, MaybeUninit};
@@ -10,7 +9,7 @@ use typenum::U;
 use crate::cipher::{
     KeySize,
     BlockSize,
-    NewFromKey,
+    NewUsingKey,
     Rekey,
     EncryptBlocks,
     DecryptBlocks,
@@ -468,7 +467,7 @@ macro_rules! aes {
             type KeySize = U<{ $nk * WORD_SIZE }>;
         }
 
-        impl NewFromKey for $name {
+        impl NewUsingKey for $name {
             fn new(key: &[u8]) -> Result<Self, Error> {
                 let key = key.try_into().map_err(|_| Error::InvalidKeyLength)?;
                 Ok(Self {

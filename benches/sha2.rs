@@ -2,7 +2,7 @@ use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use scytale::hash::sha2::{Sha256, Sha512};
 use scytale::hash::Hash;
 
-fn sha256_bench(c: &mut Criterion) {
+pub fn sha256_bench(c: &mut Criterion) {
     let data = [0u8; 4096];
     let mut group = c.benchmark_group("sha256");
     group.throughput(Throughput::Elements(data.len() as u64));
@@ -11,7 +11,7 @@ fn sha256_bench(c: &mut Criterion) {
     });
 }
 
-fn sha512_bench(c: &mut Criterion) {
+pub fn sha512_bench(c: &mut Criterion) {
     let data = [0u8; 4096];
     let mut group = c.benchmark_group("sha512");
     group.throughput(Throughput::Elements(data.len() as u64));
@@ -19,6 +19,3 @@ fn sha512_bench(c: &mut Criterion) {
         b.iter(|| {Sha512::new_with_prefix(d).finalize();})
     });
 }
-
-criterion_group!(benches, sha256_bench, sha512_bench);
-criterion_main!(benches);

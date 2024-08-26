@@ -1,4 +1,9 @@
-//! Hardware accelerated implementation of AES for Intel x86 and x86_64.
+//! Hardware accelerated of AES for Intel x86 and x86_64.
+//!
+//! This implementation uses the
+//! [AES-NI instructions](https://www.intel.com/content/dam/doc/white-paper/advanced-encryption-standard-new-instructions-set-paper.pdf),
+//! if supported.
+//! Otherwise, it falls back to a software only implementation.
 
 #[cfg(target_arch = "x86")]
 use core::arch::x86::*;
@@ -6,18 +11,37 @@ use core::arch::x86::*;
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
 
-use core::arch::asm;
 use core::mem::{self, MaybeUninit};
+use hybrid_array::Array;
+use once_cell::race::OnceBool;
+use paste::paste;
 use seq_macro::seq;
-use typenum::U16;
-use crate::cipher::{BlockCipher, BlockSize, KeySize};
+use typenum::U;
+use crate::cipher::{
+    KeySize,
+    BlockSize,
+    NewUsingKey,
+    Rekey,
+    EncryptBlocks,
+    DecryptBlocks,
+    EncryptingBlockCipher,
+    DecryptingBlockCipher,
+    BlockCipher
+};
+use crate::cipher::aes::soft;
 use crate::error::Error;
 
-fn expand_key128(key: &[u8]) -> Result<[__m128i; 11], Error> {
-    if key.len() != 16 {
-        return Err(Error::InvalidKeyLength);
-    }
+cpufeatures::new!{cpu_aes, "aes", "sse2"}
 
+fn is_aes_detected() -> bool {
+    static DETECTED: OnceBool = OnceBool::new();
+    DETECTED.get_or_init(|| {
+        let token: cpu_aes::InitToken = cpu_aes::init();
+        token.get()
+    })
+}
+
+fn expand_key128(key: &[u8; 16]) -> [__m128i; 11] {
     unsafe {
         let assist = |a, b| {
             let b = _mm_shuffle_epi32 (b, 0xff);
@@ -54,15 +78,11 @@ fn expand_key128(key: &[u8]) -> Result<[__m128i; 11], Error> {
         let t = assist(t, _mm_aeskeygenassist_si128(t, 0x36));
         w[10].write(t);
 
-        Ok(mem::transmute(w))
+        mem::transmute(w)
     }
 }
 
-fn expand_key192(key: &[u8]) -> Result<[__m128i; 13], Error> {
-    if key.len() != 24 {
-        return Err(Error::InvalidKeyLength);
-    }
-
+fn expand_key192(key: &[u8; 24]) -> [__m128i; 13] {
     unsafe fn shuffle<const MASK: i32>(a: __m128i, b: __m128i) -> __m128i {
         let a = _mm_castsi128_pd(a);
         let b = _mm_castsi128_pd(b);
@@ -118,16 +138,11 @@ fn expand_key192(key: &[u8]) -> Result<[__m128i; 13], Error> {
         let (a, _) = assist(a, _mm_aeskeygenassist_si128(b, 0x80), b);
         w[12].write(a);
 
-        Ok(mem::transmute(w))
+        mem::transmute(w)
     }
 }
 
-// https://www.intel.com/content/dam/doc/white-paper/advanced-encryption-standard-new-instructions-set-paper.pdf
-fn expand_key256(key: &[u8]) -> Result<[__m128i; 15], Error> {
-    if key.len() != 32 {
-        return Err(Error::InvalidKeyLength);
-    }
-
+fn expand_key256(key: &[u8; 32]) -> [__m128i; 15] {
     unsafe {
         let assist1 = |a, b| {
             let b = _mm_shuffle_epi32(b, 0xff);
@@ -186,7 +201,7 @@ fn expand_key256(key: &[u8]) -> Result<[__m128i; 15], Error> {
         let a = assist1(a, _mm_aeskeygenassist_si128(b, 0x40));
         w[14].write(a);
 
-        Ok(mem::transmute(w))
+        mem::transmute(w)
     }
 }
 
@@ -206,9 +221,10 @@ fn invert_key<const N: usize>(w: &[__m128i; N]) -> [__m128i; N]
     }
 }
 
+
 macro_rules! crypt {
-    ($name: ident, $op: literal, $n: literal) => {
-        #[inline(always)]
+    ($name: ident, $op: ident, $n: literal) => {
+        #[target_feature(enable = "aes")]
         unsafe fn $name<const ROUNDS: usize>(
             mut key: *const __m128i,
             mut src: *const __m128i,
@@ -226,20 +242,12 @@ macro_rules! crypt {
 
             for _ in 1..ROUNDS {
                 seq!(N in 0..$n {
-                    asm!(
-                        concat!($op, " {0}, {1}"),
-                        inout(xmm_reg) r~N,
-                        in(xmm_reg) *key
-                    );
+                    r~N = paste!([<_mm_ $op _si128>])(r~N, *key);
                 });
                 key = key.add(1);
             }
             seq!(N in 0..$n {
-                asm!(
-                    concat!($op, "last {0}, {1}"),
-                    inout(xmm_reg) r~N,
-                    in(xmm_reg) *key
-                );
+                r~N = paste!([<_mm_ $op last _si128>])(r~N, *key);
             });
 
             seq!(N in 0..$n {
@@ -252,73 +260,41 @@ macro_rules! crypt {
     }
 }
 
-crypt!{encrypt8, "aesenc", 8}
-crypt!{encrypt7, "aesenc", 7}
-crypt!{encrypt6, "aesenc", 6}
-crypt!{encrypt5, "aesenc", 5}
-crypt!{encrypt4, "aesenc", 4}
-crypt!{encrypt3, "aesenc", 3}
-crypt!{encrypt2, "aesenc", 2}
-crypt!{encrypt1, "aesenc", 1}
+crypt!{encrypt8, aesenc, 8}
+crypt!{encrypt7, aesenc, 7}
+crypt!{encrypt6, aesenc, 6}
+crypt!{encrypt5, aesenc, 5}
+crypt!{encrypt4, aesenc, 4}
+crypt!{encrypt3, aesenc, 3}
+crypt!{encrypt2, aesenc, 2}
+crypt!{encrypt1, aesenc, 1}
 
-crypt!{decrypt8, "aesdec", 8}
-crypt!{decrypt7, "aesdec", 7}
-crypt!{decrypt6, "aesdec", 6}
-crypt!{decrypt5, "aesdec", 5}
-crypt!{decrypt4, "aesdec", 4}
-crypt!{decrypt3, "aesdec", 3}
-crypt!{decrypt2, "aesdec", 2}
-crypt!{decrypt1, "aesdec", 1}
+crypt!{decrypt8, aesdec, 8}
+crypt!{decrypt7, aesdec, 7}
+crypt!{decrypt6, aesdec, 6}
+crypt!{decrypt5, aesdec, 5}
+crypt!{decrypt4, aesdec, 4}
+crypt!{decrypt3, aesdec, 3}
+crypt!{decrypt2, aesdec, 2}
+crypt!{decrypt1, aesdec, 1}
 
-use hybrid_array::typenum::generic_const_mappings::U;
-
-macro_rules! define_aes {
+macro_rules! def_encrypt_blocks {
     (
         $name: ident,
-        $key_size: literal,
-        $rounds: literal,
-        $expand_key: ident
+        $rounds: literal
     ) => {
-        pub struct $name {
-            w: [__m128i; $rounds + 1],
-            dw: Option<[__m128i; $rounds + 1]>
-        }
-
-        impl KeySize for $name {
-            type KeySize = U<$key_size>;
-        }
-
-        impl BlockSize for $name {
-            type BlockSize = U16;
-        }
-
-        impl BlockCipher for $name {
-            fn new(key: &[u8]) -> Result<Self, Error> where Self: Sized {
-                let w = $expand_key(key)?;
-                let dw = invert_key(&w);
-                Ok(Self {
-                    w,
-                    dw:  Some(dw)
-                })
-            }
-
-            fn new_encrypt_only(key: &[u8])
-                -> Result<Self, Error> where Self: Sized
-            {
-                Ok(Self {
-                    w: $expand_key(key)?,
-                    dw: None
-                })
-            }
-
-            fn encrypt(&self, plaintext: &[u8], ciphertext: &mut [u8]) {
-                assert_eq!(plaintext.len() & 0xf, 0);
+        impl EncryptBlocks for $name {
+            fn encrypt_blocks(
+                &self,
+                plaintext: &[Array<u8, Self::BlockSize>],
+                ciphertext: &mut [Array<u8, Self::BlockSize>]
+            ) {
                 assert_eq!(plaintext.len(), ciphertext.len());
 
                 let w = self.w.as_ptr();
                 let mut src: *const __m128i = plaintext.as_ptr().cast();
                 let mut dst: *mut __m128i = ciphertext.as_mut_ptr().cast();
-                let mut blocks = plaintext.len() >> 4;
+                let mut blocks = plaintext.len();
                 unsafe {
                     while blocks >= 8 {
                         (src, dst) = encrypt8::<$rounds>(w, src, dst);
@@ -336,15 +312,27 @@ macro_rules! define_aes {
                     };
                 }
             }
+        }
+    }
+}
 
-            fn decrypt(&self, ciphertext: &[u8], plaintext: &mut [u8]) {
-                assert_eq!(ciphertext.len() & 0xf, 0);
+macro_rules! def_decrypt_blocks {
+    (
+        $name: ident,
+        $rounds: literal
+    ) => {
+        impl DecryptBlocks for $name {
+            fn decrypt_blocks(
+                &self,
+                ciphertext: &[Array<u8, Self::BlockSize>],
+                plaintext: &mut [Array<u8, Self::BlockSize>]
+            ) {
                 assert_eq!(ciphertext.len(), plaintext.len());
 
-                let dw = self.dw.unwrap().as_ptr();
+                let dw = self.dw.as_ptr();
                 let mut src: *const __m128i = ciphertext.as_ptr().cast();
                 let mut dst: *mut __m128i = plaintext.as_mut_ptr().cast();
-                let mut blocks = plaintext.len() >> 4;
+                let mut blocks = plaintext.len();
                 unsafe {
                     while blocks >= 8 {
                         (src, dst) = decrypt8::<$rounds>(dw, src, dst);
@@ -366,26 +354,158 @@ macro_rules! define_aes {
     }
 }
 
-define_aes!{Aes128, 16, 10, expand_key128}
-define_aes!{Aes192, 24, 12, expand_key192}
-define_aes!{Aes256, 32, 14, expand_key256}
+macro_rules! def_aes_encrypt {
+    (
+        $name: ident,
+        $key_size: literal,
+        $rounds: literal,
+        $expand_key: ident
+    ) => {
+        pub struct $name {
+            w: [__m128i; $rounds + 1],
+        }
+
+        impl KeySize for $name {
+            type KeySize = U<$key_size>;
+        }
+
+        impl BlockSize for $name {
+            type BlockSize = U<16>;
+        }
+
+        impl NewUsingKey for $name {
+            fn new(key: &[u8]) -> Result<Self, Error> {
+                let key: &[u8; $key_size] = key.try_into()
+                    .map_err(|_| Error::InvalidKeyLength)?;
+                let w = $expand_key(key);
+                Ok(Self { w })
+            }
+        }
+
+        impl Rekey for $name {
+            fn rekey(&mut self, key: &[u8]) -> Result<(), Error> {
+                let key: &[u8; $key_size] = key.try_into()
+                    .map_err(|_| Error::InvalidKeyLength)?;
+                self.w = $expand_key(key);
+                Ok(())
+            }
+        }
+
+        def_encrypt_blocks!{$name, $rounds}
+
+        impl EncryptingBlockCipher for $name {}
+    }
+}
+
+macro_rules! def_aes {
+    (
+        $name: ident,
+        $key_size: literal,
+        $rounds: literal,
+        $expand_key: ident
+    ) => {
+        pub struct $name {
+            w: [__m128i; $rounds + 1],
+            dw: [__m128i; $rounds + 1],
+        }
+
+        impl KeySize for $name {
+            type KeySize = U<$key_size>;
+        }
+
+        impl BlockSize for $name {
+            type BlockSize = U<16>;
+        }
+
+        impl NewUsingKey for $name {
+            fn new(key: &[u8]) -> Result<Self, Error> {
+                let key: &[u8; $key_size] = key.try_into()
+                    .map_err(|_| Error::InvalidKeyLength)?;
+                let w = $expand_key(key);
+                let dw = invert_key(&w);
+                Ok(Self { w, dw })
+            }
+        }
+
+        impl Rekey for $name {
+            fn rekey(&mut self, key: &[u8]) -> Result<(), Error> {
+                let key: &[u8; $key_size] = key.try_into()
+                    .map_err(|_| Error::InvalidKeyLength)?;
+                self.w = $expand_key(key);
+                self.dw = invert_key(&self.w);
+                Ok(())
+            }
+        }
+
+        def_encrypt_blocks!{$name, $rounds}
+        def_decrypt_blocks!{$name, $rounds}
+
+        impl EncryptingBlockCipher for $name {}
+        impl DecryptingBlockCipher for $name {}
+        impl BlockCipher for $name {}
+    }
+}
+
+def_aes_encrypt!{AcceleratedAes128Encrypt, 16, 10, expand_key128}
+def_aes_encrypt!{AcceleratedAes192Encrypt, 24, 12, expand_key192}
+def_aes_encrypt!{AcceleratedAes256Encrypt, 32, 14, expand_key256}
+def_aes!{AcceleratedAes128, 16, 10, expand_key128}
+def_aes!{AcceleratedAes192, 24, 12, expand_key192}
+def_aes!{AcceleratedAes256, 32, 14, expand_key256}
+
+define_encrypting_block_cipher_enum!{
+    pub, Aes128Encrypt,
+    if is_aes_detected() => Hw(AcceleratedAes128Encrypt),
+    Sw(soft::Aes128)
+}
+
+define_encrypting_block_cipher_enum!{
+    pub, Aes192Encrypt,
+    if is_aes_detected() => Hw(AcceleratedAes192Encrypt),
+    Sw(soft::Aes192)
+}
+
+define_encrypting_block_cipher_enum!{
+    pub, Aes256Encrypt,
+    if is_aes_detected() => Hw(AcceleratedAes256Encrypt),
+    Sw(soft::Aes256)
+}
+
+define_block_cipher_enum!{
+    pub, Aes128,
+    if is_aes_detected() => Hw(AcceleratedAes128),
+    Sw(soft::Aes128)
+}
+
+define_block_cipher_enum!{
+    pub, Aes192,
+    if is_aes_detected() => Hw(AcceleratedAes192),
+    Sw(soft::Aes192)
+}
+
+define_block_cipher_enum!{
+    pub, Aes256,
+    if is_aes_detected() => Hw(AcceleratedAes256),
+    Sw(soft::Aes256)
+}
 
 #[cfg(test)]
 mod test {
     use crate::test::acvp::block;
+    use super::{Aes128, Aes192, Aes256};
 
     #[test]
-    pub fn test_aes128(){
-        block::test::<super::Aes128>("aes_ecb").unwrap();
+    fn test_aes128() {
+        block::test::<Aes128>("aes_ecb");
     }
 
     #[test]
-    pub fn test_aes192(){
-        block::test::<super::Aes192>("aes_ecb").unwrap();
+    fn test_aes192() {
+        block::test::<Aes192>("aes_ecb");
     }
 
     #[test]
-    pub fn test_aes256(){
-        block::test::<super::Aes256>("aes_ecb").unwrap();
+    fn test_aes256() {
+        block::test::<Aes256>("aes_ecb");
     }
 }
