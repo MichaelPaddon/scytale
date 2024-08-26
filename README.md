@@ -11,7 +11,12 @@ Scytale is in early development.
 
 # Supported Algorithms
 
-Cryptographic hash algorithms:
+Block ciphers:
+- AES-128
+- AES-192
+- AES-256
+
+Cryptographic hashes:
 - SHA2-224
 - SHA2-256
 - SHA2-384
