@@ -305,6 +305,19 @@ const GF_MUL_14: [u8; 256] = [
     0xa7, 0xa9, 0xbb, 0xb5, 0x9f, 0x91, 0x83, 0x8d
 ];
 
+fn rcon() -> impl Iterator<Item = Word> {
+    let mut rc: Word = 0x8d;
+    iter::from_fn(move || {
+        rc = if rc < 0x80 {
+           rc << 1
+        }
+        else {
+            rc << 1 ^ 0x11b
+        };
+        Some(rc << 24)
+    })
+}
+
 #[inline(always)]
 fn rot_word(x: Word) -> Word {
     x.rotate_left(8)
@@ -427,23 +440,13 @@ macro_rules! aes {
                     });
                 }
 
-                let mut rc: Word = 0x8d;
-                let mut rcon = iter::from_fn(move || {
-                    rc = if rc < 0x80 {
-                        rc << 1
-                    }
-                    else {
-                        rc << 1 ^ 0x11b
-                    };
-                    Some(rc << 24)
-                });
-
+                let mut r = rcon();
                 for i in $nk..($nb * ($nr + 1)) {
                     let mut t = unsafe {
                         w[i - 1].assume_init_read()
                     };
                     if i % $nk == 0 {
-                        t = sub_word(rot_word(t)) ^ rcon.next().unwrap();
+                        t = sub_word(rot_word(t)) ^ r.next().unwrap();
                     }
                     else if $nk > 6 && i % $nk == WORD_SIZE {
                         t = sub_word(t);
