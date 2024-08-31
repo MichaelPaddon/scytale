@@ -3,6 +3,7 @@
 
 use cfg_if::cfg_if;
 
+pub mod fast;
 pub mod soft;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
