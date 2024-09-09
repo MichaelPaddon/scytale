@@ -28,7 +28,7 @@ pub trait Rekey: KeySize {
 /// A trait for types that encrypt blocks.
 pub trait EncryptBlocks: BlockSize {
     fn encrypt_blocks(
-        &self,
+        &mut self,
         plaintext: &[Array<u8, Self::BlockSize>],
         ciphertext: &mut [Array<u8, Self::BlockSize>]
     );
@@ -37,7 +37,7 @@ pub trait EncryptBlocks: BlockSize {
 /// A trait for types that decrypt blocks.
 pub trait DecryptBlocks: BlockSize {
     fn decrypt_blocks(
-        &self,
+        &mut self,
         ciphertext: &[Array<u8, Self::BlockSize>],
         plaintext: &mut [Array<u8, Self::BlockSize>]
     );

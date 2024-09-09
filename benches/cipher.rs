@@ -10,7 +10,7 @@ fn block_cipher_encrypt_bench<C: EncryptingBlockCipher>(
     c: &mut Criterion
 ) {
     let key = Array::<u8, C::KeySize>::from_fn(|_| 0);
-    let cipher = C::new(&key).unwrap();
+    let mut cipher = C::new(&key).unwrap();
     let pt = vec![0u8; length];
     let mut ct = vec![0u8; length];
     let mut group = c.benchmark_group(group);
@@ -35,4 +35,7 @@ pub fn cipher_bench(c: &mut Criterion) {
     block_cipher_encrypt_bench::<aes::soft::Aes128>("aes128_soft", 4096, c);
     block_cipher_encrypt_bench::<aes::soft::Aes192>("aes192_soft", 4096, c);
     block_cipher_encrypt_bench::<aes::soft::Aes256>("aes256_soft", 4096, c);
+    block_cipher_encrypt_bench::<aes::fast::Aes128>("aes128_fast", 4096, c);
+    block_cipher_encrypt_bench::<aes::fast::Aes192>("aes192_fast", 4096, c);
+    block_cipher_encrypt_bench::<aes::fast::Aes256>("aes256_fast", 4096, c);
 }

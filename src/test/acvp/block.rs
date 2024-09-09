@@ -87,7 +87,7 @@ struct MctResult {
 
 fn perform_aft_encryption<C: EncryptingBlockCipher>(group: &AftGroup) {
     for test in &group.tests {
-        let cipher = C::new(&test.key).unwrap();
+        let mut cipher = C::new(&test.key).unwrap();
         let mut ct = vec![0u8; test.pt.len()];
         cipher.encrypt_blocks(
             test.pt.as_slice().as_blocks().0,
@@ -99,7 +99,7 @@ fn perform_aft_encryption<C: EncryptingBlockCipher>(group: &AftGroup) {
 
 fn perform_aft_decryption<C: DecryptingBlockCipher>(group: &AftGroup) {
     for test in &group.tests {
-        let cipher = C::new(&test.key).unwrap();
+        let mut cipher = C::new(&test.key).unwrap();
         let mut pt = vec![0u8; test.pt.len()];
         cipher.decrypt_blocks(
             test.ct.as_slice().as_blocks().0,

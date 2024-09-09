@@ -14,7 +14,10 @@ use crate::cipher::{
     NewUsingKey,
     Rekey,
     EncryptBlocks,
-    DecryptBlocks
+    DecryptBlocks,
+    EncryptingBlockCipher,
+    DecryptingBlockCipher,
+    BlockCipher
 };
 
 type Word = u32;
@@ -598,7 +601,7 @@ const RCON: [Word; 10] = [
 ];
 
 
-struct Aes<NB: ArraySize, NK: ArraySize, NR: ArraySize>
+pub struct Aes<NB: ArraySize, NK: ArraySize, NR: ArraySize>
 where
     NR: Add<U1>,
     NB: Mul<Sum<NR, U1>>,
@@ -769,7 +772,7 @@ where
     Prod<NB, WORD_SIZE>: ArraySize,
 {
     fn encrypt_blocks(
-        &self,
+        &mut self,
         plaintext: &[Array<u8, Self::BlockSize>],
         ciphertext: &mut [Array<u8, Self::BlockSize>]
     ) {
@@ -790,7 +793,6 @@ where
             for i in 0..NB::USIZE {
                 state[i] ^= self.w[i];
             }
-            println!("s0 {:0x?}", state);
 
             let mut i = NB::USIZE;
             for r in 1..NR::USIZE {
@@ -807,9 +809,9 @@ where
                 state = unsafe {
                     t.assume_init()
                 };
-                println!("s{} {:0x?}", r, state);
             }
 
+            /*
             let mut t: Array<MaybeUninit<Word>, NB> = Array::uninit();
             for j in 0..NB::USIZE {
                 let x =  (SBOX[(state[j] >> 24 & 0xff) as usize] as Word) << 24
@@ -817,6 +819,19 @@ where
                     | (SBOX[(state[(j + 2) % NB::USIZE] >> 8 & 0xff) as usize] as Word) << 8
                     | (SBOX[(state[(j + 3) % NB::USIZE] & 0xff) as usize]) as Word;
                 t[j].write(self.w[i] ^ x);
+                i += 1;
+            }
+            state = unsafe { t.assume_init()
+            };
+            */
+
+            let mut t: Array<MaybeUninit<Word>, NB> = Array::uninit();
+            for j in 0..NB::USIZE {
+                t[j].write(self.w[i]
+                    ^ (TE2[(state[j] >> 24) as usize] & 0xff000000)
+                    ^ (TE3[(state[(j + 1) % NB::USIZE] >> 16 & 0xff) as usize] & 0x00ff0000)
+                    ^ (TE0[(state[(j + 2) % NB::USIZE] >> 8 & 0xff) as usize] & 0x0000ff00)
+                    ^ (TE1[(state[(j + 3) % NB::USIZE] & 0xff) as usize] & 0x000000ff));
                 i += 1;
             }
             state = unsafe {
@@ -833,16 +848,131 @@ where
     }
 }
 
+impl<NB: ArraySize, NK: ArraySize, NR: ArraySize> DecryptBlocks
+    for  Aes<NB, NK, NR>
+where
+    NR: Add<U1>,
+    NB: Mul<Sum<NR, U1>>,
+    Prod<NB, Sum<NR, U1>>: ArraySize + Sub<U1>,
+    NB: Mul<WORD_SIZE>,
+    Prod<NB, WORD_SIZE>: ArraySize,
+    Diff<Prod<NB, Sum<NR, U1>>, U1>: ArraySize,
+{
+    fn decrypt_blocks(
+        &mut self,
+        ciphertext: &[Array<u8, Self::BlockSize>],
+        plaintext: &mut [Array<u8, Self::BlockSize>]
+    ) {
+        assert_eq!(ciphertext.len(), plaintext.len());
+
+        let dw = self.dw.get_or_insert_with(|| Self::invert_key(&self.w));
+        for (ct, pt) in iter::zip(ciphertext, plaintext) {
+            let mut state: Array<MaybeUninit<Word>, NB> = Array::uninit();
+            let p: *const Word = ct.as_ptr().cast();
+            for i in 0..NB::USIZE {
+                state[i].write(unsafe {
+                    Word::from_be(ptr::read_unaligned(p.add(i)))
+                });
+            }
+            let mut state = unsafe {
+                state.assume_init()
+            };
+
+            for i in 0..NB::USIZE {
+                state[i] ^= dw[i];
+            }
+
+            let mut i = NB::USIZE;
+            for _ in 1..NR::USIZE {
+                let mut t: Array<MaybeUninit<Word>, NB> = Array::uninit();
+                for j in 0..NB::USIZE {
+                    t[j].write(dw[i]
+                        ^ TD0[(state[j] >> 24 & 0xff) as usize]
+                        ^ TD1[(state[(j + 3) % NB::USIZE] >> 16 & 0xff) as usize]
+                        ^ TD2[(state[(j + 2) % NB::USIZE] >> 8 & 0xff) as usize]
+                        ^ TD3[(state[(j + 1) % NB::USIZE] & 0xff) as usize]
+                    );
+                    i += 1;
+                }
+                state = unsafe {
+                    t.assume_init()
+                };
+            }
+
+            let mut t: Array<MaybeUninit<Word>, NB> = Array::uninit();
+            for j in 0..NB::USIZE {
+                t[j].write(dw[i]
+                    ^ ((TD4[(state[j] >> 24) as usize] as Word) << 24)
+                    ^ ((TD4[(state[(j + 3) % NB::USIZE] >> 16 & 0xff) as usize] as Word) << 16)
+                    ^ ((TD4[(state[(j + 2) % NB::USIZE] >> 8 & 0xff) as usize] as Word) << 8)
+                    ^ (TD4[(state[(j + 1) % NB::USIZE] & 0xff) as usize] as Word));
+                i += 1;
+            }
+            state = unsafe {
+                t.assume_init()
+            };
+
+            let p: *mut Word = pt.as_mut_ptr().cast();
+            for i in 0..NB::USIZE {
+                unsafe {
+                    ptr::write_unaligned(p.add(i), state[i].to_be());
+                }
+            }
+        }
+    }
+}
+
+impl<NB: ArraySize, NK: ArraySize, NR: ArraySize> EncryptingBlockCipher
+    for  Aes<NB, NK, NR>
+where
+    NR: Add<U1>,
+    NB: Mul<Sum<NR, U1>>,
+    Prod<NB, Sum<NR, U1>>: ArraySize + Sub<U1>,
+    NB: Mul<WORD_SIZE>,
+    Prod<NB, WORD_SIZE>: ArraySize,
+    Diff<Prod<NB, Sum<NR, U1>>, U1>: ArraySize,
+    NK: Mul<WORD_SIZE>,
+    Prod<NK, WORD_SIZE>: ArraySize,
+{}
+
+impl<NB: ArraySize, NK: ArraySize, NR: ArraySize> DecryptingBlockCipher
+    for  Aes<NB, NK, NR>
+where
+    NR: Add<U1>,
+    NB: Mul<Sum<NR, U1>>,
+    Prod<NB, Sum<NR, U1>>: ArraySize + Sub<U1>,
+    NB: Mul<WORD_SIZE>,
+    Prod<NB, WORD_SIZE>: ArraySize,
+    Diff<Prod<NB, Sum<NR, U1>>, U1>: ArraySize,
+    NK: Mul<WORD_SIZE>,
+    Prod<NK, WORD_SIZE>: ArraySize,
+{}
+
+impl<NB: ArraySize, NK: ArraySize, NR: ArraySize> BlockCipher
+    for  Aes<NB, NK, NR>
+where
+    NR: Add<U1>,
+    NB: Mul<Sum<NR, U1>>,
+    Prod<NB, Sum<NR, U1>>: ArraySize + Sub<U1>,
+    NB: Mul<WORD_SIZE>,
+    Prod<NB, WORD_SIZE>: ArraySize,
+    Diff<Prod<NB, Sum<NR, U1>>, U1>: ArraySize,
+    NK: Mul<WORD_SIZE>,
+    Prod<NK, WORD_SIZE>: ArraySize,
+{}
+
+pub type Aes128 = Aes<U4, U4, U10>;
+pub type Aes192 = Aes<U4, U6, U12>;
+pub type Aes256 = Aes<U4, U8, U14>;
+
 #[test]
 fn mwp(){
     use crate::cipher::NewUsingKey;
     use crate::cipher::EncryptBlocks;
 
     let key = [0u8; 16];
-    let x = Aes::<U4, U4, U10>::new(&key).unwrap();
-    let y = super::soft::Aes128::new(&key).unwrap();
-    println!("w {:08x?}", x.w.0);
-    println!("w {:08x?}", y.w);
+    let mut x = Aes::<U4, U4, U10>::new(&key).unwrap();
+    let mut y = super::soft::Aes128::new(&key).unwrap();
     assert_eq!(x.w, y.w);
     let pt: [Array<u8, U16>; 1] = [Array([0u8; 16])];
     let mut ct1: [Array<u8, U16>; 1] = [Array([0u8; 16])];
@@ -850,6 +980,8 @@ fn mwp(){
     x.encrypt_blocks(&pt, &mut ct1);
     y.encrypt_blocks(&pt, &mut ct2);
     assert_eq!(ct1, ct2);
+    x.decrypt_blocks(&ct1, &mut ct2);
+    assert_eq!(ct2, pt);
 
     let key = [0xffu8; 16];
     let x = Aes::<U4, U4, U10>::expand_key(&key).unwrap();

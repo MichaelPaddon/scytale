@@ -489,7 +489,7 @@ macro_rules! aes {
 
         impl EncryptBlocks for $name {
             fn encrypt_blocks(
-                &self,
+                &mut self,
                 plaintext: &[Array<u8, Self::BlockSize>],
                 ciphertext: &mut [Array<u8, Self::BlockSize>]
             ) {
@@ -529,7 +529,7 @@ macro_rules! aes {
 
         impl DecryptBlocks for $name {
             fn decrypt_blocks(
-                &self,
+                &mut self,
                 ciphertext: &[Array<u8, Self::BlockSize>],
                 plaintext: &mut [Array<u8, Self::BlockSize>]
             ) {
