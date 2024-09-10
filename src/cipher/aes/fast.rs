@@ -686,14 +686,17 @@ where
             ^ TD3[(TE1[(x & 0xff) as usize] & 0xff) as usize]
         };
 
-        dw[0].write(w[<op!(NB * (NR + U1) - U1)>::USIZE]);
-        for (i, j) in iter::zip(
-            1..(<op!(NB * (NR + U1) - U1)>::USIZE),
-            (1..<op!(NB * (NR + U1) - U1)>::USIZE ).rev()
-        ) {
-            dw[i].write(inv_mix_columns(w[j]));
+        for i in (0..<op!(NB * (NR + U1))>::USIZE).step_by(NB::USIZE) {
+            let j = <op!(NB * (NR + U1))>::USIZE - NB::USIZE - i;
+            for k in 0..NB::USIZE {
+                if i > 0 && i < <op!(NB * (NR + U1))>::USIZE - NB::USIZE {
+                    dw[i + k].write(inv_mix_columns(w[j + k]));
+                }
+                else {
+                    dw[i + k].write(w[j + k]);
+                }
+            }
         }
-        dw[<op!(NB * (NR + U1) - U1)>::USIZE].write(w[0]);
 
         unsafe {
             dw.assume_init()
@@ -877,13 +880,15 @@ where
             let mut state = unsafe {
                 state.assume_init()
             };
+            println!("** fast in {:08x?}", state);
 
             for i in 0..NB::USIZE {
                 state[i] ^= dw[i];
             }
+            println!("** fast 0 {:08x?}", state);
 
             let mut i = NB::USIZE;
-            for _ in 1..NR::USIZE {
+            for r in 1..NR::USIZE {
                 let mut t: Array<MaybeUninit<Word>, NB> = Array::uninit();
                 for j in 0..NB::USIZE {
                     t[j].write(dw[i]
@@ -897,6 +902,7 @@ where
                 state = unsafe {
                     t.assume_init()
                 };
+                println!("fast {} {:08x?}", r, state);
             }
 
             let mut t: Array<MaybeUninit<Word>, NB> = Array::uninit();
@@ -980,6 +986,9 @@ fn mwp(){
     x.encrypt_blocks(&pt, &mut ct1);
     y.encrypt_blocks(&pt, &mut ct2);
     assert_eq!(ct1, ct2);
+    println!("ct {:x?}", ct1);
+    y.decrypt_blocks(&ct1, &mut ct2);
+    assert_eq!(ct2, pt);
     x.decrypt_blocks(&ct1, &mut ct2);
     assert_eq!(ct2, pt);
 

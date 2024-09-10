@@ -553,16 +553,20 @@ macro_rules! aes {
 
                 for (src, dst) in iter::zip(ciphertext, plaintext) {
                     *dst = *src;
+                    println!("soft in  {:02x?}", *dst);
                     add_round_key(dst, &w[$nr]);
+                    println!("soft 0 {:02x?}", *dst);
                     for r in (1..$nr).rev() {
                         inv_shift_rows!(dst, $nb);
                         inv_sub_bytes(dst);
                         add_round_key(dst, &w[r]);
                         inv_mix_columns(dst);
+                        println!("soft {} {:02x?}", r, *dst);
                     }
                     inv_shift_rows!(dst, $nb);
                     inv_sub_bytes(dst);
                     add_round_key(dst, &w[0]);
+                    println!("soft last {:02x?}", *dst);
                 }
             }
         }
