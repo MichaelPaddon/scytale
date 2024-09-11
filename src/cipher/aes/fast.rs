@@ -629,11 +629,10 @@ where
         let mut w: Array<MaybeUninit<Word>, op!(NB * (NR + U1))> =
             Array::uninit();
 
-        let mut k: *const Word = key.as_ptr().cast();
+        let k: *const Word = key.as_ptr().cast();
         for i in 0..NK::USIZE {
             unsafe {
-                w[i].write(Word::from_be(ptr::read_unaligned(k)));
-                k = k.add(1);
+                w[i].write(Word::from_be(ptr::read_unaligned(k.add(i))));
             }
         }
 
@@ -880,12 +879,10 @@ where
             let mut state = unsafe {
                 state.assume_init()
             };
-            println!("** fast in {:08x?}", state);
 
             for i in 0..NB::USIZE {
                 state[i] ^= dw[i];
             }
-            println!("** fast 0 {:08x?}", state);
 
             let mut i = NB::USIZE;
             for r in 1..NR::USIZE {
@@ -902,7 +899,6 @@ where
                 state = unsafe {
                     t.assume_init()
                 };
-                println!("fast {} {:08x?}", r, state);
             }
 
             let mut t: Array<MaybeUninit<Word>, NB> = Array::uninit();
@@ -1016,4 +1012,25 @@ fn mwp(){
     let x = Aes::<U4, U8, U14>::expand_key(&key).unwrap();
     let a = super::soft::Aes256::new(&key).unwrap();
     assert_eq!(x, a.w);
+}
+
+#[cfg(test)]
+mod test {
+    use crate::test::acvp::block;
+    use super::{Aes128, Aes192, Aes256};
+
+    #[test]
+    fn test_aes128() {
+        block::test::<Aes128>("aes_ecb");
+    }
+
+    #[test]
+    fn test_aes192() {
+        block::test::<Aes192>("aes_ecb");
+    }
+
+    #[test]
+    fn test_aes256() {
+        block::test::<Aes256>("aes_ecb");
+    }
 }
