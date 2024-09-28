@@ -53,6 +53,27 @@ pub trait DecryptingBlockCipher: NewUsingKey + Rekey + DecryptBlocks {}
 /// encryption and decryption.
 pub trait BlockCipher: EncryptingBlockCipher + DecryptingBlockCipher {}
 
+pub trait BlockCipher2{
+    type KeySize: ArraySize;
+    type BlockSize: ArraySize;
+
+    fn new(key: &[u8]) -> Result<Self, Error> where Self: Sized;
+
+    fn rekey(&mut self, key: &[u8]) -> Result<(), Error>;
+
+    fn encrypt_blocks(
+        &mut self,
+        plaintext: &[Array<u8, Self::BlockSize>],
+        ciphertext: &mut [Array<u8, Self::BlockSize>]
+    );
+
+    fn decrypt_blocks(
+        &mut self,
+        ciphertext: &[Array<u8, Self::BlockSize>],
+        plaintext: &mut [Array<u8, Self::BlockSize>]
+    );
+}
+
 macro_rules! impl_key_size {
     ($name: ident, $key_size: ty) => {
         impl KeySize for $name {

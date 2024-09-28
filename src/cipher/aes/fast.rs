@@ -1,6 +1,5 @@
 use crate::error::Error;
 use typenum::Unsigned;
-use typenum::U;
 use hybrid_array::{Array, ArraySize};
 use core::mem::{MaybeUninit, size_of};
 use core::iter;
@@ -8,20 +7,10 @@ use core::ptr;
 use typenum::*;
 use std::ops::*;
 use std::marker::PhantomData;
-use crate::cipher::{
-    KeySize,
-    BlockSize,
-    NewUsingKey,
-    Rekey,
-    EncryptBlocks,
-    DecryptBlocks,
-    EncryptingBlockCipher,
-    DecryptingBlockCipher,
-    BlockCipher
-};
+use crate::cipher::BlockCipher2;
 
 type Word = u32;
-type WORD_SIZE = U4;
+type WordSize = U4;
 
 const TE0: [Word; 256] = [
     0xc66363a5, 0xf87c7c84, 0xee777799, 0xf67b7b8d,
@@ -600,7 +589,6 @@ const RCON: [Word; 10] = [
     0x1B000000, 0x36000000,
 ];
 
-
 pub struct Aes<NB: ArraySize, NK: ArraySize, NR: ArraySize>
 where
     NR: Add<U1>,
@@ -619,7 +607,7 @@ where
     Prod<NB, Sum<NR, U1>>: ArraySize + Sub<U1>,
     Diff<Prod<NB, Sum<NR, U1>>, U1>: ArraySize,
 {
-    fn expand_key(key: &[u8])
+    fn expand_key(key: &Array<u8, op!(NK * WordSize))
         -> Result<Array<Word, op!(NB * (NR + U1))>, Error>
     {
         if key.len() != NK::USIZE * size_of::<Word>() {
@@ -703,16 +691,16 @@ where
     }
 }
 
-
+/*
 impl<NB: ArraySize, NK: ArraySize, NR: ArraySize> KeySize for  Aes<NB, NK, NR>
 where
     NR: Add<U1>,
     NB: Mul<Sum<NR, U1>>,
     Prod<NB, Sum<NR, U1>>: ArraySize,
-    NK: Mul<WORD_SIZE>,
-    Prod<NK, WORD_SIZE>: ArraySize,
+    NK: Mul<WordSize>,
+    Prod<NK, WordSize>: ArraySize,
 {
-    type KeySize = op!(NK * WORD_SIZE);
+    type KeySize = op!(NK * WordSize);
 }
 
 impl<NB: ArraySize, NK: ArraySize, NR: ArraySize> BlockSize for  Aes<NB, NK, NR>
@@ -720,10 +708,10 @@ where
     NR: Add<U1>,
     NB: Mul<Sum<NR, U1>>,
     Prod<NB, Sum<NR, U1>>: ArraySize,
-    NB: Mul<WORD_SIZE>,
-    Prod<NB, WORD_SIZE>: ArraySize,
+    NB: Mul<WordSize>,
+    Prod<NB, WordSize>: ArraySize,
 {
-    type BlockSize = op!(NB * WORD_SIZE);
+    type BlockSize = op!(NB * WordSize);
 }
 
 impl<NB: ArraySize, NK: ArraySize, NR: ArraySize> NewUsingKey for  Aes<NB, NK, NR>
@@ -732,8 +720,8 @@ where
     NB: Mul<Sum<NR, U1>>,
     Prod<NB, Sum<NR, U1>>: ArraySize + Sub<U1>,
     Diff<Prod<NB, Sum<NR, U1>>, U1>: ArraySize,
-    NK: Mul<WORD_SIZE>,
-    Prod<NK, WORD_SIZE>: ArraySize,
+    NK: Mul<WordSize>,
+    Prod<NK, WordSize>: ArraySize,
 {
     #[inline(always)]
     fn new(key: &[u8]) -> Result<Self, Error> {
@@ -751,8 +739,8 @@ where
     NB: Mul<Sum<NR, U1>>,
     Prod<NB, Sum<NR, U1>>: ArraySize + Sub<U1>,
     Diff<Prod<NB, Sum<NR, U1>>, U1>: ArraySize,
-    NK: Mul<WORD_SIZE>,
-    Prod<NK, WORD_SIZE>: ArraySize,
+    NK: Mul<WordSize>,
+    Prod<NK, WordSize>: ArraySize,
 {
     #[inline(always)]
     fn rekey(&mut self, key: &[u8]) -> Result<(), Error> {
@@ -770,8 +758,8 @@ where
     NR: Add<U1>,
     NB: Mul<Sum<NR, U1>>,
     Prod<NB, Sum<NR, U1>>: ArraySize + Sub<U1>,
-    NB: Mul<WORD_SIZE>,
-    Prod<NB, WORD_SIZE>: ArraySize,
+    NB: Mul<WordSize>,
+    Prod<NB, WordSize>: ArraySize,
 {
     fn encrypt_blocks(
         &mut self,
@@ -797,7 +785,7 @@ where
             }
 
             let mut i = NB::USIZE;
-            for r in 1..NR::USIZE {
+            for _ in 1..NR::USIZE {
                 let mut t: Array<MaybeUninit<Word>, NB> = Array::uninit();
                 for j in 0..NB::USIZE {
                     t[j].write(self.w[i]
@@ -856,8 +844,8 @@ where
     NR: Add<U1>,
     NB: Mul<Sum<NR, U1>>,
     Prod<NB, Sum<NR, U1>>: ArraySize + Sub<U1>,
-    NB: Mul<WORD_SIZE>,
-    Prod<NB, WORD_SIZE>: ArraySize,
+    NB: Mul<WordSize>,
+    Prod<NB, WordSize>: ArraySize,
     Diff<Prod<NB, Sum<NR, U1>>, U1>: ArraySize,
 {
     fn decrypt_blocks(
@@ -885,7 +873,7 @@ where
             }
 
             let mut i = NB::USIZE;
-            for r in 1..NR::USIZE {
+            for _ in 1..NR::USIZE {
                 let mut t: Array<MaybeUninit<Word>, NB> = Array::uninit();
                 for j in 0..NB::USIZE {
                     t[j].write(dw[i]
@@ -930,11 +918,11 @@ where
     NR: Add<U1>,
     NB: Mul<Sum<NR, U1>>,
     Prod<NB, Sum<NR, U1>>: ArraySize + Sub<U1>,
-    NB: Mul<WORD_SIZE>,
-    Prod<NB, WORD_SIZE>: ArraySize,
+    NB: Mul<WordSize>,
+    Prod<NB, WordSize>: ArraySize,
     Diff<Prod<NB, Sum<NR, U1>>, U1>: ArraySize,
-    NK: Mul<WORD_SIZE>,
-    Prod<NK, WORD_SIZE>: ArraySize,
+    NK: Mul<WordSize>,
+    Prod<NK, WordSize>: ArraySize,
 {}
 
 impl<NB: ArraySize, NK: ArraySize, NR: ArraySize> DecryptingBlockCipher
@@ -943,11 +931,11 @@ where
     NR: Add<U1>,
     NB: Mul<Sum<NR, U1>>,
     Prod<NB, Sum<NR, U1>>: ArraySize + Sub<U1>,
-    NB: Mul<WORD_SIZE>,
-    Prod<NB, WORD_SIZE>: ArraySize,
+    NB: Mul<WordSize>,
+    Prod<NB, WordSize>: ArraySize,
     Diff<Prod<NB, Sum<NR, U1>>, U1>: ArraySize,
-    NK: Mul<WORD_SIZE>,
-    Prod<NK, WORD_SIZE>: ArraySize,
+    NK: Mul<WordSize>,
+    Prod<NK, WordSize>: ArraySize,
 {}
 
 impl<NB: ArraySize, NK: ArraySize, NR: ArraySize> BlockCipher
@@ -956,11 +944,11 @@ where
     NR: Add<U1>,
     NB: Mul<Sum<NR, U1>>,
     Prod<NB, Sum<NR, U1>>: ArraySize + Sub<U1>,
-    NB: Mul<WORD_SIZE>,
-    Prod<NB, WORD_SIZE>: ArraySize,
+    NB: Mul<WordSize>,
+    Prod<NB, WordSize>: ArraySize,
     Diff<Prod<NB, Sum<NR, U1>>, U1>: ArraySize,
-    NK: Mul<WORD_SIZE>,
-    Prod<NK, WORD_SIZE>: ArraySize,
+    NK: Mul<WordSize>,
+    Prod<NK, WordSize>: ArraySize,
 {}
 
 pub type Aes128 = Aes<U4, U4, U10>;
@@ -1013,6 +1001,7 @@ fn mwp(){
     let a = super::soft::Aes256::new(&key).unwrap();
     assert_eq!(x, a.w);
 }
+*/
 
 #[cfg(test)]
 mod test {

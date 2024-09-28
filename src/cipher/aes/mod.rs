@@ -4,11 +4,12 @@
 use cfg_if::cfg_if;
 
 pub mod fast;
-pub mod soft;
+//pub mod soft;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub mod x86;
 
+/*
 cfg_if!{
     if #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] {
         pub type Aes128 = x86::Aes128;
@@ -26,3 +27,4 @@ cfg_if!{
         pub type Aes256Encrypt = soft::Aes256;
     }
 }
+*/
