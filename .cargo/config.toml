@@ -1,0 +1,3 @@
+[alias]
+# The fast tier is plain `cargo test`. This adds the slow one on top.
+extended-test = "test --workspace --features scytale/extended-tests"

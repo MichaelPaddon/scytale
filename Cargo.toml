@@ -1,0 +1,15 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/scytale",
+    "crates/scytale-ring",
+    "crates/scytale-bench",
+]
+
+[workspace.package]
+version = "0.3.0"
+edition = "2024"
+license = "BSD-2-Clause"
+
+[workspace.dependencies]
+scytale = { version = "0.3.0", path = "crates/scytale" }

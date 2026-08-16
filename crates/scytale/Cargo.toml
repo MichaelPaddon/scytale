@@ -1,0 +1,16 @@
+[package]
+name = "scytale"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Opts in the slow test tier. Enabled by `cargo extended-test`; never needed
+# to use the library itself.
+extended-tests = []
+
+[dependencies]
+zeroize = { version = "1.9.0", default-features = false }
+
+[dev-dependencies]
+serde_json = "1.0.151"

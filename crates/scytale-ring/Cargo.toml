@@ -1,0 +1,8 @@
+[package]
+name = "scytale-ring"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+scytale.workspace = true
