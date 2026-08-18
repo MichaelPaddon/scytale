@@ -7,30 +7,28 @@ use std::process::ExitCode;
 
 use scytale_bench::harness::{Row, compare, report};
 
-#[cfg(openssl_available)]
-use scytale::symmetric::aes::{
-    Aes128Dec, Aes128Enc, Aes192Dec, Aes192Enc, Aes256Dec, Aes256Enc,
-};
-#[cfg(openssl_available)]
-use scytale_bench::openssl::OpensslAes;
 
 /// The message sizes `openssl speed` uses for symmetric ciphers. The short
 /// end measures per-call overhead, the long end the steady-state rate.
 const SIZES: [usize; 6] = [16, 64, 256, 1024, 8 * 1024, 16 * 1024];
 
 #[cfg(openssl_available)]
-fn cases() -> Result<Vec<Row>, String> {
+fn cases(portable: bool) -> Result<(&'static str, Vec<Row>), String> {
+    use scytale::symmetric::aes::arch::portable::ttable;
+    use scytale_bench::openssl::OpensslAes;
+
     let bad = |e| format!("OpenSSL rejected the key: {e:?}");
 
     // One ladder per key size and direction. Each row is scytale against
     // OpenSSL doing identical work on identically sized buffers.
     macro_rules! ladder {
-        ($rows:expr, $enc:ty, $dec:ty, $bits:expr, $key_len:expr) => {{
-            let key = [0x2bu8; $key_len];
+        ($rows:expr, $enc:ty, $dec:ty, $oe:ty, $od:ty, $bits:expr, $len:expr)
+        => {{
+            let key = [0x2bu8; $len];
             let enc = <$enc>::new(&key);
             let dec = <$dec>::new(&key);
-            let openssl_enc = OpensslAes::try_new_encrypt(&key).map_err(bad)?;
-            let openssl_dec = OpensslAes::try_new_decrypt(&key).map_err(bad)?;
+            let openssl_enc = <$oe>::try_new_encrypt(&key).map_err(bad)?;
+            let openssl_dec = <$od>::try_new_decrypt(&key).map_err(bad)?;
 
             for bytes in SIZES {
                 let mut ours = vec![0u8; bytes];
@@ -64,16 +62,90 @@ fn cases() -> Result<Vec<Row>, String> {
     }
 
     let mut rows = Vec::with_capacity(6 * SIZES.len());
-    ladder!(rows, Aes128Enc, Aes128Dec, "128", 16);
-    ladder!(rows, Aes192Enc, Aes192Dec, "192", 24);
-    ladder!(rows, Aes256Enc, Aes256Dec, "256", 32);
-    Ok(rows)
+
+    if portable {
+        // Scytale's T-table cipher against OpenSSL's C AES. Both sides are
+        // named explicitly: the dispatching types would pick the
+        // accelerated backend and make this a different comparison.
+        ladder!(rows, ttable::Aes128Enc, ttable::Aes128Dec,
+                OpensslAes, OpensslAes, "128", 16);
+        ladder!(rows, ttable::Aes192Enc, ttable::Aes192Dec,
+                OpensslAes, OpensslAes, "192", 24);
+        ladder!(rows, ttable::Aes256Enc, ttable::Aes256Dec,
+                OpensslAes, OpensslAes, "256", 32);
+        return Ok(("portable: T-table against OpenSSL C", rows));
+    }
+
+    accelerated(&mut rows, &bad)?;
+    Ok(("accelerated: AES-NI against OpenSSL AES-NI", rows))
 }
 
-#[cfg(not(openssl_available))]
-fn cases() -> Result<Vec<Row>, String> {
-    Err("OpenSSL was not built, so there is nothing to compare against"
-        .to_string())
+/// The accelerated ladder, on targets that have an accelerated backend.
+#[cfg(all(openssl_available, target_arch = "x86_64"))]
+fn accelerated(
+    rows: &mut Vec<Row>,
+    bad: &dyn Fn(scytale_bench::openssl::BadKeyLength) -> String,
+) -> Result<(), String> {
+    use scytale::symmetric::aes::arch::x86_64::aesni;
+    use scytale_bench::openssl::OpensslAesni;
+
+    if !aesni::supported() {
+        return Err("this CPU has no AES instructions".to_string());
+    }
+
+    macro_rules! ladder {
+        ($enc:ty, $dec:ty, $bits:expr, $len:expr) => {{
+            let key = [0x2bu8; $len];
+            let enc = <$enc>::new(&key);
+            let dec = <$dec>::new(&key);
+            let openssl_enc =
+                OpensslAesni::try_new_encrypt(&key).map_err(bad)?;
+            let openssl_dec =
+                OpensslAesni::try_new_decrypt(&key).map_err(bad)?;
+
+            for bytes in SIZES {
+                let mut ours = vec![0u8; bytes];
+                let mut theirs = vec![0u8; bytes];
+                rows.push(compare(
+                    &format!(concat!("aes", $bits, "-encrypt/{}"), bytes),
+                    bytes,
+                    || {
+                        enc.encrypt(&mut ours);
+                    },
+                    || {
+                        openssl_enc.encrypt(&mut theirs);
+                    },
+                ));
+            }
+            for bytes in SIZES {
+                let mut ours = vec![0u8; bytes];
+                let mut theirs = vec![0u8; bytes];
+                rows.push(compare(
+                    &format!(concat!("aes", $bits, "-decrypt/{}"), bytes),
+                    bytes,
+                    || {
+                        dec.decrypt(&mut ours);
+                    },
+                    || {
+                        openssl_dec.decrypt(&mut theirs);
+                    },
+                ));
+            }
+        }};
+    }
+
+    ladder!(aesni::Aes128Enc, aesni::Aes128Dec, "128", 16);
+    ladder!(aesni::Aes192Enc, aesni::Aes192Dec, "192", 24);
+    ladder!(aesni::Aes256Enc, aesni::Aes256Dec, "256", 32);
+    Ok(())
+}
+
+#[cfg(all(openssl_available, not(target_arch = "x86_64")))]
+fn accelerated(
+    _rows: &mut Vec<Row>,
+    _bad: &dyn Fn(scytale_bench::openssl::BadKeyLength) -> String,
+) -> Result<(), String> {
+    Err("no accelerated backend on this target; try --portable".to_string())
 }
 
 /// Report anything about the machine that would make the numbers untrustworthy.
@@ -135,12 +207,16 @@ fn describe_machine() {
 }
 
 fn main() -> ExitCode {
-    let verbose = std::env::args().any(|a| a == "--verbose" || a == "-v");
+    let args: Vec<String> = std::env::args().collect();
+    let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
+    let portable = args.iter().any(|a| a == "--portable");
 
     describe_machine();
 
-    match cases() {
-        Ok(rows) => {
+    match cases(portable) {
+        Ok((title, rows)) => {
+            println!("{title}");
+            println!();
             if report(&rows, verbose) {
                 ExitCode::SUCCESS
             } else {

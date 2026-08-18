@@ -4,4 +4,7 @@
 //! guarantee it is supported. Otherwise prefer the parent module's names,
 //! which select at run time.
 
+#[cfg(target_arch = "x86_64")]
+pub mod x86_64;
+
 pub mod portable;

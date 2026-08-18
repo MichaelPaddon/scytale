@@ -73,3 +73,33 @@ fn scytale_and_openssl_agree() {
     check_key_size!(Aes192Enc, Aes192Dec, 24, 0xfedc_ba98_7654_3210);
     check_key_size!(Aes256Enc, Aes256Dec, 32, 0x2468_ace0_1357_9bdf);
 }
+
+/// The accelerated pair must agree too, or the accelerated tier of the
+/// benchmark would be timing two different computations.
+#[test]
+fn scytale_and_openssl_aesni_agree() {
+    use scytale_bench::openssl::OpensslAesni;
+
+    let mut rng = Rng(0x0f1e_2d3c_4b5a_6978);
+    for blocks in [1usize, 2, 7, 8, 9, 17, 64] {
+        let mut key = [0u8; 16];
+        rng.fill(&mut key);
+        let mut plaintext = vec![0u8; blocks * 16];
+        rng.fill(&mut plaintext);
+
+        let mut ours = plaintext.clone();
+        let mut theirs = plaintext.clone();
+        Aes128Enc::new(&key).encrypt(&mut ours);
+        let openssl = OpensslAesni::try_new_encrypt(&key)
+            .expect("openssl rejected a valid key");
+        assert_eq!(openssl.encrypt(&mut theirs), blocks * 16);
+        assert_eq!(ours, theirs, "AES-NI encrypt differs at {blocks}");
+
+        Aes128Dec::new(&key).decrypt(&mut ours);
+        OpensslAesni::try_new_decrypt(&key)
+            .expect("openssl rejected a valid key")
+            .decrypt(&mut theirs);
+        assert_eq!(ours, plaintext, "scytale AES-NI round trip");
+        assert_eq!(theirs, plaintext, "openssl AES-NI round trip");
+    }
+}

@@ -2,9 +2,8 @@
 
 Correct and fast cryptography in Rust.
 
-**Early days.** AES is the only algorithm implemented so far, and only as
-a portable T-table cipher. The API shape described below is settled; the
-list of things behind it is not.
+**Early days.** AES is the only algorithm implemented so far. The API shape
+described below is settled; the list of things behind it is not.
 
 ## Using it
 
@@ -25,6 +24,7 @@ specific implementation:
 
 ```rust
 use scytale::symmetric::aes::Aes128Enc;                          // best
+use scytale::symmetric::aes::arch::x86_64::aesni::Aes128Enc;     // pinned
 use scytale::symmetric::aes::arch::portable::ttable::Aes128Enc;  // pinned
 ```
 
@@ -32,7 +32,11 @@ The unqualified name selects at run time, on the machine the code is
 actually running on. A binary built for a baseline target still uses
 whatever the silicon it lands on supports, so compiling on an old laptop
 does not cost you the new instructions on a new chip. Selection happens
-once, not per call.
+once, when the key is expanded, not per call.
+
+Today that means AES-NI on x86_64 where the CPU has it, and the portable
+T-table cipher everywhere else. `is_accelerated()` reports which was
+chosen.
 
 Reach for an `arch` path only when you need one exact implementation and
 can guarantee the target supports it.
@@ -91,26 +95,35 @@ influence checks run in the extended tier.
 ## Performance
 
 Measured against OpenSSL on the same machine, in the same process, in the
-same measurement loop. Currently 1.07 to 1.15 times OpenSSL's C AES
-across key sizes, directions and message lengths.
+same measurement loop, each implementation against its own counterpart:
+
+| Tier | scytale | vs OpenSSL | Throughput |
+| --- | --- | ---: | ---: |
+| accelerated | AES-NI | 1.00 to 1.04 | 15.4 GB/s |
+| portable | T-table | 1.07 to 1.15 | 544 MB/s |
+
+At or above parity on all 72 cases. AES-128, pinned to one core.
 
 See [PERFORMANCE.md](PERFORMANCE.md) for the method, the rules that keep
 the comparison honest, and the full results.
 
 ```
 cargo build -p scytale-bench --release
-taskset -c 2 target/release/scytale-bench
+taskset -c 2 target/release/scytale-bench             # accelerated
+taskset -c 2 target/release/scytale-bench --portable  # portable
 ```
 
 ## A warning about the T-table cipher
 
-The only AES implementation here today indexes its tables with key
-dependent bytes. Which cache lines it touches therefore depends on the
-key, and that is recoverable by an attacker who can observe cache state.
-This is inherent to the T-table construction, not a defect in this code.
+The portable AES implementation indexes its tables with key dependent
+bytes. Which cache lines it touches therefore depends on the key, and that
+is recoverable by an attacker who can observe cache state. This is inherent
+to the T-table construction, not a defect in this code.
 
-It is the fast portable choice, not the safe one. Do not use it where a
-local or co-resident attacker is in your threat model.
+The AES-NI backend has no such problem: its round transformation is a
+single instruction with no data dependent memory access, and it is chosen
+automatically wherever the instructions exist. The T-table cipher is the
+fallback for everywhere else, and there this caveat applies.
 
 ## Layout
 

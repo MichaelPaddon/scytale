@@ -10,10 +10,303 @@
 
 pub mod arch;
 
-// Only the portable backend exists so far, so "best available" is that. When
-// a second backend lands these re-exports become the runtime dispatch point;
-// the names callers use do not change.
-pub use arch::portable::ttable::{
-    Aes128, Aes128Dec, Aes128Enc, Aes192, Aes192Dec, Aes192Enc, Aes256,
-    Aes256Dec, Aes256Enc, BLOCK_SIZE,
+use arch::portable::ttable;
+
+use crate::symmetric::block_cipher::{
+    BlockDecrypt, BlockEncrypt, InvalidKeyLength, KeyInit,
 };
+
+/// The AES block size in bytes. Identical for all three key sizes.
+pub const BLOCK_SIZE: usize = ttable::BLOCK_SIZE;
+
+/// The accelerated implementations for this target, if it has any.
+///
+/// Targets with no acceleration name the portable types here and report no
+/// support, so the dispatch below needs no target specific spelling: the
+/// accelerated arm is simply never taken.
+#[cfg(target_arch = "x86_64")]
+mod accel {
+    pub use super::arch::x86_64::aesni::supported;
+    pub use super::arch::x86_64::aesni::{
+        Aes128Dec, Aes128Enc, Aes192Dec, Aes192Enc, Aes256Dec, Aes256Enc,
+    };
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+mod accel {
+    pub use super::arch::portable::ttable::{
+        Aes128Dec, Aes128Enc, Aes192Dec, Aes192Enc, Aes256Dec, Aes256Enc,
+    };
+
+    pub fn supported() -> bool {
+        false
+    }
+}
+
+/// Which implementation a dispatching type chose.
+///
+/// The choice is made once, when the key is expanded, and then it is a
+/// property of the value. Nothing re-examines the CPU per call.
+enum Backend<A, P> {
+    Accelerated(A),
+    Portable(P),
+}
+
+macro_rules! define_dispatch {
+    (
+        $name:ident, $accel:ty, $portable:ty, $key_size:expr,
+        $op:ident, $op_block:ident, $tr:ident, $doc:expr
+    ) => {
+        #[doc = $doc]
+        pub struct $name(Backend<$accel, $portable>);
+
+        impl $name {
+            /// The key length in bytes.
+            pub const KEY_SIZE: usize = $key_size;
+            /// The block length in bytes.
+            pub const BLOCK_SIZE: usize = BLOCK_SIZE;
+            /// The most blocks any implementation here keeps in flight.
+            ///
+            /// Use [`Self::parallel_blocks`] for the number the selected
+            /// one actually uses; this is the figure to size a buffer by.
+            pub const PARALLEL_BLOCKS: usize =
+                <$accel>::PARALLEL_BLOCKS;
+
+            /// Expand `key`, choosing an implementation for this CPU.
+            pub fn new(key: &[u8; $key_size]) -> Self {
+                Self(if accel::supported() {
+                    Backend::Accelerated(<$accel>::new(key))
+                } else {
+                    Backend::Portable(<$portable>::new(key))
+                })
+            }
+
+            #[doc = concat!(
+                stringify!($op),
+                " whole blocks in place, returning bytes consumed."
+            )]
+            pub fn $op(&self, data: &mut [u8]) -> usize {
+                match &self.0 {
+                    Backend::Accelerated(a) => a.$op(data),
+                    Backend::Portable(p) => p.$op(data),
+                }
+            }
+
+            #[doc = concat!(stringify!($op), " exactly one block in place.")]
+            pub fn $op_block(&self, block: &mut [u8; BLOCK_SIZE]) {
+                match &self.0 {
+                    Backend::Accelerated(a) => a.$op_block(block),
+                    Backend::Portable(p) => p.$op_block(block),
+                }
+            }
+
+            /// How many blocks the chosen implementation keeps in flight.
+            pub fn parallel_blocks(&self) -> usize {
+                match &self.0 {
+                    Backend::Accelerated(_) => <$accel>::PARALLEL_BLOCKS,
+                    Backend::Portable(_) => <$portable>::PARALLEL_BLOCKS,
+                }
+            }
+
+            /// Whether this value is using an accelerated implementation.
+            pub fn is_accelerated(&self) -> bool {
+                matches!(self.0, Backend::Accelerated(_))
+            }
+        }
+
+        impl KeyInit for $name {
+            fn try_new(key: &[u8]) -> Result<Self, InvalidKeyLength> {
+                let key: &[u8; $key_size] = key
+                    .try_into()
+                    .map_err(|_| InvalidKeyLength { got: key.len() })?;
+                Ok(Self::new(key))
+            }
+        }
+
+        impl $tr for $name {
+            const BLOCK_SIZE: usize = BLOCK_SIZE;
+            const PARALLEL_BLOCKS: usize = <$accel>::PARALLEL_BLOCKS;
+
+            fn $op(&self, data: &mut [u8]) -> usize {
+                $name::$op(self, data)
+            }
+        }
+
+        impl core::fmt::Debug for $name {
+            fn fmt(
+                &self,
+                f: &mut core::fmt::Formatter<'_>,
+            ) -> core::fmt::Result {
+                // Never format round keys.
+                f.write_str(concat!(stringify!($name), " { .. }"))
+            }
+        }
+    };
+}
+
+define_dispatch!(
+    Aes128Enc, accel::Aes128Enc, ttable::Aes128Enc, 16,
+    encrypt, encrypt_block, BlockEncrypt, "AES-128 encryption only."
+);
+define_dispatch!(
+    Aes128Dec, accel::Aes128Dec, ttable::Aes128Dec, 16,
+    decrypt, decrypt_block, BlockDecrypt, "AES-128 decryption only."
+);
+define_dispatch!(
+    Aes192Enc, accel::Aes192Enc, ttable::Aes192Enc, 24,
+    encrypt, encrypt_block, BlockEncrypt, "AES-192 encryption only."
+);
+define_dispatch!(
+    Aes192Dec, accel::Aes192Dec, ttable::Aes192Dec, 24,
+    decrypt, decrypt_block, BlockDecrypt, "AES-192 decryption only."
+);
+define_dispatch!(
+    Aes256Enc, accel::Aes256Enc, ttable::Aes256Enc, 32,
+    encrypt, encrypt_block, BlockEncrypt, "AES-256 encryption only."
+);
+define_dispatch!(
+    Aes256Dec, accel::Aes256Dec, ttable::Aes256Dec, 32,
+    decrypt, decrypt_block, BlockDecrypt, "AES-256 decryption only."
+);
+
+macro_rules! define_both {
+    ($name:ident, $enc:ident, $dec:ident, $key_size:expr, $doc:expr) => {
+        #[doc = $doc]
+        ///
+        /// Builds both key schedules, so it costs about twice what a
+        /// one-direction type does to construct. Use it when you genuinely
+        /// need both.
+        pub struct $name {
+            enc: $enc,
+            dec: $dec,
+        }
+
+        impl $name {
+            /// The key length in bytes.
+            pub const KEY_SIZE: usize = $key_size;
+            /// The block length in bytes.
+            pub const BLOCK_SIZE: usize = BLOCK_SIZE;
+
+            /// Expand `key` into both schedules.
+            pub fn new(key: &[u8; $key_size]) -> Self {
+                Self { enc: $enc::new(key), dec: $dec::new(key) }
+            }
+
+            /// Encrypt whole blocks in place, returning bytes consumed.
+            pub fn encrypt(&self, data: &mut [u8]) -> usize {
+                self.enc.encrypt(data)
+            }
+
+            /// Decrypt whole blocks in place, returning bytes consumed.
+            pub fn decrypt(&self, data: &mut [u8]) -> usize {
+                self.dec.decrypt(data)
+            }
+
+            /// Encrypt exactly one block in place.
+            pub fn encrypt_block(&self, block: &mut [u8; BLOCK_SIZE]) {
+                self.enc.encrypt_block(block);
+            }
+
+            /// Decrypt exactly one block in place.
+            pub fn decrypt_block(&self, block: &mut [u8; BLOCK_SIZE]) {
+                self.dec.decrypt_block(block);
+            }
+
+            /// Borrow just the encryption half.
+            pub fn encryptor(&self) -> &$enc {
+                &self.enc
+            }
+
+            /// Borrow just the decryption half.
+            pub fn decryptor(&self) -> &$dec {
+                &self.dec
+            }
+
+            /// Whether this value is using an accelerated implementation.
+            pub fn is_accelerated(&self) -> bool {
+                self.enc.is_accelerated()
+            }
+        }
+
+        impl KeyInit for $name {
+            fn try_new(key: &[u8]) -> Result<Self, InvalidKeyLength> {
+                let key: &[u8; $key_size] = key
+                    .try_into()
+                    .map_err(|_| InvalidKeyLength { got: key.len() })?;
+                Ok(Self::new(key))
+            }
+        }
+
+        impl BlockEncrypt for $name {
+            const BLOCK_SIZE: usize = BLOCK_SIZE;
+            const PARALLEL_BLOCKS: usize = $enc::PARALLEL_BLOCKS;
+
+            fn encrypt(&self, data: &mut [u8]) -> usize {
+                self.enc.encrypt(data)
+            }
+        }
+
+        impl BlockDecrypt for $name {
+            const BLOCK_SIZE: usize = BLOCK_SIZE;
+            const PARALLEL_BLOCKS: usize = $dec::PARALLEL_BLOCKS;
+
+            fn decrypt(&self, data: &mut [u8]) -> usize {
+                self.dec.decrypt(data)
+            }
+        }
+
+        impl core::fmt::Debug for $name {
+            fn fmt(
+                &self,
+                f: &mut core::fmt::Formatter<'_>,
+            ) -> core::fmt::Result {
+                f.write_str(concat!(stringify!($name), " { .. }"))
+            }
+        }
+    };
+}
+
+define_both!(Aes128, Aes128Enc, Aes128Dec, 16, "AES-128, both directions.");
+define_both!(Aes192, Aes192Enc, Aes192Dec, 24, "AES-192, both directions.");
+define_both!(Aes256, Aes256Enc, Aes256Dec, 32, "AES-256, both directions.");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The dispatching type must agree with both implementations it can
+    /// choose between, or which one a machine picks would change results.
+    #[test]
+    fn dispatch_agrees_with_the_portable_implementation() {
+        let key = [0x2bu8; 16];
+        let plaintext: Vec<u8> = (0..=255u8).cycle().take(1024).collect();
+
+        let mut dispatched = plaintext.clone();
+        let mut portable = plaintext.clone();
+        Aes128Enc::new(&key).encrypt(&mut dispatched);
+        ttable::Aes128Enc::new(&key).encrypt(&mut portable);
+        assert_eq!(dispatched, portable);
+
+        Aes128Dec::new(&key).decrypt(&mut dispatched);
+        assert_eq!(dispatched, plaintext);
+    }
+
+    /// A machine with the instructions must actually be using them. Without
+    /// this a silent fall back would look exactly like success.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn uses_acceleration_when_the_cpu_has_it() {
+        let expected = arch::x86_64::aesni::supported();
+        assert_eq!(Aes128Enc::new(&[0u8; 16]).is_accelerated(), expected);
+        assert_eq!(Aes192Enc::new(&[0u8; 24]).is_accelerated(), expected);
+        assert_eq!(Aes256Dec::new(&[0u8; 32]).is_accelerated(), expected);
+        assert_eq!(Aes128::new(&[0u8; 16]).is_accelerated(), expected);
+    }
+
+    #[test]
+    fn parallel_blocks_reports_the_chosen_implementation() {
+        let aes = Aes128Enc::new(&[0u8; 16]);
+        let expected = if aes.is_accelerated() { 8 } else { 1 };
+        assert_eq!(aes.parallel_blocks(), expected);
+    }
+}

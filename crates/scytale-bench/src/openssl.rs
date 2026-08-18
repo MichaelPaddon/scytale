@@ -119,3 +119,91 @@ impl OpensslAes {
         blocks.len() * 16
     }
 }
+
+unsafe extern "C" {
+    fn aesni_set_encrypt_key(
+        user_key: *const c_uchar,
+        bits: c_int,
+        key: *mut AesKey,
+    ) -> c_int;
+
+    fn aesni_set_decrypt_key(
+        user_key: *const c_uchar,
+        bits: c_int,
+        key: *mut AesKey,
+    ) -> c_int;
+
+    fn aesni_ecb_encrypt(
+        input: *const c_uchar,
+        out: *mut c_uchar,
+        length: usize,
+        key: *const AesKey,
+        enc: c_int,
+    );
+}
+
+/// OpenSSL's AES-NI kernels.
+///
+/// This is the counterpart to scytale's own AES-NI backend. It is
+/// deliberately not `AES_encrypt`, which in an assembly build is OpenSSL's
+/// assembly T-table cipher rather than its AES-NI one, and not EVP, which
+/// would add dispatch and context handling to the measurement.
+pub struct OpensslAesni {
+    key: AesKey,
+    encrypting: bool,
+}
+
+impl OpensslAesni {
+    /// Build an encryption schedule. `key` must be 16, 24 or 32 bytes.
+    pub fn try_new_encrypt(key: &[u8]) -> Result<Self, BadKeyLength> {
+        let mut schedule = AesKey::default();
+        let bits = (key.len() * 8) as c_int;
+        // SAFETY: key points to key.len() bytes and bits describes exactly
+        // that length; schedule is a valid, correctly sized AES_KEY.
+        let rc =
+            unsafe { aesni_set_encrypt_key(key.as_ptr(), bits, &mut schedule) };
+        if rc != 0 {
+            return Err(BadKeyLength(key.len()));
+        }
+        Ok(Self { key: schedule, encrypting: true })
+    }
+
+    /// Build a decryption schedule.
+    pub fn try_new_decrypt(key: &[u8]) -> Result<Self, BadKeyLength> {
+        let mut schedule = AesKey::default();
+        let bits = (key.len() * 8) as c_int;
+        // SAFETY: as for try_new_encrypt.
+        let rc =
+            unsafe { aesni_set_decrypt_key(key.as_ptr(), bits, &mut schedule) };
+        if rc != 0 {
+            return Err(BadKeyLength(key.len()));
+        }
+        Ok(Self { key: schedule, encrypting: false })
+    }
+
+    /// Encrypt whole blocks in place, returning bytes consumed.
+    pub fn encrypt(&self, data: &mut [u8]) -> usize {
+        debug_assert!(self.encrypting, "schedule is for decryption");
+        self.run(data, 1)
+    }
+
+    /// Decrypt whole blocks in place, returning bytes consumed.
+    pub fn decrypt(&self, data: &mut [u8]) -> usize {
+        debug_assert!(!self.encrypting, "schedule is for encryption");
+        self.run(data, 0)
+    }
+
+    fn run(&self, data: &mut [u8], enc: c_int) -> usize {
+        let whole = data.len() - data.len() % 16;
+        if whole == 0 {
+            return 0;
+        }
+        let ptr = data.as_mut_ptr();
+        // SAFETY: whole is a multiple of the block size and no larger than
+        // the buffer; ECB has no chaining, so input and output may alias.
+        unsafe {
+            aesni_ecb_encrypt(ptr, ptr, whole, &self.key, enc);
+        }
+        whole
+    }
+}

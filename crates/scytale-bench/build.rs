@@ -1,10 +1,18 @@
 //! Clone and build the OpenSSL we benchmark against.
 //!
 //! OpenSSL is never vendored into this repository; it is fetched here and
-//! built into a cache directory. The build is configured `no-asm` so its AES
-//! is the pure C path, which is the like-for-like comparison while scytale
-//! has only software implementations. A default OpenSSL build would use
-//! AES-NI and beat a software T-table on hardware grounds alone.
+//! built into a cache directory. It is built twice, because a fair
+//! comparison needs a counterpart of the same kind for each of scytale's
+//! implementations:
+//!
+//! - `no-asm` gives OpenSSL's pure C AES, which is what scytale's portable
+//!   T-table cipher should be measured against.
+//! - the default configuration gives its assembly, including the AES-NI
+//!   kernels that scytale's own AES-NI backend should be measured against.
+//!
+//! Both archives define `AES_encrypt`, so they are copied under distinct
+//! names and the C one is listed first: the accelerated symbols we want
+//! from the assembly build are spelled `aesni_*` and do not collide.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -29,22 +37,55 @@ fn main() {
     let root =
         out_dir.ancestors().nth(3).unwrap_or(&out_dir).join("openssl");
     let src = root.join(format!("src-{OPENSSL_TAG}"));
-    let install = root.join(format!("install-{OPENSSL_TAG}-noasm"));
+    let src_asm = root.join(format!("src-{OPENSSL_TAG}-asm"));
+    let noasm = root.join(format!("install-{OPENSSL_TAG}-noasm"));
+    let asm = root.join(format!("install-{OPENSSL_TAG}-asm"));
 
-    if !install.join("lib").exists() && !install.join("lib64").exists() {
+    if !installed(&noasm) {
         clone(&src);
-        build(&src, &install);
+        build(&src, &noasm, &["no-asm"]);
+    }
+    if !installed(&asm) {
+        clone(&src_asm);
+        build(&src_asm, &asm, &[]);
     }
 
-    let lib_dir = if install.join("lib64").exists() {
-        install.join("lib64")
-    } else {
-        install.join("lib")
-    };
+    // One directory holding both archives under names that do not collide.
+    let staged = root.join("lib");
+    std::fs::create_dir_all(&staged).expect("creating the link directory");
+    stage(&noasm, &staged, "libcrypto_noasm.a");
+    stage(&asm, &staged, "libcrypto_asm.a");
 
-    println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    println!("cargo:rustc-link-lib=static=crypto");
+    println!("cargo:rustc-link-search=native={}", staged.display());
+    // The C archive first, so the plain AES_* symbols resolve to it.
+    println!("cargo:rustc-link-lib=static=crypto_noasm");
+    println!("cargo:rustc-link-lib=static=crypto_asm");
     println!("cargo:rustc-cfg=openssl_available");
+}
+
+fn installed(prefix: &Path) -> bool {
+    lib_dir(prefix).join("libcrypto.a").exists()
+}
+
+fn lib_dir(prefix: &Path) -> PathBuf {
+    let lib64 = prefix.join("lib64");
+    if lib64.exists() { lib64 } else { prefix.join("lib") }
+}
+
+/// Copy an archive under a name that says which build it came from.
+fn stage(prefix: &Path, staged: &Path, name: &str) {
+    let from = lib_dir(prefix).join("libcrypto.a");
+    let to = staged.join(name);
+    let fresh = std::fs::metadata(&to)
+        .and_then(|d| d.modified())
+        .ok()
+        .zip(std::fs::metadata(&from).and_then(|m| m.modified()).ok())
+        .map(|(dst, src)| dst >= src)
+        .unwrap_or(false);
+    if !fresh {
+        std::fs::copy(&from, &to)
+            .unwrap_or_else(|e| panic!("staging {}: {e}", from.display()));
+    }
 }
 
 fn run(what: &str, cmd: &mut Command) {
@@ -75,15 +116,15 @@ fn clone(src: &Path) {
     );
 }
 
-fn build(src: &Path, install: &Path) {
-    // no-asm is the point of this build: it selects OpenSSL's C AES rather
-    // than AES-NI. The rest is trimmed purely to keep the build short.
+fn build(src: &Path, install: &Path, extra: &[&str]) {
+    // `extra` carries no-asm for the C build and nothing for the assembly
+    // one. The rest is trimmed purely to keep the build short.
     run(
         "OpenSSL Configure",
         Command::new("perl")
             .current_dir(src)
             .arg("./Configure")
-            .arg("no-asm")
+            .args(extra)
             .arg("no-shared")
             .arg("no-tests")
             .arg("no-docs")
