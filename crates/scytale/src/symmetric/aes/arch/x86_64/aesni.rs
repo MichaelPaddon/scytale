@@ -713,6 +713,12 @@ macro_rules! define_aes {
                 this
             }
 
+            /// The expanded schedule, for a sibling backend that shares
+            /// it. VAES reads exactly these bytes.
+            pub(super) fn schedule(&self) -> &[u8] {
+                &self.rk
+            }
+
             /// Encrypt whole blocks in place, returning bytes consumed.
             pub fn encrypt(&self, data: &mut [u8]) -> usize {
                 let blocks = data.len() / BLOCK_SIZE;
@@ -764,6 +770,12 @@ macro_rules! define_aes {
                     );
                 }
                 this
+            }
+
+            /// The expanded schedule, for a sibling backend that shares
+            /// it.
+            pub(super) fn schedule(&self) -> &[u8] {
+                &self.rk
             }
 
             /// Decrypt whole blocks in place, returning bytes consumed.

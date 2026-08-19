@@ -26,39 +26,44 @@ pub const BLOCK_SIZE: usize = ttable::BLOCK_SIZE;
 /// accelerated arm is simply never taken.
 #[cfg(target_arch = "x86_64")]
 mod accel {
-    pub use super::arch::x86_64::aesni::supported;
-    pub use super::arch::x86_64::aesni::{
-        Aes128Dec, Aes128Enc, Aes192Dec, Aes192Enc, Aes256Dec, Aes256Enc,
-    };
+    pub use super::arch::x86_64::{aesni, vaes};
 }
 
 #[cfg(not(target_arch = "x86_64"))]
 mod accel {
-    pub use super::arch::portable::ttable::{
-        Aes128Dec, Aes128Enc, Aes192Dec, Aes192Enc, Aes256Dec, Aes256Enc,
-    };
+    /// Stand-ins so the dispatch below needs no target specific spelling.
+    /// Both report no support, so neither arm is ever taken.
+    pub mod vaes {
+        pub use super::super::arch::portable::ttable::{
+            Aes128Dec, Aes128Enc, Aes192Dec, Aes192Enc, Aes256Dec,
+            Aes256Enc,
+        };
 
-    pub fn supported() -> bool {
-        false
+        pub fn supported() -> bool {
+            false
+        }
     }
+
+    pub use vaes as aesni;
 }
 
 /// Which implementation a dispatching type chose.
 ///
 /// The choice is made once, when the key is expanded, and then it is a
 /// property of the value. Nothing re-examines the CPU per call.
-enum Backend<A, P> {
+enum Backend<V, A, P> {
+    Vector(V),
     Accelerated(A),
     Portable(P),
 }
 
 macro_rules! define_dispatch {
     (
-        $name:ident, $accel:ty, $portable:ty, $key_size:expr,
+        $name:ident, $vector:ty, $accel:ty, $portable:ty, $key_size:expr,
         $op:ident, $op_block:ident, $tr:ident, $doc:expr
     ) => {
         #[doc = $doc]
-        pub struct $name(Backend<$accel, $portable>);
+        pub struct $name(Backend<$vector, $accel, $portable>);
 
         impl $name {
             /// The key length in bytes.
@@ -70,11 +75,17 @@ macro_rules! define_dispatch {
             /// Use [`Self::parallel_blocks`] for the number the selected
             /// one actually uses; this is the figure to size a buffer by.
             pub const PARALLEL_BLOCKS: usize =
-                <$accel>::PARALLEL_BLOCKS;
+                <$vector>::PARALLEL_BLOCKS;
 
             /// Expand `key`, choosing an implementation for this CPU.
+            ///
+            /// Widest first: the vector kernels do the most work per
+            /// instruction, and fall back to the single block accelerated
+            /// ones for anything they cannot fill.
             pub fn new(key: &[u8; $key_size]) -> Self {
-                Self(if accel::supported() {
+                Self(if accel::vaes::supported() {
+                    Backend::Vector(<$vector>::new(key))
+                } else if accel::aesni::supported() {
                     Backend::Accelerated(<$accel>::new(key))
                 } else {
                     Backend::Portable(<$portable>::new(key))
@@ -87,6 +98,7 @@ macro_rules! define_dispatch {
             )]
             pub fn $op(&self, data: &mut [u8]) -> usize {
                 match &self.0 {
+                    Backend::Vector(v) => v.$op(data),
                     Backend::Accelerated(a) => a.$op(data),
                     Backend::Portable(p) => p.$op(data),
                 }
@@ -95,6 +107,7 @@ macro_rules! define_dispatch {
             #[doc = concat!(stringify!($op), " exactly one block in place.")]
             pub fn $op_block(&self, block: &mut [u8; BLOCK_SIZE]) {
                 match &self.0 {
+                    Backend::Vector(v) => v.$op_block(block),
                     Backend::Accelerated(a) => a.$op_block(block),
                     Backend::Portable(p) => p.$op_block(block),
                 }
@@ -103,6 +116,7 @@ macro_rules! define_dispatch {
             /// How many blocks the chosen implementation keeps in flight.
             pub fn parallel_blocks(&self) -> usize {
                 match &self.0 {
+                    Backend::Vector(_) => <$vector>::PARALLEL_BLOCKS,
                     Backend::Accelerated(_) => <$accel>::PARALLEL_BLOCKS,
                     Backend::Portable(_) => <$portable>::PARALLEL_BLOCKS,
                 }
@@ -110,7 +124,16 @@ macro_rules! define_dispatch {
 
             /// Whether this value is using an accelerated implementation.
             pub fn is_accelerated(&self) -> bool {
-                matches!(self.0, Backend::Accelerated(_))
+                !matches!(self.0, Backend::Portable(_))
+            }
+
+            /// The name of the implementation this value chose.
+            pub fn implementation(&self) -> &'static str {
+                match &self.0 {
+                    Backend::Vector(_) => "vector",
+                    Backend::Accelerated(_) => "accelerated",
+                    Backend::Portable(_) => "portable",
+                }
             }
         }
 
@@ -125,7 +148,7 @@ macro_rules! define_dispatch {
 
         impl $tr for $name {
             const BLOCK_SIZE: usize = BLOCK_SIZE;
-            const PARALLEL_BLOCKS: usize = <$accel>::PARALLEL_BLOCKS;
+            const PARALLEL_BLOCKS: usize = <$vector>::PARALLEL_BLOCKS;
 
             fn $op(&self, data: &mut [u8]) -> usize {
                 $name::$op(self, data)
@@ -145,28 +168,34 @@ macro_rules! define_dispatch {
 }
 
 define_dispatch!(
-    Aes128Enc, accel::Aes128Enc, ttable::Aes128Enc, 16,
-    encrypt, encrypt_block, BlockEncrypt, "AES-128 encryption only."
+    Aes128Enc, accel::vaes::Aes128Enc, accel::aesni::Aes128Enc,
+    ttable::Aes128Enc, 16, encrypt, encrypt_block, BlockEncrypt,
+    "AES-128 encryption only."
 );
 define_dispatch!(
-    Aes128Dec, accel::Aes128Dec, ttable::Aes128Dec, 16,
-    decrypt, decrypt_block, BlockDecrypt, "AES-128 decryption only."
+    Aes128Dec, accel::vaes::Aes128Dec, accel::aesni::Aes128Dec,
+    ttable::Aes128Dec, 16, decrypt, decrypt_block, BlockDecrypt,
+    "AES-128 decryption only."
 );
 define_dispatch!(
-    Aes192Enc, accel::Aes192Enc, ttable::Aes192Enc, 24,
-    encrypt, encrypt_block, BlockEncrypt, "AES-192 encryption only."
+    Aes192Enc, accel::vaes::Aes192Enc, accel::aesni::Aes192Enc,
+    ttable::Aes192Enc, 24, encrypt, encrypt_block, BlockEncrypt,
+    "AES-192 encryption only."
 );
 define_dispatch!(
-    Aes192Dec, accel::Aes192Dec, ttable::Aes192Dec, 24,
-    decrypt, decrypt_block, BlockDecrypt, "AES-192 decryption only."
+    Aes192Dec, accel::vaes::Aes192Dec, accel::aesni::Aes192Dec,
+    ttable::Aes192Dec, 24, decrypt, decrypt_block, BlockDecrypt,
+    "AES-192 decryption only."
 );
 define_dispatch!(
-    Aes256Enc, accel::Aes256Enc, ttable::Aes256Enc, 32,
-    encrypt, encrypt_block, BlockEncrypt, "AES-256 encryption only."
+    Aes256Enc, accel::vaes::Aes256Enc, accel::aesni::Aes256Enc,
+    ttable::Aes256Enc, 32, encrypt, encrypt_block, BlockEncrypt,
+    "AES-256 encryption only."
 );
 define_dispatch!(
-    Aes256Dec, accel::Aes256Dec, ttable::Aes256Dec, 32,
-    decrypt, decrypt_block, BlockDecrypt, "AES-256 decryption only."
+    Aes256Dec, accel::vaes::Aes256Dec, accel::aesni::Aes256Dec,
+    ttable::Aes256Dec, 32, decrypt, decrypt_block, BlockDecrypt,
+    "AES-256 decryption only."
 );
 
 macro_rules! define_both {
@@ -303,10 +332,30 @@ mod tests {
         assert_eq!(Aes128::new(&[0u8; 16]).is_accelerated(), expected);
     }
 
+    /// The widest available implementation must be the one chosen, or the
+    /// dispatch order is wrong and nobody would notice.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn picks_the_widest_implementation_available() {
+        let expected = if arch::x86_64::vaes::supported() {
+            "vector"
+        } else if arch::x86_64::aesni::supported() {
+            "accelerated"
+        } else {
+            "portable"
+        };
+        assert_eq!(Aes128Enc::new(&[0u8; 16]).implementation(), expected);
+        assert_eq!(Aes256Dec::new(&[0u8; 32]).implementation(), expected);
+    }
+
     #[test]
     fn parallel_blocks_reports_the_chosen_implementation() {
         let aes = Aes128Enc::new(&[0u8; 16]);
-        let expected = if aes.is_accelerated() { 8 } else { 1 };
+        let expected = match aes.implementation() {
+            "vector" => 16,
+            "accelerated" => 8,
+            _ => 1,
+        };
         assert_eq!(aes.parallel_blocks(), expected);
     }
 }
