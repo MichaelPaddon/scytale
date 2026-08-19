@@ -12,8 +12,9 @@ implementation. Every unfair comparison flatters one side, and every one of
 them reads as a meaningful number to somebody who does not know how it was
 produced.
 
-Scytale has three AES implementations, so OpenSSL is built twice and each
-is measured against its own counterpart where one exists:
+Scytale has three AES implementations on x86_64, which is the target
+measured here, so OpenSSL is built twice and each is measured against its
+own counterpart where one exists:
 
 | Tier | scytale | OpenSSL |
 | --- | --- | --- |
@@ -41,6 +42,11 @@ for CFB, XTS and GCM, but its only ECB kernel is `aesni_ecb_encrypt`.
 Rather than print a flattering ratio against narrower code, that tier is
 reported against scytale's own AES-NI, is labelled a speedup rather than a
 comparison, and gates nothing.
+
+There is a fourth implementation, on the ARMv8 Cryptographic Extension.
+No figure for it appears here, because it has only ever run under an
+emulator: qemu proves what the instructions compute and nothing about
+what they cost. It gets a tier of its own once it runs on hardware.
 
 The corollary: **if OpenSSL is ever faster, work stops until it is not.**
 The benchmark exits non-zero when any row falls below parity, so this is

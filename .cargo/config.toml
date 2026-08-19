@@ -1,3 +1,10 @@
 [alias]
 # The fast tier is plain `cargo test`. This adds the slow one on top.
 extended-test = "test --workspace --features scytale/extended-tests"
+
+# Cross testing under emulation. The backend for this target can be built
+# and proved correct here; nothing about timing can be, since qemu does
+# not model a pipeline.
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+runner = "qemu-aarch64 -L /usr/aarch64-linux-gnu"

@@ -26,6 +26,7 @@ specific implementation:
 use scytale::symmetric::aes::Aes128Enc;                          // best
 use scytale::symmetric::aes::arch::x86_64::vaes::Aes128Enc;      // pinned
 use scytale::symmetric::aes::arch::x86_64::aesni::Aes128Enc;     // pinned
+use scytale::symmetric::aes::arch::aarch64::crypto::Aes128Enc;   // pinned
 use scytale::symmetric::aes::arch::portable::ttable::Aes128Enc;  // pinned
 ```
 
@@ -35,9 +36,9 @@ whatever the silicon it lands on supports, so compiling on an old laptop
 does not cost you the new instructions on a new chip. Selection happens
 once, when the key is expanded, not per call.
 
-Today that means VAES where the CPU has it, AES-NI where it does not, and
-the portable T-table cipher everywhere else. `implementation()` reports
-which was chosen.
+Today that means VAES on an x86_64 CPU that has it and AES-NI on one that
+does not, the Cryptographic Extension on ARMv8, and the portable T-table
+cipher everywhere else. `implementation()` reports which was chosen.
 
 Reach for an `arch` path only when you need one exact implementation and
 can guarantee the target supports it.
@@ -130,10 +131,12 @@ bytes. Which cache lines it touches therefore depends on the key, and that
 is recoverable by an attacker who can observe cache state. This is inherent
 to the T-table construction, not a defect in this code.
 
-The AES-NI and VAES backends have no such problem: their round
-transformation is a single instruction with no data dependent memory
-access, and the widest available is chosen automatically. The T-table
-cipher is the fallback for everywhere else, and there this caveat applies.
+The hardware backends have no such problem: their round transformation is
+a single instruction with no data dependent memory access, and the widest
+available is chosen automatically. On ARMv8 the key schedule takes its
+substitution from the same instruction rather than from a table, so it is
+constant time too. The T-table cipher is the fallback for everywhere else,
+and there this caveat applies.
 
 ## Layout
 

@@ -29,7 +29,25 @@ mod accel {
     pub use super::arch::x86_64::{aesni, vaes};
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(target_arch = "aarch64")]
+mod accel {
+    pub use super::arch::aarch64::crypto as aesni;
+
+    /// A stand-in for the tier this target has nothing in. It reports no
+    /// support, so that arm is never taken.
+    pub mod vaes {
+        pub use super::super::arch::portable::ttable::{
+            Aes128Dec, Aes128Enc, Aes192Dec, Aes192Enc, Aes256Dec,
+            Aes256Enc,
+        };
+
+        pub fn supported() -> bool {
+            false
+        }
+    }
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod accel {
     /// Stand-ins so the dispatch below needs no target specific spelling.
     /// Both report no support, so neither arm is ever taken.
@@ -320,12 +338,21 @@ mod tests {
         assert_eq!(dispatched, plaintext);
     }
 
+    /// What this target's accelerated tier is, if it has one.
+    fn accelerated_here() -> bool {
+        accel::aesni::supported()
+    }
+
+    /// What this target's vector tier is, if it has one.
+    fn vector_here() -> bool {
+        accel::vaes::supported()
+    }
+
     /// A machine with the instructions must actually be using them. Without
     /// this a silent fall back would look exactly like success.
     #[test]
-    #[cfg(target_arch = "x86_64")]
     fn uses_acceleration_when_the_cpu_has_it() {
-        let expected = arch::x86_64::aesni::supported();
+        let expected = accelerated_here() || vector_here();
         assert_eq!(Aes128Enc::new(&[0u8; 16]).is_accelerated(), expected);
         assert_eq!(Aes192Enc::new(&[0u8; 24]).is_accelerated(), expected);
         assert_eq!(Aes256Dec::new(&[0u8; 32]).is_accelerated(), expected);
@@ -335,11 +362,10 @@ mod tests {
     /// The widest available implementation must be the one chosen, or the
     /// dispatch order is wrong and nobody would notice.
     #[test]
-    #[cfg(target_arch = "x86_64")]
     fn picks_the_widest_implementation_available() {
-        let expected = if arch::x86_64::vaes::supported() {
+        let expected = if vector_here() {
             "vector"
-        } else if arch::x86_64::aesni::supported() {
+        } else if accelerated_here() {
             "accelerated"
         } else {
             "portable"
@@ -352,9 +378,9 @@ mod tests {
     fn parallel_blocks_reports_the_chosen_implementation() {
         let aes = Aes128Enc::new(&[0u8; 16]);
         let expected = match aes.implementation() {
-            "vector" => 16,
-            "accelerated" => 8,
-            _ => 1,
+            "vector" => accel::vaes::Aes128Enc::PARALLEL_BLOCKS,
+            "accelerated" => accel::aesni::Aes128Enc::PARALLEL_BLOCKS,
+            _ => ttable::Aes128Enc::PARALLEL_BLOCKS,
         };
         assert_eq!(aes.parallel_blocks(), expected);
     }
