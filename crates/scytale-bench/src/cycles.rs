@@ -6,15 +6,18 @@
 //! Kernel and interrupt cycles are excluded, which removes the other
 //! large source of run to run movement.
 //!
-//! The counter is read through `rdpmc` on the page the kernel maps for
-//! that purpose, which costs tens of cycles rather than the microsecond a
-//! `read` syscall would. That is what makes short measurement windows
-//! affordable, and short windows are what keep a sample free of
-//! interference.
+//! On x86_64 the counter is read through `rdpmc` on the page the kernel
+//! maps for that purpose, which costs tens of cycles rather than the
+//! microsecond a `read` syscall would. That is what makes short
+//! measurement windows affordable, and short windows are what keep a
+//! sample free of interference. Elsewhere the counter is still a counter,
+//! but it is read through the kernel, so the harness pays a syscall pair
+//! per sample and wants longer windows to hide it.
 
 #![cfg(target_os = "linux")]
 
 use std::os::raw::c_int;
+#[cfg(target_arch = "x86_64")]
 use std::sync::atomic::{Ordering, compiler_fence};
 
 /// `PERF_TYPE_HARDWARE`.
@@ -24,6 +27,7 @@ const COUNT_HW_CPU_CYCLES: u64 = 0;
 /// `exclude_kernel` and `exclude_hv`, bits 5 and 6 of the flag word.
 const EXCLUDE_KERNEL_HV: u64 = (1 << 5) | (1 << 6);
 /// `cap_user_rdpmc`, bit 2 of the capability word.
+#[cfg(target_arch = "x86_64")]
 const CAP_USER_RDPMC: u64 = 1 << 2;
 
 /// The subset of `perf_event_attr` this needs.
@@ -161,13 +165,19 @@ impl Cycles {
 
     /// Whether counts come from `rdpmc` rather than the `read` syscall.
     pub fn is_direct(&self) -> bool {
-        // SAFETY: the page is mapped for the lifetime of self.
-        let page = unsafe { &*self.page };
-        page.capabilities & CAP_USER_RDPMC != 0 && page.index != 0
+        #[cfg(target_arch = "x86_64")]
+        {
+            // SAFETY: the page is mapped for the lifetime of self.
+            let page = unsafe { &*self.page };
+            page.capabilities & CAP_USER_RDPMC != 0 && page.index != 0
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        false
     }
 
     /// The current count, or `None` if the counter could not be read.
     #[inline]
+    #[cfg(target_arch = "x86_64")]
     pub fn read(&self) -> Option<u64> {
         // SAFETY: the page is mapped for the lifetime of self and is only
         // ever read.
@@ -205,6 +215,13 @@ impl Cycles {
         }
     }
 
+    /// The current count, on an architecture with no user space read.
+    #[inline]
+    #[cfg(not(target_arch = "x86_64"))]
+    pub fn read(&self) -> Option<u64> {
+        self.read_syscall()
+    }
+
     /// Read the counter the slow way, for kernels without `rdpmc`.
     fn read_syscall(&self) -> Option<u64> {
         let mut buf = [0u8; 8];
@@ -232,6 +249,7 @@ impl Drop for Cycles {
 }
 
 /// Read one performance counter by its index.
+#[cfg(target_arch = "x86_64")]
 ///
 /// # Safety
 ///
@@ -282,21 +300,25 @@ fn page_size() -> usize {
 // The kernel writes these fields from another context, so every read has
 // to actually happen where it is written rather than be hoisted out of
 // the sequence lock loop.
+#[cfg(target_arch = "x86_64")]
 fn volatile(p: &u32) -> u32 {
     // SAFETY: p is a live reference into the mapped page.
     unsafe { std::ptr::read_volatile(p) }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn volatile_u64(p: &u64) -> u64 {
     // SAFETY: as above.
     unsafe { std::ptr::read_volatile(p) }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn volatile_i64(p: &i64) -> i64 {
     // SAFETY: as above.
     unsafe { std::ptr::read_volatile(p) }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn volatile_u16(p: &u16) -> u16 {
     // SAFETY: as above.
     unsafe { std::ptr::read_volatile(p) }
