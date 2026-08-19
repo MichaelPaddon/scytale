@@ -44,7 +44,7 @@ pub trait BlockEncrypt {
     /// How many blocks this implementation keeps in flight at once.
     ///
     /// Modes use this to size the buffers they hand over. A scalar
-    /// implementation reports 1; an AES-NI one reports 8.
+    /// implementation reports 1; an AES-NI one reports 12.
     const PARALLEL_BLOCKS: usize;
 
     /// Encrypt whole blocks in place, returning how many bytes were consumed.

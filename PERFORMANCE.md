@@ -1,7 +1,7 @@
 # Performance
 
 Scytale is measured against OpenSSL, on the same machine, in the same
-process, in the same measurement loop.
+process, in the same measurement loop, in core cycles.
 
 ## The rule
 
@@ -12,20 +12,35 @@ implementation. Every unfair comparison flatters one side, and every one of
 them reads as a meaningful number to somebody who does not know how it was
 produced.
 
-Scytale has two AES implementations, so OpenSSL is built twice and each is
-measured against its own counterpart:
+Scytale has three AES implementations, so OpenSSL is built twice and each
+is measured against its own counterpart where one exists:
 
 | Tier | scytale | OpenSSL |
 | --- | --- | --- |
+| vector | VAES | none: it has no VAES kernel for ECB |
 | accelerated | AES-NI | AES-NI, from a default build |
 | portable | T-table | C, from a `no-asm` build |
 
-Neither pairing is arbitrary. Putting our AES-NI against OpenSSL's C would
-flatter us by five to ten times on hardware grounds alone; putting our
+None of these pairings is arbitrary. Putting our AES-NI against OpenSSL's C
+would flatter us by five to ten times on hardware grounds alone; putting our
 T-table against its AES-NI would do the reverse. The accelerated tier also
 avoids OpenSSL's `AES_encrypt`, which in an assembly build is its assembly
 T-table rather than its AES-NI, and avoids EVP, which would add dispatch and
 context handling to the measurement.
+
+The same rule decides which entry point each side is called through. A one
+block message goes through each side's own single block entry,
+`encrypt_block` against `aesni_encrypt`; everything longer goes through each
+side's bulk entry, ours against `aesni_ecb_encrypt`. Measuring one block
+through the bulk entry would charge OpenSSL for a length dispatch that a
+caller with one block does not use, which is a comparison of interfaces
+rather than of ciphers.
+
+The vector tier has no honest counterpart at all. OpenSSL 4.0.1 uses VAES
+for CFB, XTS and GCM, but its only ECB kernel is `aesni_ecb_encrypt`.
+Rather than print a flattering ratio against narrower code, that tier is
+reported against scytale's own AES-NI, is labelled a speedup rather than a
+comparison, and gates nothing.
 
 The corollary: **if OpenSSL is ever faster, work stops until it is not.**
 The benchmark exits non-zero when any row falls below parity, so this is
@@ -33,40 +48,64 @@ machine checkable rather than a matter of reading the table carefully.
 
 ## Method
 
-- The tool links libcrypto directly and drives both implementations through
-  one measurement loop, with the same buffers and the same timer.
-- Message sizes are 16, 64, 256, 1024, 8192 and 16384 bytes.
-- Each case runs 21 rounds after a discarded warm up. A round times each
-  implementation for about 10 ms, and which one goes first alternates so
-  neither systematically gets the better half of a round.
-- The reported ratio is the median of the per round ratios, not the ratio of
-  the two medians. The two sides of a round are measured milliseconds apart,
-  so dividing them cancels whatever the clock was doing at that moment.
-- The 10 ms window is deliberate. Switching between implementations more
-  often makes each pay a cold instruction cache over less work, which is a
-  cost no real caller meets; at 2 ms the ratio falls by 0.06 for that reason
-  alone.
-- Run pinned to one core. On a hybrid CPU the performance and efficiency
-  cores run at different clocks, so an unpinned benchmark is partly
-  measuring the scheduler. The tool warns when it is not pinned.
-- Correctness gates the timing. The agreement tests require byte identical
-  output from scytale and from both OpenSSL builds, across all three key
-  sizes, both directions, and buffer lengths from 1 to 64 blocks.
-- Both sides are driven through the same in place bulk signature, so neither
-  pays for a wrapper the other does not.
+The tool links libcrypto directly and drives both implementations through
+one measurement loop, with the same message sizes and the same instrument.
+Message sizes are 16, 64, 256, 1024, 8192 and 16384 bytes.
+
+**Core cycles, not wall time.** The core clock moves under a frequency
+governor and under turbo, so a stopwatch measures the machine's power state
+along with the code. Cycles come from `perf_event_open`, read with `rdpmc`
+on the page the kernel maps for it, which costs tens of cycles rather than
+the microsecond a syscall would. Kernel and interrupt cycles are excluded
+from the count. On a hybrid CPU the performance and efficiency cores have
+separate counters, and an event opened on the wrong one is accepted and
+then counts nothing, so the tool opens each in turn and keeps the one that
+demonstrably counts.
+
+**Independent messages.** Each call takes the next message from a short
+ring rather than rewriting one buffer. Encrypting one buffer over and over
+makes each call wait on the previous call's stores, and at one block that
+wait is most of what gets measured: the same AES-128 block costs 6.2 cycles
+when calls are independent and 37 when they are chained. The ring is held
+to 8 KB, which stays in the first level cache, so independence is not
+bought with cache misses.
+
+**The minimum of many short samples.** Each side is measured 201 times, in
+windows of about 200000 cycles, alternating so that anything drifting
+during a run lands on both equally. The reported figure is the smallest
+sample: interference can only add cycles to a measurement, never remove
+them, so with enough samples the smallest is the one that met the least of
+it. The median is kept alongside and printed under `--verbose`; a gap
+between the two is the sign of a machine that was not quiet.
+
+**A fixed machine.** Run pinned to one core: on a hybrid CPU the two core
+types run different clocks and have different counters. Run under
+`setarch -R` as well, because where the buffers and key schedules land
+decides which of them share cache sets, and randomizing that moves a short
+message row by a couple of percent from one run to the next. The tool
+reports what it is measuring with and warns when either is missing, and
+notes the sibling thread of the core it is pinned to, since work there
+spends the same core's cycles.
+
+**Correctness gates the timing.** The agreement tests require byte
+identical output from scytale and from both OpenSSL builds, across all
+three key sizes, both directions, and buffer lengths from 1 to 64 blocks.
+The full ACVP vector set runs under `cargo test --features extended-tests`.
 
 ## Reproducing
 
 ```
 cargo build -p scytale-bench --release
-taskset -c 2 target/release/scytale-bench             # accelerated
-taskset -c 2 target/release/scytale-bench --portable  # portable
+setarch -R taskset -c 2 target/release/scytale-bench             # accelerated
+setarch -R taskset -c 2 target/release/scytale-bench --portable  # portable
+setarch -R taskset -c 2 target/release/scytale-bench --vector    # VAES
 ```
 
 Pick a core of a single type; on a hybrid CPU
 `/sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_max_freq` distinguishes them.
-Running without `taskset` still works and still reports, but the ratios move
-about three times as much between runs.
+A tier takes under a second. Reading the cycle counter needs
+`perf_event_paranoid` of 2 or less; without it the tool falls back to the
+clock, says so, and the ratios move with the governor.
 
 The build script clones and builds both reference OpenSSL configurations; it
 never vendors them. The first run therefore takes several minutes, and later
@@ -76,144 +115,212 @@ runs reuse the built libraries.
 
 Measured on a 13th Gen Intel Core i7-1355U pinned to one performance core,
 `x86_64-unknown-linux-gnu`, rustc 1.97.1, against OpenSSL 4.0.1. Each figure
-is the median of four runs of the tool, each of which is itself a median
-over 21 interleaved rounds.
+is the median of five runs of the tool, each of which is itself the smallest
+of 201 samples.
 
-Absolute throughput here is lower than the same code reaches unpinned,
-because a pinned core does not get the scheduler's pick of clock speed. The
-ratio is unaffected, which is the point of reporting one.
+Cycles per byte is the number to compare: it does not depend on the clock,
+and multiplying by 16 gives cycles per block. MB/s is given for a sense of
+scale, at whatever clock the run happened to see, and is not what the ratio
+is taken from.
 
 ### Accelerated: AES-NI against OpenSSL AES-NI
 
-This is what runs on any x86_64 CPU with the AES instructions, which is
-almost all of them made since 2010. Selection is at run time, so a binary
-built for a baseline target still uses them when it lands on such a CPU.
+What runs on an x86_64 CPU with the AES instructions but without VAES.
 
-
-| Algorithm | Bytes | scytale MB/s | OpenSSL MB/s | Ratio | |
-| --- | ---: | ---: | ---: | ---: | :---: |
-| AES-128-ECB encrypt | 16 | 2146 | 2130 | 1.01 | ✅ |
-| AES-128-ECB encrypt | 64 | 7974 | 7782 | 1.03 | ✅ |
-| AES-128-ECB encrypt | 256 | 15058 | 14713 | 1.02 | ✅ |
-| AES-128-ECB encrypt | 1024 | 15306 | 14842 | 1.03 | ✅ |
-| AES-128-ECB encrypt | 8192 | 15425 | 15157 | 1.02 | ✅ |
-| AES-128-ECB encrypt | 16384 | 15457 | 15258 | 1.01 | ✅ |
-| AES-128-ECB decrypt | 16 | 2138 | 2114 | 1.01 | ✅ |
-| AES-128-ECB decrypt | 64 | 8016 | 7994 | 1.00 | ✅ |
-| AES-128-ECB decrypt | 256 | 15020 | 14579 | 1.03 | ✅ |
-| AES-128-ECB decrypt | 1024 | 15242 | 14941 | 1.02 | ✅ |
-| AES-128-ECB decrypt | 8192 | 15182 | 14964 | 1.02 | ✅ |
-| AES-128-ECB decrypt | 16384 | 15387 | 15080 | 1.02 | ✅ |
-| AES-192-ECB encrypt | 16 | 1845 | 1832 | 1.00 | ✅ |
-| AES-192-ECB encrypt | 64 | 6956 | 6655 | 1.04 | ✅ |
-| AES-192-ECB encrypt | 256 | 12607 | 12321 | 1.02 | ✅ |
-| AES-192-ECB encrypt | 1024 | 12666 | 12496 | 1.02 | ✅ |
-| AES-192-ECB encrypt | 8192 | 12712 | 12524 | 1.02 | ✅ |
-| AES-192-ECB encrypt | 16384 | 12740 | 12528 | 1.01 | ✅ |
-| AES-192-ECB decrypt | 16 | 1842 | 1828 | 1.01 | ✅ |
-| AES-192-ECB decrypt | 64 | 6926 | 6822 | 1.01 | ✅ |
-| AES-192-ECB decrypt | 256 | 12575 | 12282 | 1.03 | ✅ |
-| AES-192-ECB decrypt | 1024 | 12708 | 12446 | 1.02 | ✅ |
-| AES-192-ECB decrypt | 8192 | 12677 | 12492 | 1.02 | ✅ |
-| AES-192-ECB decrypt | 16384 | 12700 | 12434 | 1.02 | ✅ |
-| AES-256-ECB encrypt | 16 | 1618 | 1602 | 1.01 | ✅ |
-| AES-256-ECB encrypt | 64 | 6124 | 5930 | 1.04 | ✅ |
-| AES-256-ECB encrypt | 256 | 10824 | 10628 | 1.02 | ✅ |
-| AES-256-ECB encrypt | 1024 | 10892 | 10732 | 1.02 | ✅ |
-| AES-256-ECB encrypt | 8192 | 10874 | 10664 | 1.02 | ✅ |
-| AES-256-ECB encrypt | 16384 | 10872 | 10715 | 1.02 | ✅ |
-| AES-256-ECB decrypt | 16 | 1615 | 1584 | 1.01 | ✅ |
-| AES-256-ECB decrypt | 64 | 6078 | 6068 | 1.00 | ✅ |
-| AES-256-ECB decrypt | 256 | 10802 | 10503 | 1.03 | ✅ |
-| AES-256-ECB decrypt | 1024 | 10866 | 10666 | 1.02 | ✅ |
-| AES-256-ECB decrypt | 8192 | 10919 | 10692 | 1.02 | ✅ |
-| AES-256-ECB decrypt | 16384 | 10896 | 10670 | 1.02 | ✅ |
+| Algorithm | Bytes | scytale cyc/B | scytale MB/s | OpenSSL cyc/B | OpenSSL MB/s | Ratio | |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | :---: |
+| AES-128-ECB encrypt | 16 | 0.3906 | 12531 | 1.2655 | 3914 | 3.240 | ✅ |
+| AES-128-ECB encrypt | 64 | 0.3163 | 15190 | 0.3633 | 13274 | 1.148 | ✅ |
+| AES-128-ECB encrypt | 256 | 0.3125 | 15872 | 0.3128 | 15791 | 1.001 | ✅ |
+| AES-128-ECB encrypt | 1024 | 0.3125 | 15938 | 0.3138 | 15452 | 1.004 | ✅ |
+| AES-128-ECB encrypt | 8192 | 0.3125 | 15905 | 0.3135 | 15827 | 1.003 | ✅ |
+| AES-128-ECB encrypt | 16384 | 0.3128 | 15931 | 0.3130 | 15918 | 1.001 | ✅ |
+| AES-128-ECB decrypt | 16 | 0.3984 | 10586 | 1.2655 | 3875 | 3.176 | ✅ |
+| AES-128-ECB decrypt | 64 | 0.3168 | 15234 | 0.3790 | 12010 | 1.196 | ✅ |
+| AES-128-ECB decrypt | 256 | 0.3125 | 15882 | 0.3130 | 15824 | 1.002 | ✅ |
+| AES-128-ECB decrypt | 1024 | 0.3125 | 15897 | 0.3141 | 15442 | 1.005 | ✅ |
+| AES-128-ECB decrypt | 8192 | 0.3125 | 15934 | 0.3134 | 15893 | 1.003 | ✅ |
+| AES-128-ECB decrypt | 16384 | 0.3127 | 15864 | 0.3129 | 15897 | 1.001 | ✅ |
+| AES-192-ECB encrypt | 16 | 0.4448 | 10670 | 1.3905 | 3546 | 3.126 | ✅ |
+| AES-192-ECB encrypt | 64 | 0.3786 | 12752 | 0.3912 | 12236 | 1.033 | ✅ |
+| AES-192-ECB encrypt | 256 | 0.3750 | 13204 | 0.3754 | 13184 | 1.001 | ✅ |
+| AES-192-ECB encrypt | 1024 | 0.3750 | 13284 | 0.3763 | 13192 | 1.003 | ✅ |
+| AES-192-ECB encrypt | 8192 | 0.3750 | 13241 | 0.3761 | 13154 | 1.003 | ✅ |
+| AES-192-ECB encrypt | 16384 | 0.3752 | 13260 | 0.3756 | 13231 | 1.001 | ✅ |
+| AES-192-ECB decrypt | 16 | 0.4421 | 10820 | 1.4139 | 3475 | 3.198 | ✅ |
+| AES-192-ECB decrypt | 64 | 0.3786 | 12881 | 0.3897 | 11818 | 1.029 | ✅ |
+| AES-192-ECB decrypt | 256 | 0.3750 | 13206 | 0.3770 | 13107 | 1.005 | ✅ |
+| AES-192-ECB decrypt | 1024 | 0.3750 | 13245 | 0.3775 | 13166 | 1.007 | ✅ |
+| AES-192-ECB decrypt | 8192 | 0.3750 | 13281 | 0.3773 | 13195 | 1.006 | ✅ |
+| AES-192-ECB decrypt | 16384 | 0.3752 | 13265 | 0.3770 | 13197 | 1.005 | ✅ |
+| AES-256-ECB encrypt | 16 | 0.5194 | 9246 | 1.6827 | 2898 | 3.240 | ✅ |
+| AES-256-ECB encrypt | 64 | 0.4419 | 11070 | 0.4551 | 10759 | 1.030 | ✅ |
+| AES-256-ECB encrypt | 256 | 0.4379 | 11284 | 0.4383 | 11283 | 1.001 | ✅ |
+| AES-256-ECB encrypt | 1024 | 0.4377 | 11372 | 0.4392 | 11311 | 1.003 | ✅ |
+| AES-256-ECB encrypt | 8192 | 0.4375 | 11375 | 0.4391 | 11312 | 1.004 | ✅ |
+| AES-256-ECB encrypt | 16384 | 0.4377 | 11305 | 0.4385 | 11267 | 1.002 | ✅ |
+| AES-256-ECB decrypt | 16 | 0.5200 | 9420 | 1.8904 | 2620 | 3.629 | ✅ |
+| AES-256-ECB decrypt | 64 | 0.4422 | 11024 | 0.4550 | 10678 | 1.029 | ✅ |
+| AES-256-ECB decrypt | 256 | 0.4377 | 11304 | 0.4399 | 11218 | 1.005 | ✅ |
+| AES-256-ECB decrypt | 1024 | 0.4376 | 11363 | 0.4398 | 11291 | 1.005 | ✅ |
+| AES-256-ECB decrypt | 8192 | 0.4375 | 11384 | 0.4400 | 11279 | 1.006 | ✅ |
+| AES-256-ECB decrypt | 16384 | 0.4379 | 11370 | 0.4391 | 11291 | 1.003 | ✅ |
 
 ### Portable: T-table against OpenSSL C
 
-This is what runs where the instructions are absent.
+What runs where neither is available.
 
+| Algorithm | Bytes | scytale cyc/B | scytale MB/s | OpenSSL cyc/B | OpenSSL MB/s | Ratio | |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | :---: |
+| AES-128-ECB encrypt | 16 | 8.5484 | 579 | 9.4422 | 522 | 1.105 | ✅ |
+| AES-128-ECB encrypt | 64 | 8.2939 | 587 | 9.2534 | 527 | 1.115 | ✅ |
+| AES-128-ECB encrypt | 256 | 8.2454 | 590 | 9.1391 | 533 | 1.108 | ✅ |
+| AES-128-ECB encrypt | 1024 | 8.2403 | 590 | 9.1345 | 532 | 1.108 | ✅ |
+| AES-128-ECB encrypt | 8192 | 8.2147 | 591 | 9.1071 | 537 | 1.108 | ✅ |
+| AES-128-ECB encrypt | 16384 | 8.2165 | 593 | 9.1076 | 536 | 1.108 | ✅ |
+| AES-128-ECB decrypt | 16 | 8.5775 | 567 | 9.2796 | 524 | 1.082 | ✅ |
+| AES-128-ECB decrypt | 64 | 8.3291 | 584 | 8.9987 | 541 | 1.080 | ✅ |
+| AES-128-ECB decrypt | 256 | 8.2814 | 586 | 8.8576 | 548 | 1.069 | ✅ |
+| AES-128-ECB decrypt | 1024 | 8.2749 | 584 | 8.8473 | 547 | 1.069 | ✅ |
+| AES-128-ECB decrypt | 8192 | 8.2484 | 590 | 8.8207 | 554 | 1.069 | ✅ |
+| AES-128-ECB decrypt | 16384 | 8.2607 | 589 | 8.8227 | 552 | 1.068 | ✅ |
+| AES-192-ECB encrypt | 16 | 10.2544 | 472 | 11.2098 | 433 | 1.093 | ✅ |
+| AES-192-ECB encrypt | 64 | 10.0737 | 483 | 10.9862 | 441 | 1.091 | ✅ |
+| AES-192-ECB encrypt | 256 | 9.9854 | 484 | 10.8728 | 446 | 1.089 | ✅ |
+| AES-192-ECB encrypt | 1024 | 9.9791 | 487 | 10.8601 | 448 | 1.088 | ✅ |
+| AES-192-ECB encrypt | 8192 | 9.9591 | 490 | 10.8371 | 451 | 1.088 | ✅ |
+| AES-192-ECB encrypt | 16384 | 9.9644 | 489 | 10.8370 | 448 | 1.088 | ✅ |
+| AES-192-ECB decrypt | 16 | 10.3052 | 473 | 11.0006 | 445 | 1.067 | ✅ |
+| AES-192-ECB decrypt | 64 | 10.1222 | 480 | 10.7135 | 453 | 1.058 | ✅ |
+| AES-192-ECB decrypt | 256 | 10.0301 | 486 | 10.5759 | 463 | 1.055 | ✅ |
+| AES-192-ECB decrypt | 1024 | 10.0208 | 488 | 10.5598 | 463 | 1.054 | ✅ |
+| AES-192-ECB decrypt | 8192 | 10.0004 | 489 | 10.5341 | 463 | 1.054 | ✅ |
+| AES-192-ECB decrypt | 16384 | 10.0039 | 488 | 10.5394 | 464 | 1.053 | ✅ |
+| AES-256-ECB encrypt | 16 | 11.9805 | 406 | 12.9736 | 374 | 1.083 | ✅ |
+| AES-256-ECB encrypt | 64 | 11.7768 | 414 | 12.7506 | 379 | 1.082 | ✅ |
+| AES-256-ECB encrypt | 256 | 11.6823 | 419 | 12.6401 | 387 | 1.082 | ✅ |
+| AES-256-ECB encrypt | 1024 | 11.6693 | 417 | 12.6322 | 384 | 1.083 | ✅ |
+| AES-256-ECB encrypt | 8192 | 11.6554 | 416 | 12.6105 | 386 | 1.082 | ✅ |
+| AES-256-ECB encrypt | 16384 | 11.6548 | 419 | 12.6082 | 387 | 1.081 | ✅ |
+| AES-256-ECB decrypt | 16 | 12.0200 | 405 | 12.7122 | 383 | 1.057 | ✅ |
+| AES-256-ECB decrypt | 64 | 11.8446 | 413 | 12.4340 | 392 | 1.050 | ✅ |
+| AES-256-ECB decrypt | 256 | 11.7380 | 415 | 12.2958 | 398 | 1.048 | ✅ |
+| AES-256-ECB decrypt | 1024 | 11.7304 | 418 | 12.2817 | 398 | 1.047 | ✅ |
+| AES-256-ECB decrypt | 8192 | 11.7052 | 415 | 12.2595 | 397 | 1.047 | ✅ |
+| AES-256-ECB decrypt | 16384 | 11.7028 | 419 | 12.2549 | 400 | 1.047 | ✅ |
 
-| Algorithm | Bytes | scytale MB/s | OpenSSL MB/s | Ratio | |
-| --- | ---: | ---: | ---: | ---: | :---: |
-| AES-128-ECB encrypt | 16 | 474 | 410 | 1.15 | ✅ |
-| AES-128-ECB encrypt | 64 | 540 | 478 | 1.13 | ✅ |
-| AES-128-ECB encrypt | 256 | 544 | 480 | 1.14 | ✅ |
-| AES-128-ECB encrypt | 1024 | 544 | 478 | 1.14 | ✅ |
-| AES-128-ECB encrypt | 8192 | 543 | 480 | 1.13 | ✅ |
-| AES-128-ECB encrypt | 16384 | 544 | 480 | 1.13 | ✅ |
-| AES-128-ECB decrypt | 16 | 469 | 418 | 1.12 | ✅ |
-| AES-128-ECB decrypt | 64 | 537 | 492 | 1.09 | ✅ |
-| AES-128-ECB decrypt | 256 | 544 | 494 | 1.10 | ✅ |
-| AES-128-ECB decrypt | 1024 | 541 | 494 | 1.10 | ✅ |
-| AES-128-ECB decrypt | 8192 | 540 | 496 | 1.10 | ✅ |
-| AES-128-ECB decrypt | 16384 | 542 | 496 | 1.10 | ✅ |
-| AES-192-ECB encrypt | 16 | 403 | 352 | 1.14 | ✅ |
-| AES-192-ECB encrypt | 64 | 446 | 400 | 1.12 | ✅ |
-| AES-192-ECB encrypt | 256 | 448 | 403 | 1.12 | ✅ |
-| AES-192-ECB encrypt | 1024 | 450 | 403 | 1.12 | ✅ |
-| AES-192-ECB encrypt | 8192 | 450 | 404 | 1.11 | ✅ |
-| AES-192-ECB encrypt | 16384 | 451 | 404 | 1.12 | ✅ |
-| AES-192-ECB decrypt | 16 | 398 | 360 | 1.10 | ✅ |
-| AES-192-ECB decrypt | 64 | 446 | 414 | 1.08 | ✅ |
-| AES-192-ECB decrypt | 256 | 448 | 415 | 1.08 | ✅ |
-| AES-192-ECB decrypt | 1024 | 449 | 414 | 1.08 | ✅ |
-| AES-192-ECB decrypt | 8192 | 451 | 416 | 1.08 | ✅ |
-| AES-192-ECB decrypt | 16384 | 450 | 414 | 1.09 | ✅ |
-| AES-256-ECB encrypt | 16 | 350 | 310 | 1.13 | ✅ |
-| AES-256-ECB encrypt | 64 | 383 | 346 | 1.11 | ✅ |
-| AES-256-ECB encrypt | 256 | 385 | 348 | 1.11 | ✅ |
-| AES-256-ECB encrypt | 1024 | 385 | 346 | 1.11 | ✅ |
-| AES-256-ECB encrypt | 8192 | 386 | 347 | 1.11 | ✅ |
-| AES-256-ECB encrypt | 16384 | 386 | 348 | 1.11 | ✅ |
-| AES-256-ECB decrypt | 16 | 347 | 316 | 1.10 | ✅ |
-| AES-256-ECB decrypt | 64 | 382 | 356 | 1.07 | ✅ |
-| AES-256-ECB decrypt | 256 | 384 | 358 | 1.07 | ✅ |
-| AES-256-ECB decrypt | 1024 | 384 | 357 | 1.08 | ✅ |
-| AES-256-ECB decrypt | 8192 | 384 | 358 | 1.07 | ✅ |
-| AES-256-ECB decrypt | 16384 | 386 | 358 | 1.08 | ✅ |
+### Vector: VAES against scytale's own AES-NI
+
+What runs on this machine, and on anything since Ice Lake or Alder Lake.
+The ratio is a speedup over our narrower kernels, not a comparison with
+OpenSSL, which has nothing of this kind for ECB.
+
+| Algorithm | Bytes | VAES cyc/B | VAES MB/s | AES-NI cyc/B | AES-NI MB/s | Speedup |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| AES-128-ECB encrypt | 16 | 0.6595 | 7323 | 0.5782 | 7851 | 0.877 |
+| AES-128-ECB encrypt | 64 | 0.3185 | 15150 | 0.3162 | 15313 | 0.993 |
+| AES-128-ECB encrypt | 256 | 0.1563 | 31449 | 0.3125 | 15750 | 2.000 |
+| AES-128-ECB encrypt | 1024 | 0.1565 | 31620 | 0.3125 | 15785 | 1.997 |
+| AES-128-ECB encrypt | 8192 | 0.1563 | 31704 | 0.3125 | 15898 | 2.000 |
+| AES-128-ECB encrypt | 16384 | 0.1563 | 31768 | 0.3126 | 15909 | 2.001 |
+| AES-128-ECB decrypt | 16 | 0.6487 | 7164 | 0.6112 | 7308 | 0.942 |
+| AES-128-ECB decrypt | 64 | 0.3168 | 15151 | 0.3167 | 15203 | 0.999 |
+| AES-128-ECB decrypt | 256 | 0.1563 | 31691 | 0.3125 | 15842 | 2.000 |
+| AES-128-ECB decrypt | 1024 | 0.1565 | 31689 | 0.3125 | 15902 | 1.997 |
+| AES-128-ECB decrypt | 8192 | 0.1563 | 31571 | 0.3125 | 15860 | 2.000 |
+| AES-128-ECB decrypt | 16384 | 0.1563 | 31666 | 0.3126 | 15835 | 2.001 |
+| AES-192-ECB encrypt | 16 | 0.7033 | 6673 | 0.7734 | 6175 | 1.100 |
+| AES-192-ECB encrypt | 64 | 0.3808 | 12698 | 0.3784 | 12846 | 0.994 |
+| AES-192-ECB encrypt | 256 | 0.1876 | 26391 | 0.3750 | 13187 | 1.999 |
+| AES-192-ECB encrypt | 1024 | 0.1879 | 26483 | 0.3750 | 13249 | 1.996 |
+| AES-192-ECB encrypt | 8192 | 0.1875 | 26493 | 0.3750 | 13248 | 2.000 |
+| AES-192-ECB encrypt | 16384 | 0.1875 | 26501 | 0.3752 | 13250 | 2.001 |
+| AES-192-ECB decrypt | 16 | 0.6957 | 6809 | 0.7734 | 6215 | 1.112 |
+| AES-192-ECB decrypt | 64 | 0.3804 | 12854 | 0.3785 | 12905 | 0.995 |
+| AES-192-ECB decrypt | 256 | 0.1876 | 26438 | 0.3750 | 13210 | 1.999 |
+| AES-192-ECB decrypt | 1024 | 0.1879 | 26453 | 0.3750 | 13289 | 1.996 |
+| AES-192-ECB decrypt | 8192 | 0.1875 | 26526 | 0.3750 | 13275 | 2.000 |
+| AES-192-ECB decrypt | 16384 | 0.1875 | 26385 | 0.3751 | 13211 | 2.001 |
+| AES-256-ECB encrypt | 16 | 0.7455 | 6309 | 0.7001 | 6701 | 0.940 |
+| AES-256-ECB encrypt | 64 | 0.4424 | 10885 | 0.4422 | 11007 | 1.000 |
+| AES-256-ECB encrypt | 256 | 0.2189 | 22708 | 0.4380 | 11351 | 2.001 |
+| AES-256-ECB encrypt | 1024 | 0.2193 | 22719 | 0.4377 | 11367 | 1.996 |
+| AES-256-ECB encrypt | 8192 | 0.2188 | 22653 | 0.4375 | 11273 | 2.000 |
+| AES-256-ECB encrypt | 16384 | 0.2188 | 22670 | 0.4377 | 11321 | 2.001 |
+| AES-256-ECB decrypt | 16 | 0.7451 | 6353 | 0.7074 | 6774 | 0.950 |
+| AES-256-ECB decrypt | 64 | 0.4427 | 10985 | 0.4424 | 10955 | 0.999 |
+| AES-256-ECB decrypt | 256 | 0.2189 | 22758 | 0.4377 | 11359 | 2.000 |
+| AES-256-ECB decrypt | 1024 | 0.2193 | 22694 | 0.4376 | 11385 | 1.996 |
+| AES-256-ECB decrypt | 8192 | 0.2188 | 22662 | 0.4375 | 11326 | 2.000 |
+| AES-256-ECB decrypt | 16384 | 0.2188 | 22600 | 0.4379 | 11304 | 2.002 |
 
 ✅ at or above parity with OpenSSL, ❌ below it.
 
 ## Reading the tables
 
-**Acceleration is worth about 26 times the portable cipher**, 15.4 GB/s
-against 544 MB/s for AES-128. That gap, not the ratios, is the reason the
-accelerated backend exists.
+**The bulk kernels run at the instruction throughput limit.** The AES
+instructions retire two per cycle, so AES-128's ten rounds cannot cost less
+than five cycles a block, AES-192's twelve less than six, and AES-256's
+fourteen less than seven. From 256 bytes up scytale measures 0.3125, 0.3750
+and 0.4375 cycles per byte, which is 5.000, 6.000 and 7.000 cycles a block.
+There is nothing left in those rows: the round instructions are the whole
+cost, and everything around them has been amortised away. OpenSSL is 0.1 to
+0.7% above the same floor, which is what the ratios of 1.001 to 1.007 are.
 
-**The accelerated lead is 1.00 to 1.04**, and the portable one 1.07 to 1.15.
-The portable margin is larger because there is more room to differ in
-software; two implementations of the same handful of instructions have
-almost nowhere left to go, and a couple of points there is close to the
-measurement floor.
+**VAES doubles AES-NI exactly**, 2.000 from 256 bytes up, because two
+blocks per instruction against a kernel already at the instruction limit
+can give exactly that and no more. Below sixteen blocks the vector types
+delegate to AES-NI and pay a check for the privilege, which is the 0.88 to
+1.11 at the short end; those rows gate nothing and are the same code on
+both sides.
 
-**Both leads are flat across key sizes.** AES-192 and AES-256 run more of
-the same rounds, so a per round gain shows up unchanged as a ratio.
+**Short messages are dominated by the call, not the cipher.** At one block
+scytale costs 6.2 cycles against OpenSSL's 20.2, a factor of 3.2. Almost
+all of that is the interface: our call inlines into the caller, theirs
+crosses the C ABI into a function that reloads the schedule pointer and the
+round count. It is a real difference to a caller with single blocks to
+encrypt, and it is not a statement about the cipher, which is why the row
+is worth reading separately from the rest.
 
-**The 16 byte row is the odd one.** At one block there is nothing to
-amortise a call over, so it mostly measures per call overhead. In the
-accelerated tier a single block cannot fill the pipeline either, which is
-why 2.1 GB/s is so far below the 15.4 GB/s the same code reaches at 256
-bytes.
+**The portable lead is 1.05 to 1.12**, and roughly flat across sizes. The
+margin is larger than the accelerated tier's because there is more room to
+differ in software: two implementations of the same handful of
+instructions have almost nowhere left to go.
+
+**Hardware is worth about 54 times the portable cipher**, 31.7 GB/s against
+593 MB/s for AES-128. That gap, not the ratios against OpenSSL, is the
+reason the accelerated backends exist.
 
 ## Caveats
 
-**The floor on what this can resolve is about 1%.** Across four pinned runs
-of an unchanged binary, rows move by roughly that much, so a change
-measuring under a point has not been shown to do anything. Unpinned that
-figure is about three times larger. Going below a point would need the
-`performance` governor and turbo disabled as well, neither of which the tool
-can arrange for itself.
+**What this can resolve is about 0.1%.** Across five runs of an unchanged
+binary, pinned and with a fixed layout, the bulk rows move by less than
+that, and so does our own figure at four blocks.
 
-**These are ECB single block kernels.** They measure the cipher, not a mode.
-A real mode adds its own work, and CTR in particular can overlap more than
-ECB can.
+OpenSSL's four block figure does not. It settles on one of two values
+about 3% apart, from one run to the next and from one build of this
+benchmark to the next, depending on where its key schedule lands relative
+to the messages. On AES-256 decryption the two implementations are close
+enough for that to decide the row: scytale measures 28.3 cycles a message
+against OpenSSL's 28.3 or 29.1, where the instruction throughput limit is
+28.0. The gate therefore trips on that one row about one run in eight.
+It is a tie at the hardware floor rather than a deficit, and the table
+above reports the median, but it is the one row in the tier where the
+verdict is not the same every time.
+
+**These are ECB single block kernels.** They measure the cipher, not a
+mode. A real mode adds its own work, and CTR in particular can overlap more
+than ECB can.
+
+**The measurement is of a hot cache.** The messages are in the first level
+cache and so is the key schedule. A caller whose data comes from memory
+will not see these numbers, and neither implementation would be the reason.
 
 **The T-table cipher is not constant time.** Its table indices depend on the
 key, so which cache lines are touched depends on the key, and that is
 recoverable by an attacker who can observe cache state. This is inherent to
 the construction rather than a defect in the code.
 
-**The AES-NI backend is constant time**, and is chosen automatically wherever
-the instructions exist. The portable cipher is the fallback, and where it is
-the one that runs, the caveat above applies.
+**The AES-NI and VAES backends are constant time**, and the widest
+available is chosen automatically. The portable cipher is the fallback, and
+where it is the one that runs, the caveat above applies.

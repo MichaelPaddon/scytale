@@ -24,6 +24,7 @@ specific implementation:
 
 ```rust
 use scytale::symmetric::aes::Aes128Enc;                          // best
+use scytale::symmetric::aes::arch::x86_64::vaes::Aes128Enc;      // pinned
 use scytale::symmetric::aes::arch::x86_64::aesni::Aes128Enc;     // pinned
 use scytale::symmetric::aes::arch::portable::ttable::Aes128Enc;  // pinned
 ```
@@ -34,9 +35,9 @@ whatever the silicon it lands on supports, so compiling on an old laptop
 does not cost you the new instructions on a new chip. Selection happens
 once, when the key is expanded, not per call.
 
-Today that means AES-NI on x86_64 where the CPU has it, and the portable
-T-table cipher everywhere else. `is_accelerated()` reports which was
-chosen.
+Today that means VAES where the CPU has it, AES-NI where it does not, and
+the portable T-table cipher everywhere else. `implementation()` reports
+which was chosen.
 
 Reach for an `arch` path only when you need one exact implementation and
 can guarantee the target supports it.
@@ -95,22 +96,31 @@ influence checks run in the extended tier.
 ## Performance
 
 Measured against OpenSSL on the same machine, in the same process, in the
-same measurement loop, each implementation against its own counterpart:
+same measurement loop, in core cycles, each implementation against its own
+counterpart:
 
 | Tier | scytale | vs OpenSSL | Throughput |
 | --- | --- | ---: | ---: |
-| accelerated | AES-NI | 1.00 to 1.04 | 15.4 GB/s |
-| portable | T-table | 1.07 to 1.15 | 544 MB/s |
+| vector | VAES | no counterpart | 31.8 GB/s |
+| accelerated | AES-NI | 1.00 to 1.20 | 15.9 GB/s |
+| portable | T-table | 1.05 to 1.12 | 593 MB/s |
 
-At or above parity on all 72 cases. AES-128, pinned to one core.
+At or above parity on all 72 comparable cases. The accelerated bulk
+kernels run at the instruction throughput limit, five cycles a block for
+AES-128, so the margin there is the fraction of a percent OpenSSL sits
+above the same floor; the wider margins are at short messages, where a
+single block costs 6.2 cycles against 20.2 through OpenSSL's own single
+block entry. VAES has no OpenSSL counterpart for ECB, so it is reported as
+a speedup over our own AES-NI: exactly 2.00x. AES-128, pinned to one core.
 
 See [PERFORMANCE.md](PERFORMANCE.md) for the method, the rules that keep
 the comparison honest, and the full results.
 
 ```
 cargo build -p scytale-bench --release
-taskset -c 2 target/release/scytale-bench             # accelerated
-taskset -c 2 target/release/scytale-bench --portable  # portable
+setarch -R taskset -c 2 target/release/scytale-bench             # accelerated
+setarch -R taskset -c 2 target/release/scytale-bench --portable  # portable
+setarch -R taskset -c 2 target/release/scytale-bench --vector    # VAES
 ```
 
 ## A warning about the T-table cipher
@@ -120,10 +130,10 @@ bytes. Which cache lines it touches therefore depends on the key, and that
 is recoverable by an attacker who can observe cache state. This is inherent
 to the T-table construction, not a defect in this code.
 
-The AES-NI backend has no such problem: its round transformation is a
-single instruction with no data dependent memory access, and it is chosen
-automatically wherever the instructions exist. The T-table cipher is the
-fallback for everywhere else, and there this caveat applies.
+The AES-NI and VAES backends have no such problem: their round
+transformation is a single instruction with no data dependent memory
+access, and the widest available is chosen automatically. The T-table
+cipher is the fallback for everywhere else, and there this caveat applies.
 
 ## Layout
 

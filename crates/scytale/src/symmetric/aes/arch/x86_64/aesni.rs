@@ -28,10 +28,13 @@ pub const BLOCK_SIZE: usize = 16;
 
 /// Blocks processed per iteration of the bulk loop.
 ///
-/// `aesenc` takes several cycles to produce a result but accepts a new one
-/// every cycle, so a single chain of dependent rounds leaves most of that
-/// throughput idle. Eight independent blocks cover the latency.
-const WIDTH: usize = 8;
+/// `aesenc` takes several cycles to produce a result but accepts two every
+/// cycle, so a single chain of dependent rounds leaves most of that
+/// throughput idle. Four independent blocks already cover the latency;
+/// twelve, which is what sixteen registers hold alongside a round key,
+/// also spread the loads, stores and loop bookkeeping thinly enough that
+/// the round instructions are the only cost that remains.
+const WIDTH: usize = 12;
 
 /// Whether this CPU has the AES instructions.
 ///
@@ -123,13 +126,13 @@ macro_rules! kernel8 {
     };
 }
 
-/// A fully unrolled 4 block kernel.
+/// A fully unrolled 12 block kernel.
 ///
-/// The register lines are written out so that the round keys
-/// are the only repetition, which is what lets the whole round
-/// sequence be straight line code. A loop over the keys costs
-/// an add, a decrement and a branch per round.
-macro_rules! kernel4 {
+/// Twelve blocks and one round key are what sixteen registers hold. The
+/// wider the group, the fewer times per block the loads, stores and loop
+/// bookkeeping around it are paid, and at this width the round
+/// instructions are the only thing left that scales with the work.
+macro_rules! kernel12 {
     (
         $name:ident, $round:literal, $last:literal,
         [$($key:literal),+], $final:literal
@@ -137,7 +140,7 @@ macro_rules! kernel4 {
         /// # Safety
         ///
         /// The CPU must have the AES instructions. `rk` must
-        /// hold the whole schedule and `data` 4 blocks.
+        /// hold the whole schedule and `data` 12 blocks.
         #[inline(always)]
         unsafe fn $name(rk: *const u8, data: *mut u8) {
             // SAFETY: the caller guarantees the instructions
@@ -146,36 +149,86 @@ macro_rules! kernel4 {
             // byte aligned memory operand.
             unsafe {
                 asm!(
-                    "movdqu xmm8, [{rk}]",
-                    "movdqu xmm0, [{d} + 0x00]",
-                    "movdqu xmm1, [{d} + 0x10]",
-                    "movdqu xmm2, [{d} + 0x20]",
-                    "movdqu xmm3, [{d} + 0x30]",
-                    "pxor xmm0, xmm8",
-                    "pxor xmm1, xmm8",
-                    "pxor xmm2, xmm8",
-                    "pxor xmm3, xmm8",
+                    "movups xmm0, [{d} + 0x00]",
+                    "movups xmm1, [{d} + 0x10]",
+                    "movups xmm2, [{d} + 0x20]",
+                    "movups xmm3, [{d} + 0x30]",
+                    "movups xmm4, [{d} + 0x40]",
+                    "movups xmm5, [{d} + 0x50]",
+                    "movups xmm6, [{d} + 0x60]",
+                    "movups xmm7, [{d} + 0x70]",
+                    "movups xmm8, [{d} + 0x80]",
+                    "movups xmm9, [{d} + 0x90]",
+                    "movups xmm10, [{d} + 0xa0]",
+                    "movups xmm11, [{d} + 0xb0]",
+                    "movups xmm12, [{rk}]",
+                    "xorps xmm0, xmm12",
+                    "xorps xmm1, xmm12",
+                    "xorps xmm2, xmm12",
+                    "xorps xmm3, xmm12",
+                    "xorps xmm4, xmm12",
+                    "xorps xmm5, xmm12",
+                    "xorps xmm6, xmm12",
+                    "xorps xmm7, xmm12",
+                    "xorps xmm8, xmm12",
+                    "xorps xmm9, xmm12",
+                    "xorps xmm10, xmm12",
+                    "xorps xmm11, xmm12",
                     $(
-                        concat!("movdqu xmm8, [{rk} + ", $key, "]"),
-                        concat!($round, " xmm0, xmm8"),
-                        concat!($round, " xmm1, xmm8"),
-                        concat!($round, " xmm2, xmm8"),
-                        concat!($round, " xmm3, xmm8"),
+                        concat!("movups xmm12, [{rk} + ", $key, "]"),
+                        concat!($round, " xmm0, xmm12"),
+                        concat!($round, " xmm1, xmm12"),
+                        concat!($round, " xmm2, xmm12"),
+                        concat!($round, " xmm3, xmm12"),
+                        concat!($round, " xmm4, xmm12"),
+                        concat!($round, " xmm5, xmm12"),
+                        concat!($round, " xmm6, xmm12"),
+                        concat!($round, " xmm7, xmm12"),
+                        concat!($round, " xmm8, xmm12"),
+                        concat!($round, " xmm9, xmm12"),
+                        concat!($round, " xmm10, xmm12"),
+                        concat!($round, " xmm11, xmm12"),
                     )+
-                    concat!("movdqu xmm8, [{rk} + ", $final, "]"),
-                    concat!($last, " xmm0, xmm8"),
-                    concat!($last, " xmm1, xmm8"),
-                    concat!($last, " xmm2, xmm8"),
-                    concat!($last, " xmm3, xmm8"),
-                    "movdqu [{d} + 0x00], xmm0",
-                    "movdqu [{d} + 0x10], xmm1",
-                    "movdqu [{d} + 0x20], xmm2",
-                    "movdqu [{d} + 0x30], xmm3",
+                    concat!("movups xmm12, [{rk} + ", $final, "]"),
+                    concat!($last, " xmm0, xmm12"),
+                    concat!($last, " xmm1, xmm12"),
+                    concat!($last, " xmm2, xmm12"),
+                    concat!($last, " xmm3, xmm12"),
+                    concat!($last, " xmm4, xmm12"),
+                    concat!($last, " xmm5, xmm12"),
+                    concat!($last, " xmm6, xmm12"),
+                    concat!($last, " xmm7, xmm12"),
+                    concat!($last, " xmm8, xmm12"),
+                    concat!($last, " xmm9, xmm12"),
+                    concat!($last, " xmm10, xmm12"),
+                    concat!($last, " xmm11, xmm12"),
+                    "movups [{d} + 0x00], xmm0",
+                    "movups [{d} + 0x10], xmm1",
+                    "movups [{d} + 0x20], xmm2",
+                    "movups [{d} + 0x30], xmm3",
+                    "movups [{d} + 0x40], xmm4",
+                    "movups [{d} + 0x50], xmm5",
+                    "movups [{d} + 0x60], xmm6",
+                    "movups [{d} + 0x70], xmm7",
+                    "movups [{d} + 0x80], xmm8",
+                    "movups [{d} + 0x90], xmm9",
+                    "movups [{d} + 0xa0], xmm10",
+                    "movups [{d} + 0xb0], xmm11",
                     rk = in(reg) rk,
                     d = in(reg) data,
-                    out("xmm0") _, out("xmm1") _, out("xmm2") _,
-                    out("xmm3") _, out("xmm4") _, out("xmm5") _,
-                    out("xmm6") _, out("xmm7") _, out("xmm8") _,
+                    out("xmm0") _,
+                    out("xmm1") _,
+                    out("xmm2") _,
+                    out("xmm3") _,
+                    out("xmm4") _,
+                    out("xmm5") _,
+                    out("xmm6") _,
+                    out("xmm7") _,
+                    out("xmm8") _,
+                    out("xmm9") _,
+                    out("xmm10") _,
+                    out("xmm11") _,
+                    out("xmm12") _,
                     options(nostack),
                 );
             }
@@ -282,10 +335,331 @@ kernel8!(
     e128_8, "aesenc", "aesenclast",
     ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90"], "0xa0"
 );
-kernel4!(
-    e128_4, "aesenc", "aesenclast",
+kernel12!(
+    e128_12, "aesenc", "aesenclast",
     ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90"], "0xa0"
 );
+/// A fully unrolled 4 block kernel with the schedule in registers.
+///
+/// Four blocks leave twelve registers free, so the round keys are
+/// loaded once at the top and the rounds themselves touch memory
+/// only for the blocks. A schedule longer than twelve keys puts
+/// its last keys in registers whose own key has already been used
+/// for its round and is dead.
+macro_rules! kernel4_keys128 {
+    ($name:ident, $round:literal, $last:literal) => {
+        /// # Safety
+        ///
+        /// The CPU must have the AES instructions. `rk` must hold
+        /// the 11 round keys and `data` 4 blocks.
+        #[inline(always)]
+        unsafe fn $name(rk: *const u8, data: *mut u8) {
+            // SAFETY: the caller guarantees the instructions and
+            // both ranges.
+            unsafe {
+                asm!(
+                    "movups xmm0, [{d} + 0x00]",
+                    "movups xmm1, [{d} + 0x10]",
+                    "movups xmm2, [{d} + 0x20]",
+                    "movups xmm3, [{d} + 0x30]",
+                    "movups xmm4, [{rk} + 0x00]",
+                    "movups xmm5, [{rk} + 0x10]",
+                    "movups xmm6, [{rk} + 0x20]",
+                    "movups xmm7, [{rk} + 0x30]",
+                    "movups xmm8, [{rk} + 0x40]",
+                    "movups xmm9, [{rk} + 0x50]",
+                    "movups xmm10, [{rk} + 0x60]",
+                    "movups xmm11, [{rk} + 0x70]",
+                    "movups xmm12, [{rk} + 0x80]",
+                    "movups xmm13, [{rk} + 0x90]",
+                    "movups xmm14, [{rk} + 0xa0]",
+                    "xorps xmm0, xmm4",
+                    "xorps xmm1, xmm4",
+                    "xorps xmm2, xmm4",
+                    "xorps xmm3, xmm4",
+                    concat!($round, " xmm0, xmm5"),
+                    concat!($round, " xmm1, xmm5"),
+                    concat!($round, " xmm2, xmm5"),
+                    concat!($round, " xmm3, xmm5"),
+                    concat!($round, " xmm0, xmm6"),
+                    concat!($round, " xmm1, xmm6"),
+                    concat!($round, " xmm2, xmm6"),
+                    concat!($round, " xmm3, xmm6"),
+                    concat!($round, " xmm0, xmm7"),
+                    concat!($round, " xmm1, xmm7"),
+                    concat!($round, " xmm2, xmm7"),
+                    concat!($round, " xmm3, xmm7"),
+                    concat!($round, " xmm0, xmm8"),
+                    concat!($round, " xmm1, xmm8"),
+                    concat!($round, " xmm2, xmm8"),
+                    concat!($round, " xmm3, xmm8"),
+                    concat!($round, " xmm0, xmm9"),
+                    concat!($round, " xmm1, xmm9"),
+                    concat!($round, " xmm2, xmm9"),
+                    concat!($round, " xmm3, xmm9"),
+                    concat!($round, " xmm0, xmm10"),
+                    concat!($round, " xmm1, xmm10"),
+                    concat!($round, " xmm2, xmm10"),
+                    concat!($round, " xmm3, xmm10"),
+                    concat!($round, " xmm0, xmm11"),
+                    concat!($round, " xmm1, xmm11"),
+                    concat!($round, " xmm2, xmm11"),
+                    concat!($round, " xmm3, xmm11"),
+                    concat!($round, " xmm0, xmm12"),
+                    concat!($round, " xmm1, xmm12"),
+                    concat!($round, " xmm2, xmm12"),
+                    concat!($round, " xmm3, xmm12"),
+                    concat!($round, " xmm0, xmm13"),
+                    concat!($round, " xmm1, xmm13"),
+                    concat!($round, " xmm2, xmm13"),
+                    concat!($round, " xmm3, xmm13"),
+                    concat!($last, " xmm0, xmm14"),
+                    concat!($last, " xmm1, xmm14"),
+                    concat!($last, " xmm2, xmm14"),
+                    concat!($last, " xmm3, xmm14"),
+                    "movups [{d} + 0x00], xmm0",
+                    "movups [{d} + 0x10], xmm1",
+                    "movups [{d} + 0x20], xmm2",
+                    "movups [{d} + 0x30], xmm3",
+                    rk = in(reg) rk,
+                    d = in(reg) data,
+                    out("xmm0") _, out("xmm1") _, out("xmm2") _,
+                    out("xmm3") _, out("xmm4") _, out("xmm5") _,
+                    out("xmm6") _, out("xmm7") _, out("xmm8") _,
+                    out("xmm9") _, out("xmm10") _, out("xmm11") _,
+                    out("xmm12") _, out("xmm13") _, out("xmm14") _,
+                    options(nostack),
+                );
+            }
+        }
+    };
+}
+
+/// A fully unrolled 4 block kernel with the schedule in registers.
+///
+/// Four blocks leave twelve registers free, so the round keys are
+/// loaded once at the top and the rounds themselves touch memory
+/// only for the blocks. A schedule longer than twelve keys puts
+/// its last keys in registers whose own key has already been used
+/// for its round and is dead.
+macro_rules! kernel4_keys192 {
+    ($name:ident, $round:literal, $last:literal) => {
+        /// # Safety
+        ///
+        /// The CPU must have the AES instructions. `rk` must hold
+        /// the 13 round keys and `data` 4 blocks.
+        #[inline(always)]
+        unsafe fn $name(rk: *const u8, data: *mut u8) {
+            // SAFETY: the caller guarantees the instructions and
+            // both ranges.
+            unsafe {
+                asm!(
+                    "movups xmm0, [{d} + 0x00]",
+                    "movups xmm1, [{d} + 0x10]",
+                    "movups xmm2, [{d} + 0x20]",
+                    "movups xmm3, [{d} + 0x30]",
+                    "movups xmm4, [{rk} + 0x00]",
+                    "movups xmm5, [{rk} + 0x10]",
+                    "movups xmm6, [{rk} + 0x20]",
+                    "movups xmm7, [{rk} + 0x30]",
+                    "movups xmm8, [{rk} + 0x40]",
+                    "movups xmm9, [{rk} + 0x50]",
+                    "movups xmm10, [{rk} + 0x60]",
+                    "movups xmm11, [{rk} + 0x70]",
+                    "movups xmm12, [{rk} + 0x80]",
+                    "movups xmm13, [{rk} + 0x90]",
+                    "movups xmm14, [{rk} + 0xa0]",
+                    "movups xmm15, [{rk} + 0xb0]",
+                    "xorps xmm0, xmm4",
+                    "xorps xmm1, xmm4",
+                    "xorps xmm2, xmm4",
+                    "xorps xmm3, xmm4",
+                    "movups xmm4, [{rk} + 0xc0]",
+                    concat!($round, " xmm0, xmm5"),
+                    concat!($round, " xmm1, xmm5"),
+                    concat!($round, " xmm2, xmm5"),
+                    concat!($round, " xmm3, xmm5"),
+                    concat!($round, " xmm0, xmm6"),
+                    concat!($round, " xmm1, xmm6"),
+                    concat!($round, " xmm2, xmm6"),
+                    concat!($round, " xmm3, xmm6"),
+                    concat!($round, " xmm0, xmm7"),
+                    concat!($round, " xmm1, xmm7"),
+                    concat!($round, " xmm2, xmm7"),
+                    concat!($round, " xmm3, xmm7"),
+                    concat!($round, " xmm0, xmm8"),
+                    concat!($round, " xmm1, xmm8"),
+                    concat!($round, " xmm2, xmm8"),
+                    concat!($round, " xmm3, xmm8"),
+                    concat!($round, " xmm0, xmm9"),
+                    concat!($round, " xmm1, xmm9"),
+                    concat!($round, " xmm2, xmm9"),
+                    concat!($round, " xmm3, xmm9"),
+                    concat!($round, " xmm0, xmm10"),
+                    concat!($round, " xmm1, xmm10"),
+                    concat!($round, " xmm2, xmm10"),
+                    concat!($round, " xmm3, xmm10"),
+                    concat!($round, " xmm0, xmm11"),
+                    concat!($round, " xmm1, xmm11"),
+                    concat!($round, " xmm2, xmm11"),
+                    concat!($round, " xmm3, xmm11"),
+                    concat!($round, " xmm0, xmm12"),
+                    concat!($round, " xmm1, xmm12"),
+                    concat!($round, " xmm2, xmm12"),
+                    concat!($round, " xmm3, xmm12"),
+                    concat!($round, " xmm0, xmm13"),
+                    concat!($round, " xmm1, xmm13"),
+                    concat!($round, " xmm2, xmm13"),
+                    concat!($round, " xmm3, xmm13"),
+                    concat!($round, " xmm0, xmm14"),
+                    concat!($round, " xmm1, xmm14"),
+                    concat!($round, " xmm2, xmm14"),
+                    concat!($round, " xmm3, xmm14"),
+                    concat!($round, " xmm0, xmm15"),
+                    concat!($round, " xmm1, xmm15"),
+                    concat!($round, " xmm2, xmm15"),
+                    concat!($round, " xmm3, xmm15"),
+                    concat!($last, " xmm0, xmm4"),
+                    concat!($last, " xmm1, xmm4"),
+                    concat!($last, " xmm2, xmm4"),
+                    concat!($last, " xmm3, xmm4"),
+                    "movups [{d} + 0x00], xmm0",
+                    "movups [{d} + 0x10], xmm1",
+                    "movups [{d} + 0x20], xmm2",
+                    "movups [{d} + 0x30], xmm3",
+                    rk = in(reg) rk,
+                    d = in(reg) data,
+                    out("xmm0") _, out("xmm1") _, out("xmm2") _,
+                    out("xmm3") _, out("xmm4") _, out("xmm5") _,
+                    out("xmm6") _, out("xmm7") _, out("xmm8") _,
+                    out("xmm9") _, out("xmm10") _, out("xmm11") _,
+                    out("xmm12") _, out("xmm13") _, out("xmm14") _,
+                    out("xmm15") _,
+                    options(nostack),
+                );
+            }
+        }
+    };
+}
+
+/// A fully unrolled 4 block kernel with the schedule in registers.
+///
+/// Four blocks leave twelve registers free, so the round keys are
+/// loaded once at the top and the rounds themselves touch memory
+/// only for the blocks. A schedule longer than twelve keys puts
+/// its last keys in registers whose own key has already been used
+/// for its round and is dead.
+macro_rules! kernel4_keys256 {
+    ($name:ident, $round:literal, $last:literal) => {
+        /// # Safety
+        ///
+        /// The CPU must have the AES instructions. `rk` must hold
+        /// the 15 round keys and `data` 4 blocks.
+        #[inline(always)]
+        unsafe fn $name(rk: *const u8, data: *mut u8) {
+            // SAFETY: the caller guarantees the instructions and
+            // both ranges.
+            unsafe {
+                asm!(
+                    "movups xmm0, [{d} + 0x00]",
+                    "movups xmm1, [{d} + 0x10]",
+                    "movups xmm2, [{d} + 0x20]",
+                    "movups xmm3, [{d} + 0x30]",
+                    "movups xmm4, [{rk} + 0x00]",
+                    "movups xmm5, [{rk} + 0x10]",
+                    "movups xmm6, [{rk} + 0x20]",
+                    "movups xmm7, [{rk} + 0x30]",
+                    "movups xmm8, [{rk} + 0x40]",
+                    "movups xmm9, [{rk} + 0x50]",
+                    "movups xmm10, [{rk} + 0x60]",
+                    "movups xmm11, [{rk} + 0x70]",
+                    "movups xmm12, [{rk} + 0x80]",
+                    "movups xmm13, [{rk} + 0x90]",
+                    "movups xmm14, [{rk} + 0xa0]",
+                    "movups xmm15, [{rk} + 0xb0]",
+                    "xorps xmm0, xmm4",
+                    "xorps xmm1, xmm4",
+                    "xorps xmm2, xmm4",
+                    "xorps xmm3, xmm4",
+                    "movups xmm4, [{rk} + 0xc0]",
+                    concat!($round, " xmm0, xmm5"),
+                    concat!($round, " xmm1, xmm5"),
+                    concat!($round, " xmm2, xmm5"),
+                    concat!($round, " xmm3, xmm5"),
+                    "movups xmm5, [{rk} + 0xd0]",
+                    concat!($round, " xmm0, xmm6"),
+                    concat!($round, " xmm1, xmm6"),
+                    concat!($round, " xmm2, xmm6"),
+                    concat!($round, " xmm3, xmm6"),
+                    "movups xmm6, [{rk} + 0xe0]",
+                    concat!($round, " xmm0, xmm7"),
+                    concat!($round, " xmm1, xmm7"),
+                    concat!($round, " xmm2, xmm7"),
+                    concat!($round, " xmm3, xmm7"),
+                    concat!($round, " xmm0, xmm8"),
+                    concat!($round, " xmm1, xmm8"),
+                    concat!($round, " xmm2, xmm8"),
+                    concat!($round, " xmm3, xmm8"),
+                    concat!($round, " xmm0, xmm9"),
+                    concat!($round, " xmm1, xmm9"),
+                    concat!($round, " xmm2, xmm9"),
+                    concat!($round, " xmm3, xmm9"),
+                    concat!($round, " xmm0, xmm10"),
+                    concat!($round, " xmm1, xmm10"),
+                    concat!($round, " xmm2, xmm10"),
+                    concat!($round, " xmm3, xmm10"),
+                    concat!($round, " xmm0, xmm11"),
+                    concat!($round, " xmm1, xmm11"),
+                    concat!($round, " xmm2, xmm11"),
+                    concat!($round, " xmm3, xmm11"),
+                    concat!($round, " xmm0, xmm12"),
+                    concat!($round, " xmm1, xmm12"),
+                    concat!($round, " xmm2, xmm12"),
+                    concat!($round, " xmm3, xmm12"),
+                    concat!($round, " xmm0, xmm13"),
+                    concat!($round, " xmm1, xmm13"),
+                    concat!($round, " xmm2, xmm13"),
+                    concat!($round, " xmm3, xmm13"),
+                    concat!($round, " xmm0, xmm14"),
+                    concat!($round, " xmm1, xmm14"),
+                    concat!($round, " xmm2, xmm14"),
+                    concat!($round, " xmm3, xmm14"),
+                    concat!($round, " xmm0, xmm15"),
+                    concat!($round, " xmm1, xmm15"),
+                    concat!($round, " xmm2, xmm15"),
+                    concat!($round, " xmm3, xmm15"),
+                    concat!($round, " xmm0, xmm4"),
+                    concat!($round, " xmm1, xmm4"),
+                    concat!($round, " xmm2, xmm4"),
+                    concat!($round, " xmm3, xmm4"),
+                    concat!($round, " xmm0, xmm5"),
+                    concat!($round, " xmm1, xmm5"),
+                    concat!($round, " xmm2, xmm5"),
+                    concat!($round, " xmm3, xmm5"),
+                    concat!($last, " xmm0, xmm6"),
+                    concat!($last, " xmm1, xmm6"),
+                    concat!($last, " xmm2, xmm6"),
+                    concat!($last, " xmm3, xmm6"),
+                    "movups [{d} + 0x00], xmm0",
+                    "movups [{d} + 0x10], xmm1",
+                    "movups [{d} + 0x20], xmm2",
+                    "movups [{d} + 0x30], xmm3",
+                    rk = in(reg) rk,
+                    d = in(reg) data,
+                    out("xmm0") _, out("xmm1") _, out("xmm2") _,
+                    out("xmm3") _, out("xmm4") _, out("xmm5") _,
+                    out("xmm6") _, out("xmm7") _, out("xmm8") _,
+                    out("xmm9") _, out("xmm10") _, out("xmm11") _,
+                    out("xmm12") _, out("xmm13") _, out("xmm14") _,
+                    out("xmm15") _,
+                    options(nostack),
+                );
+            }
+        }
+    };
+}
+
+kernel4_keys128!(e128_4, "aesenc", "aesenclast");
 kernel2!(
     e128_2, "aesenc", "aesenclast",
     ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90"], "0xa0"
@@ -298,10 +672,11 @@ kernel8!(
     d128_8, "aesdec", "aesdeclast",
     ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90"], "0xa0"
 );
-kernel4!(
-    d128_4, "aesdec", "aesdeclast",
+kernel12!(
+    d128_12, "aesdec", "aesdeclast",
     ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90"], "0xa0"
 );
+kernel4_keys128!(d128_4, "aesdec", "aesdeclast");
 kernel2!(
     d128_2, "aesdec", "aesdeclast",
     ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90"], "0xa0"
@@ -314,10 +689,11 @@ kernel8!(
     e192_8, "aesenc", "aesenclast",
     ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0"], "0xc0"
 );
-kernel4!(
-    e192_4, "aesenc", "aesenclast",
+kernel12!(
+    e192_12, "aesenc", "aesenclast",
     ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0"], "0xc0"
 );
+kernel4_keys192!(e192_4, "aesenc", "aesenclast");
 kernel2!(
     e192_2, "aesenc", "aesenclast",
     ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0"], "0xc0"
@@ -330,10 +706,11 @@ kernel8!(
     d192_8, "aesdec", "aesdeclast",
     ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0"], "0xc0"
 );
-kernel4!(
-    d192_4, "aesdec", "aesdeclast",
+kernel12!(
+    d192_12, "aesdec", "aesdeclast",
     ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0"], "0xc0"
 );
+kernel4_keys192!(d192_4, "aesdec", "aesdeclast");
 kernel2!(
     d192_2, "aesdec", "aesdeclast",
     ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0"], "0xc0"
@@ -346,10 +723,11 @@ kernel8!(
     e256_8, "aesenc", "aesenclast",
     ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0", "0xc0", "0xd0"], "0xe0"
 );
-kernel4!(
-    e256_4, "aesenc", "aesenclast",
+kernel12!(
+    e256_12, "aesenc", "aesenclast",
     ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0", "0xc0", "0xd0"], "0xe0"
 );
+kernel4_keys256!(e256_4, "aesenc", "aesenclast");
 kernel2!(
     e256_2, "aesenc", "aesenclast",
     ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0", "0xc0", "0xd0"], "0xe0"
@@ -362,10 +740,11 @@ kernel8!(
     d256_8, "aesdec", "aesdeclast",
     ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0", "0xc0", "0xd0"], "0xe0"
 );
-kernel4!(
-    d256_4, "aesdec", "aesdeclast",
+kernel12!(
+    d256_12, "aesdec", "aesdeclast",
     ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0", "0xc0", "0xd0"], "0xe0"
 );
+kernel4_keys256!(d256_4, "aesdec", "aesdeclast");
 kernel2!(
     d256_2, "aesdec", "aesdeclast",
     ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0", "0xc0", "0xd0"], "0xe0"
@@ -382,7 +761,8 @@ kernel1!(
 /// costs an indirect call per group of blocks and stops them inlining at
 /// all, which is worth more than it sounds on short buffers.
 macro_rules! driver {
-    ($name:ident, $w8:ident, $w4:ident, $w2:ident, $w1:ident) => {
+    ($name:ident, $w12:ident, $w8:ident, $w4:ident, $w2:ident, $w1:ident)
+    => {
         /// # Safety
         ///
         /// The CPU must have the AES instructions, `rk` must be the
@@ -394,7 +774,11 @@ macro_rules! driver {
             // blocks as its kernel touches, and blocks are contiguous.
             unsafe {
                 let mut i = 0;
-                while i + 8 <= blocks {
+                while i + 12 <= blocks {
+                    $w12(rk, data.add(i * BLOCK_SIZE));
+                    i += 12;
+                }
+                if i + 8 <= blocks {
                     $w8(rk, data.add(i * BLOCK_SIZE));
                     i += 8;
                 }
@@ -414,12 +798,12 @@ macro_rules! driver {
     };
 }
 
-driver!(encrypt_128, e128_8, e128_4, e128_2, e128_1);
-driver!(decrypt_128, d128_8, d128_4, d128_2, d128_1);
-driver!(encrypt_192, e192_8, e192_4, e192_2, e192_1);
-driver!(decrypt_192, d192_8, d192_4, d192_2, d192_1);
-driver!(encrypt_256, e256_8, e256_4, e256_2, e256_1);
-driver!(decrypt_256, d256_8, d256_4, d256_2, d256_1);
+driver!(encrypt_128, e128_12, e128_8, e128_4, e128_2, e128_1);
+driver!(decrypt_128, d128_12, d128_8, d128_4, d128_2, d128_1);
+driver!(encrypt_192, e192_12, e192_8, e192_4, e192_2, e192_1);
+driver!(decrypt_192, d192_12, d192_8, d192_4, d192_2, d192_1);
+driver!(encrypt_256, e256_12, e256_8, e256_4, e256_2, e256_1);
+driver!(decrypt_256, d256_12, d256_8, d256_4, d256_2, d256_1);
 
 /// Splice the low halves of two round key registers together.
 ///

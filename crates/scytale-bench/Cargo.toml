@@ -7,3 +7,8 @@ publish = false
 
 [dependencies]
 scytale.workspace = true
+
+# Only for perf_event_open, mmap and read. The measurement needs a core
+# cycle count, and that is the interface the kernel offers for one.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

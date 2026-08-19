@@ -4,5 +4,6 @@
 //! While scytale has only software implementations, that build is configured
 //! `no-asm` so the comparison is software against software.
 
+pub mod cycles;
 pub mod harness;
 pub mod openssl;

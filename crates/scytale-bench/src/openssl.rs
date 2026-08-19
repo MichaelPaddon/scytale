@@ -133,6 +133,18 @@ unsafe extern "C" {
         key: *mut AesKey,
     ) -> c_int;
 
+    fn aesni_encrypt(
+        input: *const c_uchar,
+        out: *mut c_uchar,
+        key: *const AesKey,
+    );
+
+    fn aesni_decrypt(
+        input: *const c_uchar,
+        out: *mut c_uchar,
+        key: *const AesKey,
+    );
+
     fn aesni_ecb_encrypt(
         input: *const c_uchar,
         out: *mut c_uchar,
@@ -191,6 +203,32 @@ impl OpensslAesni {
     pub fn decrypt(&self, data: &mut [u8]) -> usize {
         debug_assert!(!self.encrypting, "schedule is for encryption");
         self.run(data, 0)
+    }
+
+    /// Encrypt exactly one block in place.
+    ///
+    /// OpenSSL's own single block entry, which is what scytale's
+    /// `encrypt_block` should be measured against: going through the ECB
+    /// entry instead would charge it for a length dispatch that a caller
+    /// with one block to encrypt does not use.
+    pub fn encrypt_block(&self, block: &mut [u8; 16]) {
+        debug_assert!(self.encrypting, "schedule is for decryption");
+        let src = *block;
+        // SAFETY: both pointers are to sixteen bytes, the size this
+        // reads and writes, and self.key is an initialized schedule.
+        unsafe {
+            aesni_encrypt(src.as_ptr(), block.as_mut_ptr(), &self.key);
+        }
+    }
+
+    /// Decrypt exactly one block in place.
+    pub fn decrypt_block(&self, block: &mut [u8; 16]) {
+        debug_assert!(!self.encrypting, "schedule is for encryption");
+        let src = *block;
+        // SAFETY: as for encrypt_block.
+        unsafe {
+            aesni_decrypt(src.as_ptr(), block.as_mut_ptr(), &self.key);
+        }
     }
 
     fn run(&self, data: &mut [u8], enc: c_int) -> usize {
