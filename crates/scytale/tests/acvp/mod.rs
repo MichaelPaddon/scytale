@@ -348,6 +348,9 @@ pub fn ctr_implementations() -> Vec<CtrImpl> {
         if armv8::supported() {
             all.push(generic_ctr!("generic/armv8", armv8));
         }
+        if armv8::ctr_supported() {
+            all.push(fused_ctr!("fused/armv8", armv8));
+        }
     }
 
     all

@@ -570,6 +570,351 @@ driver!(decrypt_192, d192_8, d192_4, d192_2, d192_1);
 driver!(encrypt_256, e256_8, e256_4, e256_2, e256_1);
 driver!(decrypt_256, d256_8, d256_4, d256_2, d256_1);
 
+/// Whether this CPU can run the counter kernels.
+///
+/// They need nothing beyond the AES instructions on this target; the
+/// name exists so the dispatch layer can spell every target the same
+/// way.
+pub use self::supported as ctr_supported;
+
+/// A sixteen byte table, aligned to its own size.
+#[repr(align(16))]
+struct Aligned16<T>(T);
+
+/// Quadword pairs {0, i} adding block offsets to a `rev64`ed counter.
+///
+/// `rev64` reverses the bytes of each 64-bit half. A big-endian
+/// counter block keeps its high half in bytes 0..8 and its low half
+/// in bytes 8..16, and NEON's first 64-bit lane is bytes 0..8, so
+/// after `rev64` lane 0 holds the high half and lane 1 the low half,
+/// each as a native integer. The offset therefore sits in the second
+/// quadword of each entry, and the caller has checked that adding it
+/// cannot carry out of that lane.
+static INCREMENTS: Aligned16<[u64; 16]> =
+    Aligned16([0, 0, 0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7]);
+
+/// A fully unrolled 8 block counter kernel.
+///
+/// The counter blocks are built in registers: the base counter is
+/// `rev64`ed so its halves are native integers, the block offsets are
+/// added to the low half's lane, and each result is reversed back.
+/// After the last round the keystream is XORed with the data in
+/// place, so each block is read once and written once and the
+/// keystream never touches memory.
+macro_rules! ctr_kernel8 {
+    (
+        $name:ident,
+        [$(($kn:literal, $ko:literal)),+], ($pn:literal, $po:literal),
+        ($fn:literal, $fo:literal)
+    ) => {
+        /// # Safety
+        ///
+        /// The CPU must have the AES instructions. `rk` must hold the
+        /// whole schedule, `data` 8 blocks, and `ctr` one big-endian
+        /// counter block whose low 64 bits are at most `u64::MAX - 7`.
+        #[target_feature(enable = "aes")]
+        #[inline]
+        unsafe fn $name(rk: *const u8, data: *mut u8, ctr: *const u8) {
+            // SAFETY: the caller guarantees the instructions and all
+            // three ranges.
+            unsafe {
+                asm!(
+                    "ldr q8, [{c}]",
+                    "rev64 v8.16b, v8.16b",
+                    "ldr q0, [{inc}, #0x00]",
+                    "ldr q1, [{inc}, #0x10]",
+                    "ldr q2, [{inc}, #0x20]",
+                    "ldr q3, [{inc}, #0x30]",
+                    "ldr q4, [{inc}, #0x40]",
+                    "ldr q5, [{inc}, #0x50]",
+                    "ldr q6, [{inc}, #0x60]",
+                    "ldr q7, [{inc}, #0x70]",
+                    "add v0.2d, v0.2d, v8.2d",
+                    "add v1.2d, v1.2d, v8.2d",
+                    "add v2.2d, v2.2d, v8.2d",
+                    "add v3.2d, v3.2d, v8.2d",
+                    "add v4.2d, v4.2d, v8.2d",
+                    "add v5.2d, v5.2d, v8.2d",
+                    "add v6.2d, v6.2d, v8.2d",
+                    "add v7.2d, v7.2d, v8.2d",
+                    "rev64 v0.16b, v0.16b",
+                    "rev64 v1.16b, v1.16b",
+                    "rev64 v2.16b, v2.16b",
+                    "rev64 v3.16b, v3.16b",
+                    "rev64 v4.16b, v4.16b",
+                    "rev64 v5.16b, v5.16b",
+                    "rev64 v6.16b, v6.16b",
+                    "rev64 v7.16b, v7.16b",
+                    $(
+                        concat!("ldr q", $kn, ", [{rk}, #", $ko, "]"),
+                    )+
+                    concat!("ldr q", $pn, ", [{rk}, #", $po, "]"),
+                    concat!("ldr q", $fn, ", [{rk}, #", $fo, "]"),
+                    $(
+                        concat!("aese v0.16b, v", $kn, ".16b"),
+                        concat!("aesmc v0.16b, v0.16b"),
+                        concat!("aese v1.16b, v", $kn, ".16b"),
+                        concat!("aesmc v1.16b, v1.16b"),
+                        concat!("aese v2.16b, v", $kn, ".16b"),
+                        concat!("aesmc v2.16b, v2.16b"),
+                        concat!("aese v3.16b, v", $kn, ".16b"),
+                        concat!("aesmc v3.16b, v3.16b"),
+                        concat!("aese v4.16b, v", $kn, ".16b"),
+                        concat!("aesmc v4.16b, v4.16b"),
+                        concat!("aese v5.16b, v", $kn, ".16b"),
+                        concat!("aesmc v5.16b, v5.16b"),
+                        concat!("aese v6.16b, v", $kn, ".16b"),
+                        concat!("aesmc v6.16b, v6.16b"),
+                        concat!("aese v7.16b, v", $kn, ".16b"),
+                        concat!("aesmc v7.16b, v7.16b"),
+                    )+
+                    concat!("aese v0.16b, v", $pn, ".16b"),
+                    concat!("aese v1.16b, v", $pn, ".16b"),
+                    concat!("aese v2.16b, v", $pn, ".16b"),
+                    concat!("aese v3.16b, v", $pn, ".16b"),
+                    concat!("aese v4.16b, v", $pn, ".16b"),
+                    concat!("aese v5.16b, v", $pn, ".16b"),
+                    concat!("aese v6.16b, v", $pn, ".16b"),
+                    concat!("aese v7.16b, v", $pn, ".16b"),
+                    concat!("eor v0.16b, v0.16b, v", $fn, ".16b"),
+                    concat!("eor v1.16b, v1.16b, v", $fn, ".16b"),
+                    concat!("eor v2.16b, v2.16b, v", $fn, ".16b"),
+                    concat!("eor v3.16b, v3.16b, v", $fn, ".16b"),
+                    concat!("eor v4.16b, v4.16b, v", $fn, ".16b"),
+                    concat!("eor v5.16b, v5.16b, v", $fn, ".16b"),
+                    concat!("eor v6.16b, v6.16b, v", $fn, ".16b"),
+                    concat!("eor v7.16b, v7.16b, v", $fn, ".16b"),
+                    "ldr q8, [{d}, #0x00]",
+                    "ldr q9, [{d}, #0x10]",
+                    "eor v0.16b, v0.16b, v8.16b",
+                    "eor v1.16b, v1.16b, v9.16b",
+                    "ldr q8, [{d}, #0x20]",
+                    "ldr q9, [{d}, #0x30]",
+                    "eor v2.16b, v2.16b, v8.16b",
+                    "eor v3.16b, v3.16b, v9.16b",
+                    "str q0, [{d}, #0x00]",
+                    "str q1, [{d}, #0x10]",
+                    "str q2, [{d}, #0x20]",
+                    "str q3, [{d}, #0x30]",
+                    "ldr q8, [{d}, #0x40]",
+                    "ldr q9, [{d}, #0x50]",
+                    "eor v4.16b, v4.16b, v8.16b",
+                    "eor v5.16b, v5.16b, v9.16b",
+                    "ldr q8, [{d}, #0x60]",
+                    "ldr q9, [{d}, #0x70]",
+                    "eor v6.16b, v6.16b, v8.16b",
+                    "eor v7.16b, v7.16b, v9.16b",
+                    "str q4, [{d}, #0x40]",
+                    "str q5, [{d}, #0x50]",
+                    "str q6, [{d}, #0x60]",
+                    "str q7, [{d}, #0x70]",
+                    rk = in(reg) rk,
+                    d = in(reg) data,
+                    c = in(reg) ctr,
+                    inc = in(reg) &INCREMENTS,
+                    out("v0") _, out("v1") _, out("v2") _,
+                    out("v3") _, out("v4") _, out("v5") _,
+                    out("v6") _, out("v7") _, out("v8") _,
+                    out("v9") _, out("v16") _, out("v17") _,
+                    out("v18") _, out("v19") _, out("v20") _,
+                    out("v21") _, out("v22") _, out("v23") _,
+                    out("v24") _, out("v25") _, out("v26") _,
+                    out("v27") _, out("v28") _, out("v29") _,
+                    out("v30") _,
+                    options(nostack),
+                );
+            }
+        }
+    };
+}
+
+/// A single block counter kernel.
+///
+/// One counter block needs no byte order tricks: the caller hands the
+/// exact big-endian counter bytes, so this also serves as the carry
+/// fallback when the wide kernel's no-carry precondition fails.
+macro_rules! ctr_kernel1 {
+    (
+        $name:ident,
+        [$(($kn:literal, $ko:literal)),+], ($pn:literal, $po:literal),
+        ($fn:literal, $fo:literal)
+    ) => {
+        /// # Safety
+        ///
+        /// The CPU must have the AES instructions. `rk` must hold the
+        /// whole schedule, `data` 1 block, and `ctr` one counter block.
+        #[target_feature(enable = "aes")]
+        #[inline]
+        unsafe fn $name(rk: *const u8, data: *mut u8, ctr: *const u8) {
+            // SAFETY: the caller guarantees the instructions and all
+            // three ranges.
+            unsafe {
+                asm!(
+                    "ldr q0, [{c}]",
+                    $(
+                        concat!("ldr q", $kn, ", [{rk}, #", $ko, "]"),
+                    )+
+                    concat!("ldr q", $pn, ", [{rk}, #", $po, "]"),
+                    concat!("ldr q", $fn, ", [{rk}, #", $fo, "]"),
+                    $(
+                        concat!("aese v0.16b, v", $kn, ".16b"),
+                        concat!("aesmc v0.16b, v0.16b"),
+                    )+
+                    concat!("aese v0.16b, v", $pn, ".16b"),
+                    concat!("eor v0.16b, v0.16b, v", $fn, ".16b"),
+                    "ldr q1, [{d}]",
+                    "eor v0.16b, v0.16b, v1.16b",
+                    "str q0, [{d}]",
+                    rk = in(reg) rk,
+                    d = in(reg) data,
+                    c = in(reg) ctr,
+                    out("v0") _, out("v1") _, out("v16") _,
+                    out("v17") _, out("v18") _, out("v19") _,
+                    out("v20") _, out("v21") _, out("v22") _,
+                    out("v23") _, out("v24") _, out("v25") _,
+                    out("v26") _, out("v27") _, out("v28") _,
+                    out("v29") _, out("v30") _,
+                    options(nostack),
+                );
+            }
+        }
+    };
+}
+
+ctr_kernel8!(
+    ctr_e128_8,
+    [(16, "0x00"), (17, "0x10"), (18, "0x20"), (19, "0x30"),
+     (20, "0x40"), (21, "0x50"), (22, "0x60"), (23, "0x70"),
+     (24, "0x80")],
+    (25, "0x90"), (26, "0xa0")
+);
+ctr_kernel1!(
+    ctr_e128_1,
+    [(16, "0x00"), (17, "0x10"), (18, "0x20"), (19, "0x30"),
+     (20, "0x40"), (21, "0x50"), (22, "0x60"), (23, "0x70"),
+     (24, "0x80")],
+    (25, "0x90"), (26, "0xa0")
+);
+ctr_kernel8!(
+    ctr_e192_8,
+    [(16, "0x00"), (17, "0x10"), (18, "0x20"), (19, "0x30"),
+     (20, "0x40"), (21, "0x50"), (22, "0x60"), (23, "0x70"),
+     (24, "0x80"), (25, "0x90"), (26, "0xa0")],
+    (27, "0xb0"), (28, "0xc0")
+);
+ctr_kernel1!(
+    ctr_e192_1,
+    [(16, "0x00"), (17, "0x10"), (18, "0x20"), (19, "0x30"),
+     (20, "0x40"), (21, "0x50"), (22, "0x60"), (23, "0x70"),
+     (24, "0x80"), (25, "0x90"), (26, "0xa0")],
+    (27, "0xb0"), (28, "0xc0")
+);
+ctr_kernel8!(
+    ctr_e256_8,
+    [(16, "0x00"), (17, "0x10"), (18, "0x20"), (19, "0x30"),
+     (20, "0x40"), (21, "0x50"), (22, "0x60"), (23, "0x70"),
+     (24, "0x80"), (25, "0x90"), (26, "0xa0"), (27, "0xb0"),
+     (28, "0xc0")],
+    (29, "0xd0"), (30, "0xe0")
+);
+ctr_kernel1!(
+    ctr_e256_1,
+    [(16, "0x00"), (17, "0x10"), (18, "0x20"), (19, "0x30"),
+     (20, "0x40"), (21, "0x50"), (22, "0x60"), (23, "0x70"),
+     (24, "0x80"), (25, "0x90"), (26, "0xa0"), (27, "0xb0"),
+     (28, "0xc0")],
+    (29, "0xd0"), (30, "0xe0")
+);
+
+/// Write a counter value as one big-endian block with a single
+/// sixteen byte store.
+///
+/// `u128::to_be_bytes` compiles to two eight byte stores, and the
+/// kernels read the block back immediately with a sixteen byte load,
+/// which cannot forward from a pair of narrower stores and stalls.
+/// One vector store forwards cleanly.
+#[inline(always)]
+fn store_counter(c: u128, out: &mut [u8; BLOCK_SIZE]) {
+    let hi = ((c >> 64) as u64).swap_bytes();
+    let lo = (c as u64).swap_bytes();
+    // SAFETY: these intrinsics are NEON, which is baseline for this
+    // target, and out is sixteen writable bytes. The high half of the
+    // counter forms the first eight big-endian bytes, so it goes in
+    // the vector's first lane.
+    unsafe {
+        let v = vreinterpretq_u8_u64(vcombine_u64(
+            vcreate_u64(hi),
+            vcreate_u64(lo),
+        ));
+        vst1q_u8(out.as_mut_ptr(), v);
+    }
+}
+
+/// Walk a buffer through the counter kernels.
+///
+/// The wide kernel adds the block index to the counter's low 64 bits
+/// only, so each group checks that no carry can cross that boundary
+/// first. A group that would carry, which happens at most once per
+/// 2^64 blocks or with an adversarially placed IV, falls back to the
+/// single block kernel with exact counters instead. The kernels read
+/// the counter bytes from `counter` itself, which store_counter keeps
+/// in step with the arithmetic value.
+macro_rules! ctr_driver {
+    ($name:ident, $w8:ident, $w1:ident) => {
+        /// # Safety
+        ///
+        /// The CPU must have the AES instructions, `rk` must be the
+        /// schedule these kernels were built for, and `data` must hold
+        /// `blocks` whole blocks.
+        #[target_feature(enable = "aes")]
+        #[inline]
+        unsafe fn $name(
+            rk: *const u8,
+            data: *mut u8,
+            blocks: usize,
+            counter: &mut [u8; BLOCK_SIZE],
+        ) {
+            // SAFETY: each call gets a pointer to at least as many
+            // whole blocks as its kernel touches, and a counter block
+            // that satisfies the kernel's precondition.
+            unsafe {
+                let mut c = u128::from_be_bytes(*counter);
+                let mut i = 0;
+                while i + 8 <= blocks {
+                    if (c as u64) <= u64::MAX - 7 {
+                        $w8(
+                            rk,
+                            data.add(i * BLOCK_SIZE),
+                            counter.as_ptr(),
+                        );
+                        i += 8;
+                        c = c.wrapping_add(8);
+                    } else {
+                        $w1(
+                            rk,
+                            data.add(i * BLOCK_SIZE),
+                            counter.as_ptr(),
+                        );
+                        i += 1;
+                        c = c.wrapping_add(1);
+                    }
+                    store_counter(c, counter);
+                }
+                while i < blocks {
+                    $w1(rk, data.add(i * BLOCK_SIZE), counter.as_ptr());
+                    i += 1;
+                    c = c.wrapping_add(1);
+                    store_counter(c, counter);
+                }
+            }
+        }
+    };
+}
+
+ctr_driver!(ctr_128, ctr_e128_8, ctr_e128_1);
+ctr_driver!(ctr_192, ctr_e192_8, ctr_e192_1);
+ctr_driver!(ctr_256, ctr_e256_8, ctr_e256_1);
+
 /// Substitute all four bytes of a word.
 ///
 /// There is no key generation instruction on this target, and a table
@@ -682,7 +1027,8 @@ unsafe fn invert_schedule(ek: &[u8], dk: &mut [u8], rounds: usize) {
 macro_rules! define_aes {
     (
         $enc:ident, $dec:ident, $key_size:expr, $bytes:expr, $rounds:expr,
-        $nk:expr, $enc_set:ident, $dec_set:ident, $bits:expr
+        $nk:expr, $enc_set:ident, $dec_set:ident, $ctr_set:ident,
+        $bits:expr
     ) => {
         // Aligned so the round keys are loaded from a known offset within
         // a cache line rather than straddling one.
@@ -742,6 +1088,33 @@ macro_rules! define_aes {
                 unsafe {
                     $enc_set(self.rk.as_ptr(), block.as_mut_ptr(), 1)
                 };
+            }
+
+            /// Encrypt successive counter values and XOR them into
+            /// `data` in place, advancing `counter`.
+            ///
+            /// The counter is one block, big endian, wrapping at the
+            /// full block width, as SP 800-38A specifies. Whole blocks
+            /// only, like [`Self::encrypt`]; returns bytes consumed.
+            pub fn ctr(
+                &self,
+                counter: &mut [u8; BLOCK_SIZE],
+                data: &mut [u8],
+            ) -> usize {
+                let blocks = data.len() / BLOCK_SIZE;
+                if blocks != 0 {
+                    // SAFETY: the schedule exists, so the instructions
+                    // do, and the buffer holds that many whole blocks.
+                    unsafe {
+                        $ctr_set(
+                            self.rk.as_ptr(),
+                            data.as_mut_ptr(),
+                            blocks,
+                            counter,
+                        )
+                    };
+                }
+                blocks * BLOCK_SIZE
             }
         }
 
@@ -864,15 +1237,15 @@ macro_rules! define_aes {
 
 define_aes!(
     Aes128Enc, Aes128Dec, 16, 176, 10, 4,
-    encrypt_128, decrypt_128, "128"
+    encrypt_128, decrypt_128, ctr_128, "128"
 );
 define_aes!(
     Aes192Enc, Aes192Dec, 24, 208, 12, 6,
-    encrypt_192, decrypt_192, "192"
+    encrypt_192, decrypt_192, ctr_192, "192"
 );
 define_aes!(
     Aes256Enc, Aes256Dec, 32, 240, 14, 8,
-    encrypt_256, decrypt_256, "256"
+    encrypt_256, decrypt_256, ctr_256, "256"
 );
 #[cfg(test)]
 mod tests {
@@ -1014,6 +1387,101 @@ mod tests {
             Aes256Enc, Aes256Dec, ttable::Aes256Enc, 32,
             0x2468_ace0_1357_9bdf
         );
+    }
+
+    /// The fused counter kernels against the portable scalar `ctr`, at
+    /// lengths exercising the wide kernel, the singles tail, and the
+    /// boundary between them, plus the counter write-back.
+    macro_rules! check_ctr_against_portable {
+        ($enc:ident, $pe:path, $len:expr, $seed:expr) => {{
+            let mut rng = Rng($seed);
+            for blocks in [0usize, 1, 2, 7, 8, 9, 15, 16, 17, 64, 100] {
+                let mut key = [0u8; $len];
+                rng.fill(&mut key);
+                let mut iv = [0u8; BLOCK_SIZE];
+                rng.fill(&mut iv);
+                let mut data = vec![0u8; blocks * BLOCK_SIZE];
+                rng.fill(&mut data);
+
+                let mut ours = data.clone();
+                let mut ours_ctr = iv;
+                assert_eq!(
+                    $enc::new(&key).ctr(&mut ours_ctr, &mut ours),
+                    blocks * BLOCK_SIZE
+                );
+
+                let mut theirs_ctr = iv;
+                <$pe>::new(&key).ctr(&mut theirs_ctr, &mut data);
+
+                assert_eq!(
+                    ours, data,
+                    "{} bit ctr differs at {} blocks",
+                    $len * 8, blocks
+                );
+                assert_eq!(
+                    ours_ctr, theirs_ctr,
+                    "{} bit counter write-back differs at {} blocks",
+                    $len * 8, blocks
+                );
+            }
+        }};
+    }
+
+    #[test]
+    fn ctr_agrees_with_the_portable_implementation() {
+        if !ctr_supported() {
+            return;
+        }
+        check_ctr_against_portable!(
+            Aes128Enc, ttable::Aes128Enc, 16, 0x0123_4567_89ab_cdef
+        );
+        check_ctr_against_portable!(
+            Aes192Enc, ttable::Aes192Enc, 24, 0xfedc_ba98_7654_3210
+        );
+        check_ctr_against_portable!(
+            Aes256Enc, ttable::Aes256Enc, 32, 0x2468_ace0_1357_9bdf
+        );
+    }
+
+    /// IVs whose low 64 bits are about to overflow force the wide
+    /// kernel's no-carry precondition to fail mid-stream, taking the
+    /// single block fallback exactly where the carry crosses.
+    #[test]
+    fn ctr_carries_across_the_low_quadword() {
+        if !ctr_supported() {
+            return;
+        }
+        let key = [0x2bu8; 16];
+        let ours_aes = Aes128Enc::new(&key);
+        let theirs_aes = ttable::Aes128Enc::new(&key);
+
+        for k in [0u64, 1, 7, 8, 9] {
+            let start = ((0x0123_4567_89ab_cdefu128) << 64)
+                | (u64::MAX - k) as u128;
+            let iv = start.to_be_bytes();
+            let mut data = [0xa5u8; BLOCK_SIZE * 20];
+
+            let mut ours = data;
+            let mut ours_ctr = iv;
+            ours_aes.ctr(&mut ours_ctr, &mut ours);
+
+            let mut theirs_ctr = iv;
+            theirs_aes.ctr(&mut theirs_ctr, &mut data);
+
+            assert_eq!(ours, data, "carry case k = {k}");
+            assert_eq!(ours_ctr, theirs_ctr, "counter, k = {k}");
+        }
+
+        // The full wrap to zero as well.
+        let iv = [0xffu8; BLOCK_SIZE];
+        let mut data = [0x5au8; BLOCK_SIZE * 20];
+        let mut ours = data;
+        let mut ours_ctr = iv;
+        ours_aes.ctr(&mut ours_ctr, &mut ours);
+        let mut theirs_ctr = iv;
+        theirs_aes.ctr(&mut theirs_ctr, &mut data);
+        assert_eq!(ours, data, "wrap at 2^128");
+        assert_eq!(ours_ctr, theirs_ctr, "counter after the wrap");
     }
 
     #[test]
