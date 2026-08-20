@@ -227,6 +227,14 @@ unsafe extern "C" {
         key: *const AesKey,
         enc: c_int,
     );
+
+    fn aesni_ctr32_encrypt_blocks(
+        input: *const c_uchar,
+        out: *mut c_uchar,
+        blocks: usize,
+        key: *const AesKey,
+        ivec: *const c_uchar,
+    );
 }
 
 /// OpenSSL's AES-NI kernels.
@@ -318,5 +326,69 @@ impl OpensslAesni {
             aesni_ecb_encrypt(ptr, ptr, whole, &self.key, enc);
         }
         whole
+    }
+}
+
+/// OpenSSL's fused AES-NI counter kernel.
+///
+/// This is the counterpart to scytale's own fused AES-NI CTR. The
+/// kernel increments only the low 32 bits of the counter and does not
+/// write it back, so this wrapper advances it between calls. With an
+/// IV whose low 32 bits are zero and messages up to 2^32 blocks, its
+/// output is byte identical to a full 128-bit counter's, which the
+/// agreement tests rely on and the benchmark stays within.
+pub struct OpensslAesniCtr {
+    key: AesKey,
+    ivec: [u8; 16],
+}
+
+impl OpensslAesniCtr {
+    /// Build the schedule and set the initial counter block.
+    pub fn try_new(key: &[u8], iv: &[u8; 16]) -> Result<Self, BadKeyLength> {
+        let mut schedule = AesKey::default();
+        let bits = (key.len() * 8) as c_int;
+        // SAFETY: key points to key.len() bytes and bits describes
+        // exactly that length; schedule is a valid AES_KEY.
+        let rc = unsafe {
+            aesni_set_encrypt_key(key.as_ptr(), bits, &mut schedule)
+        };
+        if rc != 0 {
+            return Err(BadKeyLength(key.len()));
+        }
+        Ok(Self { key: schedule, ivec: *iv })
+    }
+
+    /// Encrypt whole counter blocks into `data` in place, returning
+    /// bytes consumed. Mirrors scytale's fused `ctr` signature shape so
+    /// both sides of the comparison do the same work per call.
+    pub fn ctr(&mut self, data: &mut [u8]) -> usize {
+        let blocks = data.len() / 16;
+        if blocks == 0 {
+            return 0;
+        }
+        let ptr = data.as_mut_ptr();
+        // SAFETY: the buffer holds `blocks` whole blocks; input and
+        // output may alias because each block is read before it is
+        // written; ivec is the 16-byte counter the kernel expects.
+        unsafe {
+            aesni_ctr32_encrypt_blocks(
+                ptr,
+                ptr,
+                blocks,
+                &self.key,
+                self.ivec.as_ptr(),
+            );
+        }
+        // The kernel leaves the counter untouched; advance its low 32
+        // bits the way the kernel itself counted.
+        let low = u32::from_be_bytes([
+            self.ivec[12],
+            self.ivec[13],
+            self.ivec[14],
+            self.ivec[15],
+        ]);
+        let low = low.wrapping_add(blocks as u32).to_be_bytes();
+        self.ivec[12..16].copy_from_slice(&low);
+        blocks * 16
     }
 }

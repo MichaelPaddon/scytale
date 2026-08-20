@@ -107,6 +107,45 @@ fn scytale_and_openssl_ctr_agree() {
     }
 }
 
+/// The fused CTR pair must agree as well. OpenSSL's kernel counts in
+/// the low 32 bits only, so the IVs here have them zero and the
+/// messages stay far below 2^32 blocks, where the two counter widths
+/// compute identical bytes; the low 32 bits themselves are random.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn scytale_and_openssl_aesni_ctr_agree() {
+    use scytale::symmetric::aes::arch::x86_64::aesni;
+    use scytale_bench::openssl::OpensslAesniCtr;
+
+    if !aesni::ctr_supported() {
+        return;
+    }
+
+    let mut rng = Rng(0x0f0f_f0f0_1234_5678);
+    for blocks in [1usize, 2, 7, 8, 9, 17, 64, 100] {
+        let mut key = [0u8; 16];
+        rng.fill(&mut key);
+        let mut iv = [0u8; 16];
+        rng.fill(&mut iv[..12]);
+        let mut plaintext = vec![0u8; blocks * 16];
+        rng.fill(&mut plaintext);
+
+        let mut ours = plaintext.clone();
+        let mut counter = iv;
+        assert_eq!(
+            aesni::Aes128Enc::new(&key).ctr(&mut counter, &mut ours),
+            blocks * 16
+        );
+
+        let mut theirs = plaintext.clone();
+        let mut openssl = OpensslAesniCtr::try_new(&key, &iv)
+            .expect("openssl rejected a valid key");
+        assert_eq!(openssl.ctr(&mut theirs), blocks * 16);
+
+        assert_eq!(ours, theirs, "fused CTR differs at {blocks} blocks");
+    }
+}
+
 /// The accelerated pair must agree too, or the accelerated tier of the
 /// benchmark would be timing two different computations.
 #[test]

@@ -245,9 +245,47 @@ fn accelerated(
         }};
     }
 
+    // Fused CTR against OpenSSL's aesni_ctr32_encrypt_blocks, the
+    // kernel of the same kind. It counts in the low 32 bits only, so
+    // the IV keeps them zero and every message stays far below 2^32
+    // blocks, where both sides compute identical bytes; the agreement
+    // tests check exactly that before any timing is trusted.
+    macro_rules! ctr_ladder {
+        ($enc:ty, $bits:expr, $len:expr) => {{
+            use scytale_bench::openssl::OpensslAesniCtr;
+
+            let key = [0x2bu8; $len];
+            let iv = [0u8; 16];
+            for bytes in SIZES {
+                let mut ours = Messages::new(bytes);
+                let mut theirs = Messages::new(bytes);
+                let enc = <$enc>::new(&key);
+                let mut counter = iv;
+                let mut openssl =
+                    OpensslAesniCtr::try_new(&key, &iv).map_err(bad)?;
+                rows.push(compare(
+                    meter,
+                    &format!(concat!("aes", $bits, "-ctr/{}"), bytes),
+                    bytes,
+                    || {
+                        enc.ctr(&mut counter, ours.next());
+                    },
+                    || {
+                        openssl.ctr(theirs.next());
+                    },
+                ));
+            }
+        }};
+    }
+
     ladder!(aesni::Aes128Enc, aesni::Aes128Dec, "128", 16);
     ladder!(aesni::Aes192Enc, aesni::Aes192Dec, "192", 24);
     ladder!(aesni::Aes256Enc, aesni::Aes256Dec, "256", 32);
+    if aesni::ctr_supported() {
+        ctr_ladder!(aesni::Aes128Enc, "128", 16);
+        ctr_ladder!(aesni::Aes192Enc, "192", 24);
+        ctr_ladder!(aesni::Aes256Enc, "256", 32);
+    }
     Ok(())
 }
 

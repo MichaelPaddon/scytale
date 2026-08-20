@@ -334,6 +334,9 @@ pub fn ctr_implementations() -> Vec<CtrImpl> {
         if aesni::supported() {
             all.push(generic_ctr!("generic/aesni", aesni));
         }
+        if aesni::ctr_supported() {
+            all.push(fused_ctr!("fused/aesni", aesni));
+        }
         if vaes::supported() {
             all.push(generic_ctr!("generic/vaes", vaes));
         }

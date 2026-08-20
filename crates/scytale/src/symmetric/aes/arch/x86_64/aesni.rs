@@ -46,6 +46,40 @@ pub fn supported() -> bool {
     *SUPPORTED.get_or_init(|| is_x86_feature_detected!("aes"))
 }
 
+/// Whether this CPU can run the counter kernels.
+///
+/// They need SSSE3's `pshufb` alongside the AES instructions to byte
+/// reverse counters in registers. Every CPU with AES also has SSSE3 in
+/// practice, but the feature bits are formally independent, so it is
+/// checked rather than assumed.
+pub fn ctr_supported() -> bool {
+    use std::sync::OnceLock;
+    static SUPPORTED: OnceLock<bool> = OnceLock::new();
+    *SUPPORTED
+        .get_or_init(|| supported() && is_x86_feature_detected!("ssse3"))
+}
+
+/// A sixteen byte table, aligned so `paddq` and `movdqa` can take it as
+/// an aligned memory operand.
+#[repr(align(16))]
+struct Aligned16<T>(T);
+
+/// The `pshufb` selector that reverses all sixteen bytes, turning a
+/// big-endian counter block into a little-endian integer and back.
+static BSWAP: Aligned16<[u8; 16]> =
+    Aligned16([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]);
+
+/// Quadword pairs {low, high} adding 0 through 11 to a little-endian
+/// counter's low quadword. The high quadword is untouched: the driver
+/// only enters a wide kernel when the low one cannot carry.
+static OFFSETS: Aligned16<[u64; 24]> = Aligned16([
+    0, 0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0, 8, 0, 9, 0, 10, 0,
+    11, 0,
+]);
+
+/// The wide counter kernel's per-iteration advance: twelve blocks.
+static STEP: Aligned16<[u64; 2]> = Aligned16([12, 0]);
+
 /// A fully unrolled 8 block kernel.
 ///
 /// The register lines are written out so that the round keys
@@ -333,11 +367,17 @@ macro_rules! kernel1 {
 
 kernel8!(
     e128_8, "aesenc", "aesenclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90"], "0xa0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90"
+    ],
+    "0xa0"
 );
 kernel12!(
     e128_12, "aesenc", "aesenclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90"], "0xa0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90"
+    ],
+    "0xa0"
 );
 /// A fully unrolled 4 block kernel with the schedule in registers.
 ///
@@ -662,96 +702,178 @@ macro_rules! kernel4_keys256 {
 kernel4_keys128!(e128_4, "aesenc", "aesenclast");
 kernel2!(
     e128_2, "aesenc", "aesenclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90"], "0xa0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90"
+    ],
+    "0xa0"
 );
 kernel1!(
     e128_1, "aesenc", "aesenclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90"], "0xa0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90"
+    ],
+    "0xa0"
 );
 kernel8!(
     d128_8, "aesdec", "aesdeclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90"], "0xa0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90"
+    ],
+    "0xa0"
 );
 kernel12!(
     d128_12, "aesdec", "aesdeclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90"], "0xa0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90"
+    ],
+    "0xa0"
 );
 kernel4_keys128!(d128_4, "aesdec", "aesdeclast");
 kernel2!(
     d128_2, "aesdec", "aesdeclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90"], "0xa0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90"
+    ],
+    "0xa0"
 );
 kernel1!(
     d128_1, "aesdec", "aesdeclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90"], "0xa0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90"
+    ],
+    "0xa0"
 );
 kernel8!(
     e192_8, "aesenc", "aesenclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0"], "0xc0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90",
+        "0xa0", "0xb0"
+    ],
+    "0xc0"
 );
 kernel12!(
     e192_12, "aesenc", "aesenclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0"], "0xc0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90",
+        "0xa0", "0xb0"
+    ],
+    "0xc0"
 );
 kernel4_keys192!(e192_4, "aesenc", "aesenclast");
 kernel2!(
     e192_2, "aesenc", "aesenclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0"], "0xc0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90",
+        "0xa0", "0xb0"
+    ],
+    "0xc0"
 );
 kernel1!(
     e192_1, "aesenc", "aesenclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0"], "0xc0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90",
+        "0xa0", "0xb0"
+    ],
+    "0xc0"
 );
 kernel8!(
     d192_8, "aesdec", "aesdeclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0"], "0xc0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90",
+        "0xa0", "0xb0"
+    ],
+    "0xc0"
 );
 kernel12!(
     d192_12, "aesdec", "aesdeclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0"], "0xc0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90",
+        "0xa0", "0xb0"
+    ],
+    "0xc0"
 );
 kernel4_keys192!(d192_4, "aesdec", "aesdeclast");
 kernel2!(
     d192_2, "aesdec", "aesdeclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0"], "0xc0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90",
+        "0xa0", "0xb0"
+    ],
+    "0xc0"
 );
 kernel1!(
     d192_1, "aesdec", "aesdeclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0"], "0xc0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90",
+        "0xa0", "0xb0"
+    ],
+    "0xc0"
 );
 kernel8!(
     e256_8, "aesenc", "aesenclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0", "0xc0", "0xd0"], "0xe0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90",
+        "0xa0", "0xb0", "0xc0", "0xd0"
+    ],
+    "0xe0"
 );
 kernel12!(
     e256_12, "aesenc", "aesenclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0", "0xc0", "0xd0"], "0xe0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90",
+        "0xa0", "0xb0", "0xc0", "0xd0"
+    ],
+    "0xe0"
 );
 kernel4_keys256!(e256_4, "aesenc", "aesenclast");
 kernel2!(
     e256_2, "aesenc", "aesenclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0", "0xc0", "0xd0"], "0xe0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90",
+        "0xa0", "0xb0", "0xc0", "0xd0"
+    ],
+    "0xe0"
 );
 kernel1!(
     e256_1, "aesenc", "aesenclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0", "0xc0", "0xd0"], "0xe0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90",
+        "0xa0", "0xb0", "0xc0", "0xd0"
+    ],
+    "0xe0"
 );
 kernel8!(
     d256_8, "aesdec", "aesdeclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0", "0xc0", "0xd0"], "0xe0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90",
+        "0xa0", "0xb0", "0xc0", "0xd0"
+    ],
+    "0xe0"
 );
 kernel12!(
     d256_12, "aesdec", "aesdeclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0", "0xc0", "0xd0"], "0xe0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90",
+        "0xa0", "0xb0", "0xc0", "0xd0"
+    ],
+    "0xe0"
 );
 kernel4_keys256!(d256_4, "aesdec", "aesdeclast");
 kernel2!(
     d256_2, "aesdec", "aesdeclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0", "0xc0", "0xd0"], "0xe0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90",
+        "0xa0", "0xb0", "0xc0", "0xd0"
+    ],
+    "0xe0"
 );
 kernel1!(
     d256_1, "aesdec", "aesdeclast",
-    ["0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90", "0xa0", "0xb0", "0xc0", "0xd0"], "0xe0"
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80", "0x90",
+        "0xa0", "0xb0", "0xc0", "0xd0"
+    ],
+    "0xe0"
 );
 
 /// Walk a buffer through the widest kernel that fits, repeatedly.
@@ -804,6 +926,465 @@ driver!(encrypt_192, e192_12, e192_8, e192_4, e192_2, e192_1);
 driver!(decrypt_192, d192_12, d192_8, d192_4, d192_2, d192_1);
 driver!(encrypt_256, e256_12, e256_8, e256_4, e256_2, e256_1);
 driver!(decrypt_256, d256_12, d256_8, d256_4, d256_2, d256_1);
+
+/// A fully unrolled twelve block counter kernel, looping over the
+/// buffer.
+///
+/// The counter blocks are built in registers: the base counter is byte
+/// reversed to little endian once, each register gets its block offset
+/// added to the low quadword, and each result is reversed back. The
+/// caller has checked that the low quadword cannot carry anywhere in
+/// the span this call covers, so the high one never changes and the
+/// counter advances in a register between iterations rather than
+/// round-tripping through memory. After the last round the keystream
+/// is XORed with the data in place, so each block is read once and
+/// written once and the keystream never touches memory.
+macro_rules! ctr_kernel12 {
+    ($name:ident, [$($key:literal),+], $final:literal) => {
+        /// # Safety
+        ///
+        /// The CPU must have the AES and SSSE3 instructions. `rk` must
+        /// hold the whole schedule, `data` at least `groups * 12`
+        /// whole blocks, and `ctr` one big-endian counter block whose
+        /// low 64 bits are at most `u64::MAX - (groups * 12 - 1)`.
+        #[inline(always)]
+        unsafe fn $name(
+            rk: *const u8,
+            data: *mut u8,
+            groups: usize,
+            ctr: *const u8,
+        ) {
+            // SAFETY: the caller guarantees the instructions and all
+            // ranges. The mask and offset tables are aligned statics,
+            // so they can be aligned memory operands.
+            unsafe {
+                asm!(
+                    "movdqa xmm13, [{bsw}]",
+                    "movdqu xmm14, [{c}]",
+                    "pshufb xmm14, xmm13",
+                    "movdqa xmm15, [{step}]",
+                    "2:",
+                    "movdqa xmm0, xmm14",
+                    "movdqa xmm1, xmm14",
+                    "movdqa xmm2, xmm14",
+                    "movdqa xmm3, xmm14",
+                    "movdqa xmm4, xmm14",
+                    "movdqa xmm5, xmm14",
+                    "movdqa xmm6, xmm14",
+                    "movdqa xmm7, xmm14",
+                    "movdqa xmm8, xmm14",
+                    "movdqa xmm9, xmm14",
+                    "movdqa xmm10, xmm14",
+                    "movdqa xmm11, xmm14",
+                    "paddq xmm1, [{off} + 0x10]",
+                    "paddq xmm2, [{off} + 0x20]",
+                    "paddq xmm3, [{off} + 0x30]",
+                    "paddq xmm4, [{off} + 0x40]",
+                    "paddq xmm5, [{off} + 0x50]",
+                    "paddq xmm6, [{off} + 0x60]",
+                    "paddq xmm7, [{off} + 0x70]",
+                    "paddq xmm8, [{off} + 0x80]",
+                    "paddq xmm9, [{off} + 0x90]",
+                    "paddq xmm10, [{off} + 0xa0]",
+                    "paddq xmm11, [{off} + 0xb0]",
+                    "pshufb xmm0, xmm13",
+                    "pshufb xmm1, xmm13",
+                    "pshufb xmm2, xmm13",
+                    "pshufb xmm3, xmm13",
+                    "pshufb xmm4, xmm13",
+                    "pshufb xmm5, xmm13",
+                    "pshufb xmm6, xmm13",
+                    "pshufb xmm7, xmm13",
+                    "pshufb xmm8, xmm13",
+                    "pshufb xmm9, xmm13",
+                    "pshufb xmm10, xmm13",
+                    "pshufb xmm11, xmm13",
+                    "movups xmm12, [{rk}]",
+                    "xorps xmm0, xmm12",
+                    "xorps xmm1, xmm12",
+                    "xorps xmm2, xmm12",
+                    "xorps xmm3, xmm12",
+                    "xorps xmm4, xmm12",
+                    "xorps xmm5, xmm12",
+                    "xorps xmm6, xmm12",
+                    "xorps xmm7, xmm12",
+                    "xorps xmm8, xmm12",
+                    "xorps xmm9, xmm12",
+                    "xorps xmm10, xmm12",
+                    "xorps xmm11, xmm12",
+                    $(
+                        concat!("movups xmm12, [{rk} + ", $key, "]"),
+                        concat!("aesenc xmm0, xmm12"),
+                        concat!("aesenc xmm1, xmm12"),
+                        concat!("aesenc xmm2, xmm12"),
+                        concat!("aesenc xmm3, xmm12"),
+                        concat!("aesenc xmm4, xmm12"),
+                        concat!("aesenc xmm5, xmm12"),
+                        concat!("aesenc xmm6, xmm12"),
+                        concat!("aesenc xmm7, xmm12"),
+                        concat!("aesenc xmm8, xmm12"),
+                        concat!("aesenc xmm9, xmm12"),
+                        concat!("aesenc xmm10, xmm12"),
+                        concat!("aesenc xmm11, xmm12"),
+                    )+
+                    concat!("movups xmm12, [{rk} + ", $final, "]"),
+                    concat!("aesenclast xmm0, xmm12"),
+                    concat!("aesenclast xmm1, xmm12"),
+                    concat!("aesenclast xmm2, xmm12"),
+                    concat!("aesenclast xmm3, xmm12"),
+                    concat!("aesenclast xmm4, xmm12"),
+                    concat!("aesenclast xmm5, xmm12"),
+                    concat!("aesenclast xmm6, xmm12"),
+                    concat!("aesenclast xmm7, xmm12"),
+                    concat!("aesenclast xmm8, xmm12"),
+                    concat!("aesenclast xmm9, xmm12"),
+                    concat!("aesenclast xmm10, xmm12"),
+                    concat!("aesenclast xmm11, xmm12"),
+                    "movups xmm12, [{d} + 0x00]",
+                    "xorps xmm0, xmm12",
+                    "movups [{d} + 0x00], xmm0",
+                    "movups xmm12, [{d} + 0x10]",
+                    "xorps xmm1, xmm12",
+                    "movups [{d} + 0x10], xmm1",
+                    "movups xmm12, [{d} + 0x20]",
+                    "xorps xmm2, xmm12",
+                    "movups [{d} + 0x20], xmm2",
+                    "movups xmm12, [{d} + 0x30]",
+                    "xorps xmm3, xmm12",
+                    "movups [{d} + 0x30], xmm3",
+                    "movups xmm12, [{d} + 0x40]",
+                    "xorps xmm4, xmm12",
+                    "movups [{d} + 0x40], xmm4",
+                    "movups xmm12, [{d} + 0x50]",
+                    "xorps xmm5, xmm12",
+                    "movups [{d} + 0x50], xmm5",
+                    "movups xmm12, [{d} + 0x60]",
+                    "xorps xmm6, xmm12",
+                    "movups [{d} + 0x60], xmm6",
+                    "movups xmm12, [{d} + 0x70]",
+                    "xorps xmm7, xmm12",
+                    "movups [{d} + 0x70], xmm7",
+                    "movups xmm12, [{d} + 0x80]",
+                    "xorps xmm8, xmm12",
+                    "movups [{d} + 0x80], xmm8",
+                    "movups xmm12, [{d} + 0x90]",
+                    "xorps xmm9, xmm12",
+                    "movups [{d} + 0x90], xmm9",
+                    "movups xmm12, [{d} + 0xa0]",
+                    "xorps xmm10, xmm12",
+                    "movups [{d} + 0xa0], xmm10",
+                    "movups xmm12, [{d} + 0xb0]",
+                    "xorps xmm11, xmm12",
+                    "movups [{d} + 0xb0], xmm11",
+                    "paddq xmm14, xmm15",
+                    "add {d}, 192",
+                    "dec {g}",
+                    "jnz 2b",
+                    rk = in(reg) rk,
+                    d = inout(reg) data => _,
+                    g = inout(reg) groups => _,
+                    c = in(reg) ctr,
+                    bsw = in(reg) &BSWAP,
+                    off = in(reg) &OFFSETS,
+                    step = in(reg) &STEP,
+                    out("xmm0") _, out("xmm1") _, out("xmm2") _,
+                    out("xmm3") _, out("xmm4") _, out("xmm5") _,
+                    out("xmm6") _, out("xmm7") _, out("xmm8") _,
+                    out("xmm9") _, out("xmm10") _, out("xmm11") _,
+                    out("xmm12") _, out("xmm13") _, out("xmm14") _,
+                    out("xmm15") _,
+                    options(nostack),
+                );
+            }
+        }
+    };
+}
+
+/// A fully unrolled four block counter kernel, for buffers shorter
+/// than a wide group. Same construction as the wide kernel, without
+/// the loop.
+macro_rules! ctr_kernel4 {
+    ($name:ident, [$($key:literal),+], $final:literal) => {
+        /// # Safety
+        ///
+        /// The CPU must have the AES and SSSE3 instructions. `rk` must
+        /// hold the whole schedule, `data` 4 blocks, and `ctr` one
+        /// big-endian counter block whose low 64 bits are at most
+        /// `u64::MAX - 3`.
+        #[inline(always)]
+        unsafe fn $name(rk: *const u8, data: *mut u8, ctr: *const u8) {
+            // SAFETY: the caller guarantees the instructions and all
+            // three ranges. The mask and offset tables are aligned
+            // statics, so they can be aligned memory operands.
+            unsafe {
+                asm!(
+                    "movdqa xmm9, [{bsw}]",
+                    "movdqu xmm4, [{c}]",
+                    "pshufb xmm4, xmm9",
+                    "movdqa xmm0, xmm4",
+                    "movdqa xmm1, xmm4",
+                    "movdqa xmm2, xmm4",
+                    "movdqa xmm3, xmm4",
+                    "paddq xmm1, [{off} + 0x10]",
+                    "paddq xmm2, [{off} + 0x20]",
+                    "paddq xmm3, [{off} + 0x30]",
+                    "pshufb xmm0, xmm9",
+                    "pshufb xmm1, xmm9",
+                    "pshufb xmm2, xmm9",
+                    "pshufb xmm3, xmm9",
+                    "movups xmm8, [{rk}]",
+                    "xorps xmm0, xmm8",
+                    "xorps xmm1, xmm8",
+                    "xorps xmm2, xmm8",
+                    "xorps xmm3, xmm8",
+                    $(
+                        concat!("movups xmm8, [{rk} + ", $key, "]"),
+                        concat!("aesenc xmm0, xmm8"),
+                        concat!("aesenc xmm1, xmm8"),
+                        concat!("aesenc xmm2, xmm8"),
+                        concat!("aesenc xmm3, xmm8"),
+                    )+
+                    concat!("movups xmm8, [{rk} + ", $final, "]"),
+                    concat!("aesenclast xmm0, xmm8"),
+                    concat!("aesenclast xmm1, xmm8"),
+                    concat!("aesenclast xmm2, xmm8"),
+                    concat!("aesenclast xmm3, xmm8"),
+                    "movups xmm8, [{d} + 0x00]",
+                    "xorps xmm0, xmm8",
+                    "movups [{d} + 0x00], xmm0",
+                    "movups xmm8, [{d} + 0x10]",
+                    "xorps xmm1, xmm8",
+                    "movups [{d} + 0x10], xmm1",
+                    "movups xmm8, [{d} + 0x20]",
+                    "xorps xmm2, xmm8",
+                    "movups [{d} + 0x20], xmm2",
+                    "movups xmm8, [{d} + 0x30]",
+                    "xorps xmm3, xmm8",
+                    "movups [{d} + 0x30], xmm3",
+                    rk = in(reg) rk,
+                    d = in(reg) data,
+                    c = in(reg) ctr,
+                    bsw = in(reg) &BSWAP,
+                    off = in(reg) &OFFSETS,
+                    out("xmm0") _, out("xmm1") _, out("xmm2") _,
+                    out("xmm3") _, out("xmm4") _, out("xmm8") _,
+                    out("xmm9") _,
+                    options(nostack),
+                );
+            }
+        }
+    };
+}
+
+/// A single block counter kernel.
+///
+/// One counter block needs no byte order tricks: the caller hands the
+/// exact big-endian counter bytes, so this also serves as the carry
+/// fallback when the wide kernel's no-carry precondition fails.
+macro_rules! ctr_kernel1 {
+    ($name:ident, [$($key:literal),+], $final:literal) => {
+        /// # Safety
+        ///
+        /// The CPU must have the AES instructions. `rk` must hold the
+        /// whole schedule, `data` 1 block, and `ctr` one counter block.
+        #[inline(always)]
+        unsafe fn $name(rk: *const u8, data: *mut u8, ctr: *const u8) {
+            // SAFETY: the caller guarantees the instructions and all
+            // three ranges.
+            unsafe {
+                asm!(
+                    "movdqu xmm8, [{rk}]",
+                    "movdqu xmm0, [{c}]",
+                    "pxor xmm0, xmm8",
+                    $(
+                        concat!("movdqu xmm8, [{rk} + ", $key, "]"),
+                        concat!("aesenc xmm0, xmm8"),
+                    )+
+                    concat!("movdqu xmm8, [{rk} + ", $final, "]"),
+                    concat!("aesenclast xmm0, xmm8"),
+                    "movdqu xmm1, [{d}]",
+                    "pxor xmm0, xmm1",
+                    "movdqu [{d}], xmm0",
+                    rk = in(reg) rk,
+                    d = in(reg) data,
+                    c = in(reg) ctr,
+                    out("xmm0") _, out("xmm1") _, out("xmm8") _,
+                    options(nostack),
+                );
+            }
+        }
+    };
+}
+
+ctr_kernel12!(
+    ctr_e128_12,
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80",
+        "0x90"
+    ],
+    "0xa0"
+);
+ctr_kernel4!(
+    ctr_e128_4,
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80",
+        "0x90"
+    ],
+    "0xa0"
+);
+ctr_kernel1!(
+    ctr_e128_1,
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80",
+        "0x90"
+    ],
+    "0xa0"
+);
+ctr_kernel12!(
+    ctr_e192_12,
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80",
+        "0x90", "0xa0", "0xb0"
+    ],
+    "0xc0"
+);
+ctr_kernel4!(
+    ctr_e192_4,
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80",
+        "0x90", "0xa0", "0xb0"
+    ],
+    "0xc0"
+);
+ctr_kernel1!(
+    ctr_e192_1,
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80",
+        "0x90", "0xa0", "0xb0"
+    ],
+    "0xc0"
+);
+ctr_kernel12!(
+    ctr_e256_12,
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80",
+        "0x90", "0xa0", "0xb0", "0xc0", "0xd0"
+    ],
+    "0xe0"
+);
+ctr_kernel4!(
+    ctr_e256_4,
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80",
+        "0x90", "0xa0", "0xb0", "0xc0", "0xd0"
+    ],
+    "0xe0"
+);
+ctr_kernel1!(
+    ctr_e256_1,
+    [
+        "0x10", "0x20", "0x30", "0x40", "0x50", "0x60", "0x70", "0x80",
+        "0x90", "0xa0", "0xb0", "0xc0", "0xd0"
+    ],
+    "0xe0"
+);
+
+/// Write a counter value as one big-endian block with a single
+/// sixteen byte store.
+///
+/// `u128::to_be_bytes` compiles to two eight byte stores, and the
+/// kernels read the block back immediately with a sixteen byte load,
+/// which cannot forward from a pair of narrower stores and stalls.
+/// One vector store forwards cleanly.
+#[inline(always)]
+fn store_counter(c: u128, out: &mut [u8; BLOCK_SIZE]) {
+    let hi = ((c >> 64) as u64).swap_bytes();
+    let lo = (c as u64).swap_bytes();
+    // SAFETY: both intrinsics are SSE2, which is baseline on this
+    // target, and out is sixteen writable bytes. The high half of the
+    // counter forms the first eight big-endian bytes, so it goes in
+    // the vector's low lane.
+    unsafe {
+        _mm_storeu_si128(
+            out.as_mut_ptr().cast(),
+            _mm_set_epi64x(lo as i64, hi as i64),
+        );
+    }
+}
+
+/// Walk a buffer through the widest counter kernel that fits.
+///
+/// The wide kernels add block offsets to the counter's low 64 bits
+/// only, so each entry is gated on how many blocks fit before that
+/// quadword would carry. Within twelve blocks of the boundary, which
+/// is reached at most once per 2^64 blocks or with an adversarially
+/// placed IV, the singles take over with exact counters, and the loop
+/// then returns to the wide kernels on the far side of the wrap.
+macro_rules! ctr_driver {
+    ($name:ident, $w12:ident, $w4:ident, $w1:ident) => {
+        /// # Safety
+        ///
+        /// The CPU must have the AES and SSSE3 instructions, `rk` must
+        /// be the schedule these kernels were built for, and `data`
+        /// must hold `blocks` whole blocks.
+        #[inline(always)]
+        unsafe fn $name(
+            rk: *const u8,
+            data: *mut u8,
+            blocks: usize,
+            counter: &mut [u8; BLOCK_SIZE],
+        ) {
+            // SAFETY: each call gets a pointer to at least as many
+            // whole blocks as its kernel touches, and a counter block
+            // that satisfies the kernel's no-carry precondition. The
+            // kernels read the counter bytes from `counter` itself,
+            // which store_counter keeps in step with `c`.
+            unsafe {
+                let mut c = u128::from_be_bytes(*counter);
+                let mut i = 0;
+                while i < blocks {
+                    let left = blocks - i;
+                    // How many blocks can count up in the low quadword
+                    // before it carries.
+                    let fit = (u64::MAX - (c as u64)) as u128 + 1;
+                    if left >= 12 && fit >= 12 {
+                        let groups =
+                            (left / 12).min((fit / 12) as usize);
+                        $w12(
+                            rk,
+                            data.add(i * BLOCK_SIZE),
+                            groups,
+                            counter.as_ptr(),
+                        );
+                        i += groups * 12;
+                        c = c.wrapping_add((groups * 12) as u128);
+                    } else if left >= 4 && fit >= 4 {
+                        $w4(
+                            rk,
+                            data.add(i * BLOCK_SIZE),
+                            counter.as_ptr(),
+                        );
+                        i += 4;
+                        c = c.wrapping_add(4);
+                    } else {
+                        $w1(
+                            rk,
+                            data.add(i * BLOCK_SIZE),
+                            counter.as_ptr(),
+                        );
+                        i += 1;
+                        c = c.wrapping_add(1);
+                    }
+                    store_counter(c, counter);
+                }
+            }
+        }
+    };
+}
+
+ctr_driver!(ctr_128, ctr_e128_12, ctr_e128_4, ctr_e128_1);
+ctr_driver!(ctr_192, ctr_e192_12, ctr_e192_4, ctr_e192_1);
+ctr_driver!(ctr_256, ctr_e256_12, ctr_e256_4, ctr_e256_1);
 
 /// Splice the low halves of two round key registers together.
 ///
@@ -1056,7 +1637,8 @@ unsafe fn invert_schedule(ek: *const __m128i, dk: *mut __m128i, rounds: usize) {
 macro_rules! define_aes {
     (
         $enc:ident, $dec:ident, $key_size:expr, $bytes:expr, $rounds:expr,
-        $expand:ident, $enc_set:ident, $dec_set:ident, $bits:expr
+        $expand:ident, $enc_set:ident, $dec_set:ident, $ctr_set:ident,
+        $bits:expr
     ) => {
         // Aligned so the round keys can be read with aligned loads,
         // which lets each one fold into the round instruction instead of
@@ -1123,6 +1705,43 @@ macro_rules! define_aes {
                 unsafe {
                     $enc_set(self.rk.as_ptr(), block.as_mut_ptr(), 1)
                 };
+            }
+
+            /// Encrypt successive counter values and XOR them into
+            /// `data` in place, advancing `counter`.
+            ///
+            /// The counter is one block, big endian, wrapping at the
+            /// full block width, as SP 800-38A specifies. Whole blocks
+            /// only, like [`Self::encrypt`]; returns bytes consumed.
+            ///
+            /// # Panics
+            ///
+            /// If the CPU lacks SSSE3, which the counter kernels need
+            /// on top of AES. See [`ctr_supported`].
+            pub fn ctr(
+                &self,
+                counter: &mut [u8; BLOCK_SIZE],
+                data: &mut [u8],
+            ) -> usize {
+                assert!(
+                    ctr_supported(),
+                    "counter kernels are not available"
+                );
+                let blocks = data.len() / BLOCK_SIZE;
+                if blocks != 0 {
+                    // SAFETY: support was just checked, rk is the
+                    // schedule these kernels were built for, and data
+                    // holds that many whole blocks.
+                    unsafe {
+                        $ctr_set(
+                            self.rk.as_ptr(),
+                            data.as_mut_ptr(),
+                            blocks,
+                            counter,
+                        )
+                    };
+                }
+                blocks * BLOCK_SIZE
             }
         }
 
@@ -1255,15 +1874,15 @@ macro_rules! define_aes {
 
 define_aes!(
     Aes128Enc, Aes128Dec, 16, 176, 10, expand_128,
-    encrypt_128, decrypt_128, "128"
+    encrypt_128, decrypt_128, ctr_128, "128"
 );
 define_aes!(
     Aes192Enc, Aes192Dec, 24, 208, 12, expand_192,
-    encrypt_192, decrypt_192, "192"
+    encrypt_192, decrypt_192, ctr_192, "192"
 );
 define_aes!(
     Aes256Enc, Aes256Dec, 32, 240, 14, expand_256,
-    encrypt_256, decrypt_256, "256"
+    encrypt_256, decrypt_256, ctr_256, "256"
 );
 
 #[cfg(test)]
@@ -1419,6 +2038,102 @@ mod tests {
             aes.encrypt_block(block);
         }
         assert_eq!(bulk, one);
+    }
+
+    /// The fused counter kernels against the portable scalar `ctr`, at
+    /// lengths exercising the wide kernel, the singles tail, and the
+    /// boundary between them, plus the counter write-back.
+    macro_rules! check_ctr_against_portable {
+        ($enc:ident, $pe:path, $len:expr, $seed:expr) => {{
+            let mut rng = Rng($seed);
+            for blocks in [0usize, 1, 2, 7, 8, 9, 15, 16, 17, 64, 100] {
+                let mut key = [0u8; $len];
+                rng.fill(&mut key);
+                let mut iv = [0u8; BLOCK_SIZE];
+                rng.fill(&mut iv);
+                let mut data = vec![0u8; blocks * BLOCK_SIZE];
+                rng.fill(&mut data);
+
+                let mut ours = data.clone();
+                let mut ours_ctr = iv;
+                assert_eq!(
+                    $enc::new(&key).ctr(&mut ours_ctr, &mut ours),
+                    blocks * BLOCK_SIZE
+                );
+
+                let mut theirs = data.clone();
+                let mut theirs_ctr = iv;
+                <$pe>::new(&key).ctr(&mut theirs_ctr, &mut theirs);
+
+                assert_eq!(
+                    ours, theirs,
+                    "{} bit ctr differs at {} blocks",
+                    $len * 8, blocks
+                );
+                assert_eq!(
+                    ours_ctr, theirs_ctr,
+                    "{} bit counter write-back differs at {} blocks",
+                    $len * 8, blocks
+                );
+            }
+        }};
+    }
+
+    #[test]
+    fn ctr_agrees_with_the_portable_implementation() {
+        if !ctr_supported() {
+            return;
+        }
+        check_ctr_against_portable!(
+            Aes128Enc, ttable::Aes128Enc, 16, 0x0123_4567_89ab_cdef
+        );
+        check_ctr_against_portable!(
+            Aes192Enc, ttable::Aes192Enc, 24, 0xfedc_ba98_7654_3210
+        );
+        check_ctr_against_portable!(
+            Aes256Enc, ttable::Aes256Enc, 32, 0x2468_ace0_1357_9bdf
+        );
+    }
+
+    /// IVs whose low 64 bits are about to overflow force the wide
+    /// kernel's no-carry precondition to fail mid-stream, taking the
+    /// single block fallback exactly where the carry crosses.
+    #[test]
+    fn ctr_carries_across_the_low_quadword() {
+        if !ctr_supported() {
+            return;
+        }
+        let key = [0x2bu8; 16];
+        let ours_aes = Aes128Enc::new(&key);
+        let theirs_aes = ttable::Aes128Enc::new(&key);
+
+        for k in [0u64, 1, 7, 8, 9] {
+            let start = ((0x0123_4567_89ab_cdefu128) << 64)
+                | (u64::MAX - k) as u128;
+            let iv = start.to_be_bytes();
+            let mut data = [0xa5u8; BLOCK_SIZE * 20];
+
+            let mut ours = data;
+            let mut ours_ctr = iv;
+            ours_aes.ctr(&mut ours_ctr, &mut ours);
+
+            let mut theirs_ctr = iv;
+            theirs_aes.ctr(&mut theirs_ctr, &mut data);
+
+            assert_eq!(ours, data, "carry case k = {k}");
+            assert_eq!(ours_ctr, theirs_ctr, "counter, k = {k}");
+        }
+
+        // The full wrap to zero as well.
+        let iv = [0xffu8; BLOCK_SIZE];
+        let mut data = [0x5au8; BLOCK_SIZE * 20];
+        let mut ours = data;
+        let mut ours_ctr = iv;
+        ours_aes.ctr(&mut ours_ctr, &mut ours);
+        let mut theirs_ctr = iv;
+        theirs_aes.ctr(&mut theirs_ctr, &mut data);
+        assert_eq!(ours, data, "wrap at 2^128");
+        assert_eq!(ours_ctr, theirs_ctr, "counter after the wrap");
     }
 
     #[test]
