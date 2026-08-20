@@ -1,3 +1,3 @@
 //! AES implementations using ARMv8 instructions.
 
-pub mod crypto;
+pub mod armv8;

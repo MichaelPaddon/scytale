@@ -26,7 +26,7 @@ specific implementation:
 use scytale::symmetric::aes::Aes128Enc;                          // best
 use scytale::symmetric::aes::arch::x86_64::vaes::Aes128Enc;      // pinned
 use scytale::symmetric::aes::arch::x86_64::aesni::Aes128Enc;     // pinned
-use scytale::symmetric::aes::arch::aarch64::crypto::Aes128Enc;   // pinned
+use scytale::symmetric::aes::arch::aarch64::armv8::Aes128Enc;   // pinned
 use scytale::symmetric::aes::arch::portable::ttable::Aes128Enc;  // pinned
 ```
 

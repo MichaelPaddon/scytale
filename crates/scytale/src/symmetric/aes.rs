@@ -31,7 +31,7 @@ mod accel {
 
 #[cfg(target_arch = "aarch64")]
 mod accel {
-    pub use super::arch::aarch64::crypto as aesni;
+    pub use super::arch::aarch64::armv8 as aesni;
 
     /// A stand-in for the tier this target has nothing in. It reports no
     /// support, so that arm is never taken.
