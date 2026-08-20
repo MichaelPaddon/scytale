@@ -324,12 +324,42 @@ fn vector(meter: &Meter, rows: &mut Vec<Row>) -> Result<(), String> {
         }};
     }
 
+    // The fused CTR entries of the two backends, the same comparison
+    // of kinds as the ECB rows above.
+    macro_rules! ctr_ladder {
+        ($v:ty, $a:ty, $bits:expr, $len:expr) => {{
+            let key = [0x2bu8; $len];
+            let wide = <$v>::new(&key);
+            let narrow = <$a>::new(&key);
+            for bytes in SIZES {
+                let mut ours = Messages::new(bytes);
+                let mut theirs = Messages::new(bytes);
+                let mut wc = [0u8; 16];
+                let mut nc = [0u8; 16];
+                rows.push(compare(
+                    meter,
+                    &format!(concat!("aes", $bits, "-ctr/{}"), bytes),
+                    bytes,
+                    || {
+                        wide.ctr(&mut wc, ours.next());
+                    },
+                    || {
+                        narrow.ctr(&mut nc, theirs.next());
+                    },
+                ));
+            }
+        }};
+    }
+
     ladder!(vaes::Aes128Enc, aesni::Aes128Enc, "128", 16, encrypt);
     ladder!(vaes::Aes128Dec, aesni::Aes128Dec, "128", 16, decrypt);
     ladder!(vaes::Aes192Enc, aesni::Aes192Enc, "192", 24, encrypt);
     ladder!(vaes::Aes192Dec, aesni::Aes192Dec, "192", 24, decrypt);
     ladder!(vaes::Aes256Enc, aesni::Aes256Enc, "256", 32, encrypt);
     ladder!(vaes::Aes256Dec, aesni::Aes256Dec, "256", 32, decrypt);
+    ctr_ladder!(vaes::Aes128Enc, aesni::Aes128Enc, "128", 16);
+    ctr_ladder!(vaes::Aes192Enc, aesni::Aes192Enc, "192", 24);
+    ctr_ladder!(vaes::Aes256Enc, aesni::Aes256Enc, "256", 32);
     Ok(())
 }
 

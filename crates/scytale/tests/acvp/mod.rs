@@ -339,6 +339,7 @@ pub fn ctr_implementations() -> Vec<CtrImpl> {
         }
         if vaes::supported() {
             all.push(generic_ctr!("generic/vaes", vaes));
+            all.push(fused_ctr!("fused/vaes", vaes));
         }
     }
 
