@@ -18,7 +18,7 @@ own counterpart where one exists:
 
 | Tier | scytale | OpenSSL |
 | --- | --- | --- |
-| vector | VAES | none: it has no VAES kernel for ECB |
+| vector | VAES | none: it has no VAES kernel for ECB or CTR |
 | accelerated | AES-NI | AES-NI, from a default build |
 | portable | T-table | C, from a `no-asm` build |
 
@@ -37,11 +37,38 @@ through the bulk entry would charge OpenSSL for a length dispatch that a
 caller with one block does not use, which is a comparison of interfaces
 rather than of ciphers.
 
+CTR is paired the same way, on each tier against the counterpart of its own
+kind:
+
+| Tier | scytale | OpenSSL |
+| --- | --- | --- |
+| vector | VAES counter kernel | none, as for ECB |
+| accelerated | AES-NI counter kernel | `aesni_ctr32_encrypt_blocks` |
+| portable | generic mode over the T-table cipher | `CRYPTO_ctr128_encrypt` driven by `AES_encrypt` |
+
+Every CTR row goes through the bulk entry on both sides, at one block as
+well as at a thousand, because neither side has a single block counter
+entry to call instead. The portable pairing is a mode loop in C driving a
+scalar block function against a mode loop in Rust doing the same, which is
+why `AES_encrypt` is passed explicitly rather than left to a build that
+might supply an assembly one.
+
+OpenSSL's kernel counts in the low 32 bits of the counter where ours counts
+in all 128. The two agree exactly whenever a message neither reaches 2^32
+blocks nor starts within that distance of the boundary, so the benchmark
+starts every counter with its low 32 bits zero and its longest message is
+1024 blocks. The agreement test holds both sides to byte identical output
+under those conditions before any timing is believed; it is a restriction
+on the benchmark, not a claim that the two modes are the same.
+
 The vector tier has no honest counterpart at all. OpenSSL 4.0.1 uses VAES
-for CFB, XTS and GCM, but its only ECB kernel is `aesni_ecb_encrypt`.
-Rather than print a flattering ratio against narrower code, that tier is
-reported against scytale's own AES-NI, is labelled a speedup rather than a
-comparison, and gates nothing.
+for CFB, XTS and GCM, but its only ECB kernel is `aesni_ecb_encrypt` and
+its only bare counter kernel is `aesni_ctr32_encrypt_blocks`, both of which
+are SSE. Its VAES counter code exists only inside GCM, fused with the
+authentication it is there to serve, so it cannot be called on its own or
+be compared with a bare mode. Rather than print a flattering ratio against
+narrower code, that tier is reported against scytale's own AES-NI, is
+labelled a speedup rather than a comparison, and gates nothing.
 
 There is a fourth implementation, on the ARMv8 Cryptographic Extension.
 No figure for it appears here, because it has only ever run under an
@@ -96,7 +123,10 @@ spends the same core's cycles.
 **Correctness gates the timing.** The agreement tests require byte
 identical output from scytale and from both OpenSSL builds, across all
 three key sizes, both directions, and buffer lengths from 1 to 64 blocks.
-The full ACVP vector set runs under `cargo test --features extended-tests`.
+CTR is held to the same standard, including lengths that are not a whole
+number of blocks and messages fed in pieces, since a mode that only agrees
+when handed a whole message is not the mode it claims to be. The full ACVP
+vector set runs under `cargo test --features extended-tests`.
 
 ## Reproducing
 
@@ -171,6 +201,27 @@ What runs on an x86_64 CPU with the AES instructions but without VAES.
 | AES-256-ECB decrypt | 1024 | 0.4376 | 11363 | 0.4398 | 11291 | 1.005 | ✅ |
 | AES-256-ECB decrypt | 8192 | 0.4375 | 11384 | 0.4400 | 11279 | 1.006 | ✅ |
 | AES-256-ECB decrypt | 16384 | 0.4379 | 11370 | 0.4391 | 11291 | 1.003 | ✅ |
+| AES-128-CTR | 16 | 1.0548 | 4620 | 3.2466 | 1513 | 3.078 | ✅ |
+| AES-128-CTR | 64 | 0.4869 | 9750 | 0.9821 | 4850 | 2.018 | ✅ |
+| AES-128-CTR | 256 | 0.4671 | 10410 | 0.5076 | 9606 | 1.086 | ✅ |
+| AES-128-CTR | 1024 | 0.3650 | 13485 | 0.3936 | 12463 | 1.078 | ✅ |
+| AES-128-CTR | 8192 | 0.3367 | 14590 | 0.3607 | 13621 | 1.071 | ✅ |
+| AES-128-CTR | 16384 | 0.3327 | 14728 | 0.3580 | 13704 | 1.076 | ✅ |
+| AES-192-CTR | 16 | 1.0860 | 4433 | 3.6211 | 1346 | 3.334 | ✅ |
+| AES-192-CTR | 64 | 0.5263 | 9039 | 1.0960 | 4377 | 2.083 | ✅ |
+| AES-192-CTR | 256 | 0.5258 | 9350 | 0.5684 | 8683 | 1.081 | ✅ |
+| AES-192-CTR | 1024 | 0.4265 | 11560 | 0.4485 | 10949 | 1.052 | ✅ |
+| AES-192-CTR | 8192 | 0.3993 | 12382 | 0.4138 | 11898 | 1.036 | ✅ |
+| AES-192-CTR | 16384 | 0.3948 | 12496 | 0.4108 | 11997 | 1.040 | ✅ |
+| AES-256-CTR | 16 | 1.1384 | 4260 | 3.9956 | 1222 | 3.510 | ✅ |
+| AES-256-CTR | 64 | 0.5859 | 8214 | 1.1840 | 4067 | 2.021 | ✅ |
+| AES-256-CTR | 256 | 0.5934 | 8306 | 0.6265 | 7827 | 1.056 | ✅ |
+| AES-256-CTR | 1024 | 0.4900 | 10057 | 0.5097 | 9620 | 1.040 | ✅ |
+| AES-256-CTR | 8192 | 0.4619 | 10723 | 0.4767 | 10409 | 1.032 | ✅ |
+| AES-256-CTR | 16384 | 0.4576 | 10859 | 0.4740 | 10491 | 1.036 | ✅ |
+
+CTR has one direction: encrypting and decrypting are the same operation,
+so there is one row per size rather than two.
 
 ### Portable: T-table against OpenSSL C
 
@@ -214,6 +265,24 @@ What runs where neither is available.
 | AES-256-ECB decrypt | 1024 | 11.7304 | 418 | 12.2817 | 398 | 1.047 | ✅ |
 | AES-256-ECB decrypt | 8192 | 11.7052 | 415 | 12.2595 | 397 | 1.047 | ✅ |
 | AES-256-ECB decrypt | 16384 | 11.7028 | 419 | 12.2549 | 400 | 1.047 | ✅ |
+| AES-128-CTR | 16 | 9.8250 | 480 | 11.8226 | 395 | 1.203 | ✅ |
+| AES-128-CTR | 64 | 9.4967 | 495 | 11.8367 | 397 | 1.247 | ✅ |
+| AES-128-CTR | 256 | 9.4651 | 498 | 11.7981 | 400 | 1.246 | ✅ |
+| AES-128-CTR | 1024 | 9.3207 | 504 | 11.8049 | 400 | 1.266 | ✅ |
+| AES-128-CTR | 8192 | 9.2866 | 507 | 11.7998 | 400 | 1.271 | ✅ |
+| AES-128-CTR | 16384 | 9.2834 | 509 | 11.7954 | 401 | 1.271 | ✅ |
+| AES-192-CTR | 16 | 11.5259 | 407 | 13.5655 | 345 | 1.177 | ✅ |
+| AES-192-CTR | 64 | 11.2686 | 418 | 13.6006 | 347 | 1.207 | ✅ |
+| AES-192-CTR | 256 | 11.1772 | 423 | 13.5645 | 348 | 1.213 | ✅ |
+| AES-192-CTR | 1024 | 11.0376 | 429 | 13.5659 | 347 | 1.229 | ✅ |
+| AES-192-CTR | 8192 | 11.0025 | 430 | 13.5566 | 347 | 1.232 | ✅ |
+| AES-192-CTR | 16384 | 11.0026 | 428 | 13.5552 | 346 | 1.232 | ✅ |
+| AES-256-CTR | 16 | 13.5038 | 349 | 15.3294 | 306 | 1.135 | ✅ |
+| AES-256-CTR | 64 | 12.8961 | 365 | 15.3657 | 306 | 1.191 | ✅ |
+| AES-256-CTR | 256 | 12.8761 | 368 | 15.3250 | 309 | 1.190 | ✅ |
+| AES-256-CTR | 1024 | 12.7284 | 372 | 15.3338 | 309 | 1.204 | ✅ |
+| AES-256-CTR | 8192 | 12.6993 | 373 | 15.3166 | 310 | 1.206 | ✅ |
+| AES-256-CTR | 16384 | 12.6898 | 373 | 15.3095 | 309 | 1.206 | ✅ |
 
 ### Vector: VAES against scytale's own AES-NI
 
@@ -259,6 +328,24 @@ OpenSSL, which has nothing of this kind for ECB.
 | AES-256-ECB decrypt | 1024 | 0.2193 | 22694 | 0.4376 | 11385 | 1.996 |
 | AES-256-ECB decrypt | 8192 | 0.2188 | 22662 | 0.4375 | 11326 | 2.000 |
 | AES-256-ECB decrypt | 16384 | 0.2188 | 22600 | 0.4379 | 11304 | 2.002 |
+| AES-128-CTR | 16 | 1.4194 | 3038 | 1.0548 | 4042 | 0.743 |
+| AES-128-CTR | 64 | 0.5336 | 8254 | 0.4863 | 9074 | 0.911 |
+| AES-128-CTR | 256 | 0.3790 | 12644 | 0.4681 | 10251 | 1.235 |
+| AES-128-CTR | 1024 | 0.2207 | 22037 | 0.3652 | 13328 | 1.655 |
+| AES-128-CTR | 8192 | 0.1757 | 26527 | 0.3367 | 14298 | 1.917 |
+| AES-128-CTR | 16384 | 0.1704 | 26905 | 0.3327 | 14536 | 1.953 |
+| AES-192-CTR | 16 | 1.4610 | 2914 | 1.0861 | 3918 | 0.743 |
+| AES-192-CTR | 64 | 0.5842 | 7586 | 0.5271 | 8382 | 0.901 |
+| AES-192-CTR | 256 | 0.4418 | 10859 | 0.5255 | 9244 | 1.189 |
+| AES-192-CTR | 1024 | 0.2446 | 19751 | 0.4260 | 11355 | 1.742 |
+| AES-192-CTR | 8192 | 0.1977 | 24379 | 0.3994 | 12114 | 2.020 |
+| AES-192-CTR | 16384 | 0.1944 | 24703 | 0.3948 | 12167 | 2.031 |
+| AES-256-CTR | 16 | 1.5132 | 2847 | 1.1383 | 3784 | 0.752 |
+| AES-256-CTR | 64 | 0.6340 | 7086 | 0.5857 | 7691 | 0.924 |
+| AES-256-CTR | 256 | 0.4563 | 10659 | 0.5935 | 8214 | 1.301 |
+| AES-256-CTR | 1024 | 0.2741 | 17804 | 0.4901 | 10003 | 1.788 |
+| AES-256-CTR | 8192 | 0.2264 | 21546 | 0.4619 | 10523 | 2.041 |
+| AES-256-CTR | 16384 | 0.2230 | 21624 | 0.4576 | 10564 | 2.052 |
 
 ✅ at or above parity with OpenSSL, ❌ below it.
 
@@ -273,12 +360,17 @@ There is nothing left in those rows: the round instructions are the whole
 cost, and everything around them has been amortised away. OpenSSL is 0.1 to
 0.7% above the same floor, which is what the ratios of 1.001 to 1.007 are.
 
-**VAES doubles AES-NI exactly**, 2.000 from 256 bytes up, because two
-blocks per instruction against a kernel already at the instruction limit
-can give exactly that and no more. Below sixteen blocks the vector types
-delegate to AES-NI and pay a check for the privilege, which is the 0.88 to
-1.11 at the short end; those rows gate nothing and are the same code on
-both sides.
+**VAES doubles AES-NI exactly for ECB**, 2.000 from 256 bytes up, because
+two blocks per instruction against a kernel already at the instruction
+limit can give exactly that and no more. Below sixteen blocks the vector
+types delegate to AES-NI and pay a check for the privilege, which is the
+0.88 to 1.11 at the short end; those rows gate nothing and are the same
+code on both sides.
+
+**The portable ECB lead is 1.05 to 1.12**, and roughly flat across sizes.
+The margin is larger than the accelerated tier's because there is more
+room to differ in software: two implementations of the same handful of
+instructions have almost nowhere left to go.
 
 **Short messages are dominated by the call, not the cipher.** At one block
 scytale costs 6.2 cycles against OpenSSL's 20.2, a factor of 3.2. Almost
@@ -288,10 +380,43 @@ round count. It is a real difference to a caller with single blocks to
 encrypt, and it is not a statement about the cipher, which is why the row
 is worth reading separately from the rest.
 
-**The portable lead is 1.05 to 1.12**, and roughly flat across sizes. The
-margin is larger than the accelerated tier's because there is more room to
-differ in software: two implementations of the same handful of
-instructions have almost nowhere left to go.
+**CTR costs a third of a cycle a block more than ECB**, and the same third
+at all three key sizes: 5.32, 6.32 and 7.32 cycles a block against ECB's
+5.00, 6.00 and 7.00. The counter blocks are built in registers and the
+keystream is exclusive-ored into the data as it leaves the last round, so
+the keystream is never written to memory and read back; what remains is
+the counter arithmetic and one extra load and store per block, and none of
+that depends on how many rounds it is spread across. OpenSSL pays 0.73,
+0.57 and 0.58 on the same rows, which is where the ratios of 1.03 to 1.08
+come from.
+
+**The vector counter kernel can beat the factor of two** that ECB is
+pinned at: 1.95 at AES-128, but 2.03 and 2.05 at AES-192 and AES-256. Two
+blocks per round instruction halves the counter arithmetic per block as
+well as the round work, and a longer schedule leaves more issue slots for
+that arithmetic to hide in, so its overhead falls from 0.23 cycles a block
+at AES-128 to 0.07 at AES-256 while the narrower kernel it is measured
+against stays flat at 0.32. Below a sixteen block group the vector types
+delegate to AES-NI, which is the 0.74 to 0.92 at the short end.
+
+**The portable mode overhead is 1.07 cycles a byte**, 9.28 against the
+T-table cipher's 8.22, or seventeen cycles a block to stage a keystream
+block and exclusive-or it in. OpenSSL pays 2.69 on the same comparison,
+forty-three cycles a block. Both loops stage the keystream through memory
+and combine it a word at a time; the difference is that ours reaches the
+cipher through a direct call that inlines and theirs through the function
+pointer the interface is built around, once per block. That is most of why
+the portable CTR lead of 1.14 to 1.27 is wider than the portable ECB lead
+of 1.05 to 1.12: the ciphers underneath are closer than the loops around
+them.
+
+**The one block CTR row tells the same story twice over.** It costs 16.9
+cycles against OpenSSL's 51.9, which takes a rolled loop over the round
+keys for a length its wide path never sees. Against our own ECB single
+block entry at 6.2 cycles, the difference is the counter driver and its
+write-back paid whole with one block to amortise them over. The ladder
+from 16.9 down to 5.3 cycles a block as the message grows is that fixed
+cost being spread, not the cipher getting faster.
 
 **Hardware is worth about 54 times the portable cipher**, 31.7 GB/s against
 593 MB/s for AES-128. That gap, not the ratios against OpenSSL, is the
@@ -300,8 +425,8 @@ reason the accelerated backends exist.
 ## Caveats
 
 **What this can resolve is about 0.1%.** Across five runs of an unchanged
-binary, pinned and with a fixed layout, the bulk rows move by less than
-that, and so does our own figure at four blocks.
+binary, pinned and with a fixed layout, the bulk rows usually move by less
+than that, and so does our own figure at four blocks.
 
 OpenSSL's four block figure does not. It settles on one of two values
 about 3% apart, from one run to the next and from one build of this
@@ -309,14 +434,29 @@ benchmark to the next, depending on where its key schedule lands relative
 to the messages. On AES-256 decryption the two implementations are close
 enough for that to decide the row: scytale measures 28.3 cycles a message
 against OpenSSL's 28.3 or 29.1, where the instruction throughput limit is
-28.0. The gate therefore trips on that one row about one run in eight.
-It is a tie at the hardware floor rather than a deficit, and the table
-above reports the median, but it is the one row in the tier where the
-verdict is not the same every time.
+28.0.
 
-**These are ECB single block kernels.** They measure the cipher, not a
-mode. A real mode adds its own work, and CTR in particular can overlap more
-than ECB can.
+**The accelerated ECB verdicts are not the same on every run.** Both sides
+sit at the instruction throughput limit on the bulk rows, so which of them
+measures faster is settled by less than the tool can resolve. Over
+thirty-nine runs of an unchanged binary the gate tripped ten times, on
+fourteen different ECB rows across all three key sizes and both
+directions, every one of them at a ratio between 0.990 and 1.000. These
+are ties at the hardware floor rather than deficits, and the tables above
+report medians of five runs, but a single run is not enough to conclude
+that a change made an accelerated ECB row slower.
+
+No CTR row has tripped in any of those runs. Their narrowest margin is
+3%, which is well outside what the measurement can confuse, so the counter
+kernels are the part of the tier where a single run does mean something.
+
+**The ECB rows measure a cipher; the CTR rows measure a mode.** From 256
+bytes up the ECB rows are the round instructions and nothing else. The CTR
+rows carry a mode's own work as well: counter arithmetic, an extra load
+and store per block, and a partial block to carry between calls. That work
+costs 0.32 cycles a block on the accelerated tier and seventeen on the
+portable one, and it belongs to the mode rather than to the cipher
+underneath it.
 
 **The measurement is of a hot cache.** The messages are in the first level
 cache and so is the key schedule. A caller whose data comes from memory
