@@ -1,20 +1,19 @@
 //! NIST ACVP AES-ECB Monte Carlo Tests.
 //!
-//! MCT chains 100 outer iterations of 1000 inner ones per group, so it is
-//! marked `#[ignore]` and runs under `cargo test-extended`. It exercises
-//! the key schedule far harder than AFT does, because every outer
-//! iteration derives a fresh key from ciphertext.
+//! Vector set: ACVP-AES-ECB-1.0, testType MCT. Primitive: AES-128, -192
+//! and -256 in ECB. Each group chains 100 outer iterations of 1000 inner
+//! ones, so these are marked `#[ignore]` and run under
+//! `cargo test-extended`. They exercise the key schedule far harder than
+//! the functional tests do, because every outer iteration derives a
+//! fresh key from ciphertext.
 //!
-//! Every group runs through every AES implementation this machine can
-//! reach, so each key schedule is driven by the chain rather than only
-//! the one a dispatching type would pick.
-
+//! One test per kernel, so a run says which kernels it certified.
 
 mod acvp;
 
 use acvp::{
-    EcbImpl, Key, ecb_implementations, group_is_encrypt, group_key_len,
-    group_tests, groups, hex_field, load, payload, skipped,
+    EcbImpl, Key, group_is_encrypt, group_key_len, group_tests,
+    groups, hex_field, load, payload, skipped,
 };
 use serde_json::Value;
 
@@ -106,30 +105,63 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-#[test]
-#[ignore = "Monte Carlo: 600k chained blocks per implementation"]
-fn acvp_aes_ecb_mct() {
+/// Drive every Monte Carlo group through one implementation.
+fn run(imp: &EcbImpl) {
     let Some(vectors) = load(VECTORS) else {
         skipped(VECTORS);
         return;
     };
 
-    let implementations = ecb_implementations();
-    assert!(
-        !implementations.is_empty(),
-        "no AES implementation to test"
-    );
-
-    for imp in &implementations {
-        let mut group_count = 0usize;
-        for group in groups(&vectors, "MCT") {
-            run_group(group, imp);
-            group_count += 1;
-        }
-        assert_eq!(
-            group_count, 6,
-            "{}: expected six Monte Carlo groups",
-            imp.name
-        );
+    let mut group_count = 0usize;
+    for group in groups(&vectors, "MCT") {
+        run_group(group, imp);
+        group_count += 1;
     }
+    assert_eq!(
+        group_count, 6,
+        "{}: expected six Monte Carlo groups",
+        imp.name
+    );
+    eprintln!("{}: {group_count} MCT groups", imp.name);
+}
+
+/// A backend this CPU cannot run is not this machine's to certify.
+fn run_if_available(imp: Option<EcbImpl>) {
+    match imp {
+        Some(imp) => run(&imp),
+        None => eprintln!("not available on this CPU"),
+    }
+}
+
+#[test]
+#[ignore = "Monte Carlo: 600k chained blocks"]
+fn ttable_kernel() {
+    run(&acvp::ecb_ttable());
+}
+
+#[test]
+#[ignore = "Monte Carlo: 600k chained blocks"]
+fn dispatching_type() {
+    run(&acvp::ecb_dispatch());
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+#[ignore = "Monte Carlo: 600k chained blocks"]
+fn aesni_kernel() {
+    run_if_available(acvp::ecb_aesni());
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+#[ignore = "Monte Carlo: 600k chained blocks"]
+fn vaes_kernel() {
+    run_if_available(acvp::ecb_vaes());
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+#[ignore = "Monte Carlo: 600k chained blocks"]
+fn armv8_kernel() {
+    run_if_available(acvp::ecb_armv8());
 }

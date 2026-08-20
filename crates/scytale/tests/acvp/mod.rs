@@ -3,6 +3,21 @@
 //! The vectors live at `vectors/acvp/` in the repository and are deliberately
 //! not part of the published crate, so a runner that cannot find them says so
 //! and skips rather than failing.
+//!
+//! # What gets its own test
+//!
+//! Every kernel is certified once, and every construct built on them is
+//! certified once. Not the cross product: a mode driven over each kernel
+//! in turn re-certifies ciphers that the block cipher vectors already
+//! cover, and modes times kernels times key sizes grows faster than the
+//! coverage it buys. A generic mode is therefore run over the
+//! dispatching cipher, which is the widest kernel the machine has, and
+//! each kernel answers for itself against the vectors for the primitive
+//! it implements.
+//!
+//! A kernel with its own fused path for a mode, such as the counter
+//! kernels, is a separate piece of code that the block cipher vectors
+//! never reach, so that path is certified in its own right.
 
 // Each test binary compiles this module separately and uses a different part
 // of it, so unused items here are expected rather than dead.
@@ -207,34 +222,34 @@ macro_rules! ecb_combined {
     }};
 }
 
-/// Every AES implementation this machine can run, including the
-/// dispatching types, which are what a caller naming AES gets.
-pub fn ecb_implementations() -> Vec<EcbImpl> {
-    let mut all = vec![
-        ecb_split!("portable/ttable split", ttable),
-        ecb_combined!("portable/ttable combined", ttable),
-        ecb_split!("dispatch split", aes),
-        ecb_combined!("dispatch combined", aes),
-    ];
+// One constructor per AES *kernel*, plus the dispatching type a caller
+// actually names. Each becomes its own test, so a run says which
+// kernels it certified. The combined both-directions types are thin
+// delegations to these and are covered by unit tests instead.
 
-    #[cfg(target_arch = "x86_64")]
-    {
-        if aesni::supported() {
-            all.push(ecb_split!("x86_64/aesni", aesni));
-        }
-        if vaes::supported() {
-            all.push(ecb_split!("x86_64/vaes", vaes));
-        }
-    }
+pub fn ecb_ttable() -> EcbImpl {
+    ecb_split!("portable/ttable", ttable)
+}
 
-    #[cfg(target_arch = "aarch64")]
-    {
-        if armv8::supported() {
-            all.push(ecb_split!("aarch64/armv8", armv8));
-        }
-    }
+pub fn ecb_dispatch() -> EcbImpl {
+    ecb_split!("dispatch", aes)
+}
 
-    all
+/// `None` where the CPU cannot run this kernel, which is not a failure:
+/// it simply is not this machine's to certify.
+#[cfg(target_arch = "x86_64")]
+pub fn ecb_aesni() -> Option<EcbImpl> {
+    aesni::supported().then(|| ecb_split!("x86_64/aesni", aesni))
+}
+
+#[cfg(target_arch = "x86_64")]
+pub fn ecb_vaes() -> Option<EcbImpl> {
+    vaes::supported().then(|| ecb_split!("x86_64/vaes", vaes))
+}
+
+#[cfg(target_arch = "aarch64")]
+pub fn ecb_armv8() -> Option<EcbImpl> {
+    armv8::supported().then(|| ecb_split!("aarch64/armv8", armv8))
 }
 
 /// The generic mode driving one backend's bulk block interface.
@@ -284,10 +299,21 @@ macro_rules! fused_ctr {
     }};
 }
 
-/// Every CTR implementation this machine can run: the generic mode over
-/// each cipher, each fused counter kernel, and the dispatching types.
-pub fn ctr_implementations() -> Vec<CtrImpl> {
-    fn dispatched(key: &Key, iv: &[u8; BLOCK_SIZE], data: &mut [u8]) {
+/// The generic mode over the dispatching cipher, which is the best
+/// kernel this CPU has.
+///
+/// The mode is one construct, so running it over several kernels would
+/// re-certify the ciphers rather than the mode, and the ciphers are
+/// already certified against the ECB vectors. One instance over the
+/// widest kernel exercises the multi-block staging path the mode uses.
+pub fn ctr_generic() -> CtrImpl {
+    generic_ctr!("generic mode", aes)
+}
+
+/// The dispatching CTR types, which are what a caller naming AES-CTR
+/// gets.
+pub fn ctr_dispatch() -> CtrImpl {
+    fn apply(key: &Key, iv: &[u8; BLOCK_SIZE], data: &mut [u8]) {
         match key {
             Key::K128(k) => {
                 aes::Aes128Ctr::new(k, iv).apply_keystream(data)
@@ -300,42 +326,36 @@ pub fn ctr_implementations() -> Vec<CtrImpl> {
             }
         }
     }
-
-    let mut all = vec![
-        generic_ctr!("generic/ttable", ttable),
-        fused_ctr!("fused/ttable", ttable),
-        CtrImpl {
-            name: "dispatch/AesNnnCtr",
-            whole_blocks_only: false,
-            apply: dispatched,
-        },
-    ];
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        if aesni::supported() {
-            all.push(generic_ctr!("generic/aesni", aesni));
-        }
-        if aesni::ctr_supported() {
-            all.push(fused_ctr!("fused/aesni", aesni));
-        }
-        if vaes::supported() {
-            all.push(generic_ctr!("generic/vaes", vaes));
-            all.push(fused_ctr!("fused/vaes", vaes));
-        }
+    CtrImpl {
+        name: "dispatch",
+        whole_blocks_only: false,
+        apply,
     }
+}
 
-    #[cfg(target_arch = "aarch64")]
-    {
-        if armv8::supported() {
-            all.push(generic_ctr!("generic/armv8", armv8));
-        }
-        if armv8::ctr_supported() {
-            all.push(fused_ctr!("fused/armv8", armv8));
-        }
-    }
+// The fused counter kernels are new code that the ECB vectors never
+// touch, so each is certified here in its own right.
 
-    all
+pub fn ctr_fused_ttable() -> CtrImpl {
+    fused_ctr!("portable/ttable counter kernel", ttable)
+}
+
+#[cfg(target_arch = "x86_64")]
+pub fn ctr_fused_aesni() -> Option<CtrImpl> {
+    aesni::ctr_supported()
+        .then(|| fused_ctr!("x86_64/aesni counter kernel", aesni))
+}
+
+#[cfg(target_arch = "x86_64")]
+pub fn ctr_fused_vaes() -> Option<CtrImpl> {
+    vaes::supported()
+        .then(|| fused_ctr!("x86_64/vaes counter kernel", vaes))
+}
+
+#[cfg(target_arch = "aarch64")]
+pub fn ctr_fused_armv8() -> Option<CtrImpl> {
+    armv8::ctr_supported()
+        .then(|| fused_ctr!("aarch64/armv8 counter kernel", armv8))
 }
 
 /// Iterate the test groups of one testType, e.g. "AFT" or "MCT".

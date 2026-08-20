@@ -344,6 +344,25 @@ mod tests {
         assert_eq!(dispatched, plaintext);
     }
 
+    /// The combined type only delegates to the split ones, but it is a
+    /// public type of its own, so something has to say so. This is why
+    /// the vectors need only be driven through one of them.
+    #[test]
+    fn split_and_combined_dispatch_agree() {
+        let key = [0x2bu8; 16];
+        let plaintext: Vec<u8> = (0..16u8 * 5).collect();
+
+        let mut split = plaintext.clone();
+        Aes128Enc::new(&key).encrypt(&mut split);
+
+        let mut combined = plaintext.clone();
+        Aes128::new(&key).encrypt(&mut combined);
+        assert_eq!(split, combined);
+
+        Aes128::new(&key).decrypt(&mut combined);
+        assert_eq!(combined, plaintext);
+    }
+
     /// What this target's accelerated tier is, if it has one.
     fn accelerated_here() -> bool {
         accel::aesni::supported()
