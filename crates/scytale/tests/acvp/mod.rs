@@ -12,6 +12,14 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use scytale::symmetric::aes;
+use scytale::symmetric::aes::arch::portable::ttable;
+
+#[cfg(target_arch = "aarch64")]
+use scytale::symmetric::aes::arch::aarch64::armv8;
+#[cfg(target_arch = "x86_64")]
+use scytale::symmetric::aes::arch::x86_64::{aesni, vaes};
+
 /// Locate a vendored ACVP file, or `None` when the vectors are absent.
 pub fn vector_path(relative: &str) -> Option<PathBuf> {
     // CARGO_MANIFEST_DIR is crates/scytale, so the repository root is two
@@ -86,29 +94,6 @@ impl Key {
         }
     }
 
-    /// Encrypt a whole payload in ECB, expanding the key once.
-    ///
-    /// Hands the entire payload to the cipher in one call, which is the
-    /// interface an accelerated backend can pipeline.
-    pub fn encrypt(&self, data: &mut [u8]) -> usize {
-        use scytale::symmetric::aes::{Aes128, Aes192, Aes256};
-        match self {
-            Key::K128(k) => Aes128::new(k).encrypt(data),
-            Key::K192(k) => Aes192::new(k).encrypt(data),
-            Key::K256(k) => Aes256::new(k).encrypt(data),
-        }
-    }
-
-    /// Decrypt a whole payload in ECB, expanding the key once.
-    pub fn decrypt(&self, data: &mut [u8]) -> usize {
-        use scytale::symmetric::aes::{Aes128, Aes192, Aes256};
-        match self {
-            Key::K128(k) => Aes128::new(k).decrypt(data),
-            Key::K192(k) => Aes192::new(k).decrypt(data),
-            Key::K256(k) => Aes256::new(k).decrypt(data),
-        }
-    }
-
     pub fn bytes(&self) -> &[u8] {
         match self {
             Key::K128(k) => k,
@@ -116,6 +101,91 @@ impl Key {
             Key::K256(k) => k,
         }
     }
+}
+
+/// One ECB implementation, named so a failure says which one broke.
+///
+/// The backends are duck typed rather than sharing a trait, so each is
+/// reached through a pair of functions of a common shape. Running the
+/// vectors through a dispatching type alone would certify only whichever
+/// backend this machine happens to pick, leaving the others uncertified
+/// on the machines where they are the ones that run.
+pub struct EcbImpl {
+    pub name: &'static str,
+    pub encrypt: fn(&Key, &mut [u8]),
+    pub decrypt: fn(&Key, &mut [u8]),
+}
+
+/// An entry built from a backend's split `Enc` and `Dec` types.
+macro_rules! ecb_split {
+    ($name:literal, $m:ident) => {{
+        fn encrypt(key: &Key, data: &mut [u8]) {
+            match key {
+                Key::K128(k) => $m::Aes128Enc::new(k).encrypt(data),
+                Key::K192(k) => $m::Aes192Enc::new(k).encrypt(data),
+                Key::K256(k) => $m::Aes256Enc::new(k).encrypt(data),
+            };
+        }
+        fn decrypt(key: &Key, data: &mut [u8]) {
+            match key {
+                Key::K128(k) => $m::Aes128Dec::new(k).decrypt(data),
+                Key::K192(k) => $m::Aes192Dec::new(k).decrypt(data),
+                Key::K256(k) => $m::Aes256Dec::new(k).decrypt(data),
+            };
+        }
+        EcbImpl { name: $name, encrypt, decrypt }
+    }};
+}
+
+/// An entry built from a backend's combined both-directions types.
+macro_rules! ecb_combined {
+    ($name:literal, $m:ident) => {{
+        fn encrypt(key: &Key, data: &mut [u8]) {
+            match key {
+                Key::K128(k) => $m::Aes128::new(k).encrypt(data),
+                Key::K192(k) => $m::Aes192::new(k).encrypt(data),
+                Key::K256(k) => $m::Aes256::new(k).encrypt(data),
+            };
+        }
+        fn decrypt(key: &Key, data: &mut [u8]) {
+            match key {
+                Key::K128(k) => $m::Aes128::new(k).decrypt(data),
+                Key::K192(k) => $m::Aes192::new(k).decrypt(data),
+                Key::K256(k) => $m::Aes256::new(k).decrypt(data),
+            };
+        }
+        EcbImpl { name: $name, encrypt, decrypt }
+    }};
+}
+
+/// Every AES implementation this machine can run, including the
+/// dispatching types, which are what a caller naming AES gets.
+pub fn ecb_implementations() -> Vec<EcbImpl> {
+    let mut all = vec![
+        ecb_split!("portable/ttable split", ttable),
+        ecb_combined!("portable/ttable combined", ttable),
+        ecb_split!("dispatch split", aes),
+        ecb_combined!("dispatch combined", aes),
+    ];
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if aesni::supported() {
+            all.push(ecb_split!("x86_64/aesni", aesni));
+        }
+        if vaes::supported() {
+            all.push(ecb_split!("x86_64/vaes", vaes));
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        if armv8::supported() {
+            all.push(ecb_split!("aarch64/armv8", armv8));
+        }
+    }
+
+    all
 }
 
 /// Iterate the test groups of one testType, e.g. "AFT" or "MCT".

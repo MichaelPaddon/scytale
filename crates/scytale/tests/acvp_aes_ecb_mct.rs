@@ -3,14 +3,18 @@
 //! MCT chains 100 outer iterations of 1000 inner ones per group, so it lives
 //! in the extended tier. It exercises the key schedule far harder than AFT
 //! does, because every outer iteration derives a fresh key from ciphertext.
+//!
+//! Every group runs through every AES implementation this machine can
+//! reach, so each key schedule is driven by the chain rather than only
+//! the one a dispatching type would pick.
 
 #![cfg(feature = "extended-tests")]
 
 mod acvp;
 
 use acvp::{
-    Key, group_is_encrypt, group_key_len, group_tests, groups, hex_field,
-    load, payload, skipped,
+    EcbImpl, Key, ecb_implementations, group_is_encrypt, group_key_len,
+    group_tests, groups, hex_field, load, payload, skipped,
 };
 use serde_json::Value;
 
@@ -38,7 +42,7 @@ fn next_key(key: &[u8], prev: &[u8; 16], last: &[u8; 16]) -> Vec<u8> {
 }
 
 /// Run one Monte Carlo group and compare all 100 recorded results.
-fn run_group(group: &Value) {
+fn run_group(group: &Value, imp: &EcbImpl) {
     let key_len = group_key_len(group);
     let encrypting = group_is_encrypt(group);
 
@@ -60,12 +64,14 @@ fn run_group(group: &Value) {
             assert_eq!(
                 hex(&key_bytes),
                 hex_field(expected, "key").to_lowercase(),
-                "key mismatch at outer iteration {i}"
+                "{} key mismatch at outer iteration {i}",
+                imp.name
             );
             assert_eq!(
                 hex(&text),
                 hex_field(expected, start).to_lowercase(),
-                "input mismatch at outer iteration {i}"
+                "{} input mismatch at outer iteration {i}",
+                imp.name
             );
 
             let mut prev = [0u8; 16];
@@ -73,9 +79,9 @@ fn run_group(group: &Value) {
             for j in 0..INNER {
                 prev = last;
                 if encrypting {
-                    key.encrypt(&mut text);
+                    (imp.encrypt)(&key, &mut text);
                 } else {
-                    key.decrypt(&mut text);
+                    (imp.decrypt)(&key, &mut text);
                 }
                 last.copy_from_slice(&text);
                 let _ = j;
@@ -85,7 +91,9 @@ fn run_group(group: &Value) {
             assert_eq!(
                 hex(&last),
                 hex_field(expected, produced).to_lowercase(),
-                "output mismatch at outer iteration {i}, keyLen {key_len}"
+                "{} output mismatch at outer iteration {i}, keyLen \
+                 {key_len}",
+                imp.name
             );
 
             key_bytes = next_key(&key_bytes, &prev, &last);
@@ -105,10 +113,22 @@ fn acvp_aes_ecb_mct() {
         return;
     };
 
-    let mut group_count = 0usize;
-    for group in groups(&vectors, "MCT") {
-        run_group(group);
-        group_count += 1;
+    let implementations = ecb_implementations();
+    assert!(
+        !implementations.is_empty(),
+        "no AES implementation to test"
+    );
+
+    for imp in &implementations {
+        let mut group_count = 0usize;
+        for group in groups(&vectors, "MCT") {
+            run_group(group, imp);
+            group_count += 1;
+        }
+        assert_eq!(
+            group_count, 6,
+            "{}: expected six Monte Carlo groups",
+            imp.name
+        );
     }
-    assert_eq!(group_count, 6, "expected six Monte Carlo groups");
 }
