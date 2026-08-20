@@ -74,6 +74,39 @@ fn scytale_and_openssl_agree() {
     check_key_size!(Aes256Enc, Aes256Dec, 32, 0x2468_ace0_1357_9bdf);
 }
 
+/// The CTR pair must agree too, including on lengths that are not a
+/// whole number of blocks and when fed in pieces.
+#[test]
+fn scytale_and_openssl_ctr_agree() {
+    use scytale::symmetric::Ctr;
+    use scytale_bench::openssl::OpensslCtr;
+
+    let mut rng = Rng(0x1357_9bdf_2468_ace0);
+    for len in [1usize, 15, 16, 17, 100, 256, 1000, 4096] {
+        let mut key = [0u8; 16];
+        rng.fill(&mut key);
+        let mut iv = [0u8; 16];
+        rng.fill(&mut iv);
+        let mut plaintext = vec![0u8; len];
+        rng.fill(&mut plaintext);
+
+        let mut ours = plaintext.clone();
+        let mut ctr = Ctr::try_new(Aes128Enc::new(&key), &iv)
+            .expect("block-size IV");
+        // Split the message so the resumable state is exercised too.
+        let (head, tail) = ours.split_at_mut(len / 3);
+        ctr.apply_keystream(head);
+        ctr.apply_keystream(tail);
+
+        let mut theirs = plaintext.clone();
+        OpensslCtr::try_new(&key, &iv)
+            .expect("openssl rejected a valid key")
+            .apply_keystream(&mut theirs);
+
+        assert_eq!(ours, theirs, "CTR disagrees at {len} bytes");
+    }
+}
+
 /// The accelerated pair must agree too, or the accelerated tier of the
 /// benchmark would be timing two different computations.
 #[test]

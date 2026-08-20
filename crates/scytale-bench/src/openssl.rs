@@ -120,6 +120,81 @@ impl OpensslAes {
     }
 }
 
+/// The block function `CRYPTO_ctr128_encrypt` drives.
+type Block128 =
+    unsafe extern "C" fn(*const c_uchar, *mut c_uchar, *const AesKey);
+
+unsafe extern "C" {
+    // Both vendored archives define this; the C one is linked first, so
+    // it resolves there. It is the same portable C source in both, and
+    // the cipher it runs is whichever block function is passed in.
+    fn CRYPTO_ctr128_encrypt(
+        input: *const c_uchar,
+        out: *mut c_uchar,
+        len: usize,
+        key: *const AesKey,
+        ivec: *mut c_uchar,
+        ecount_buf: *mut c_uchar,
+        num: *mut c_uint,
+        block: Block128,
+    );
+}
+
+/// OpenSSL's generic CTR mode over its C AES.
+///
+/// This is the counterpart to scytale's generic `Ctr` over the portable
+/// T-table cipher: the same shape of code, a mode loop in C calling a
+/// scalar block function, holding the same streaming state.
+pub struct OpensslCtr {
+    key: AesKey,
+    ivec: [u8; 16],
+    ecount: [u8; 16],
+    num: c_uint,
+}
+
+impl OpensslCtr {
+    /// Build the schedule and set the initial counter block.
+    pub fn try_new(key: &[u8], iv: &[u8; 16]) -> Result<Self, BadKeyLength> {
+        let mut schedule = AesKey::default();
+        let bits = (key.len() * 8) as c_int;
+        // SAFETY: key points to key.len() bytes and bits describes
+        // exactly that length; schedule is a valid AES_KEY.
+        let rc =
+            unsafe { AES_set_encrypt_key(key.as_ptr(), bits, &mut schedule) };
+        if rc != 0 {
+            return Err(BadKeyLength(key.len()));
+        }
+        Ok(Self {
+            key: schedule,
+            ivec: *iv,
+            ecount: [0u8; 16],
+            num: 0,
+        })
+    }
+
+    /// XOR the keystream into `data`, advancing the stream. Any length;
+    /// resumable, exactly like scytale's `apply_keystream`.
+    pub fn apply_keystream(&mut self, data: &mut [u8]) {
+        let ptr = data.as_mut_ptr();
+        // SAFETY: input and output are the same buffer, which CTR
+        // permits since each byte is read before it is written; ivec and
+        // ecount are the 16-byte blocks the function expects and num is
+        // its offset into ecount; AES_encrypt matches the schedule.
+        unsafe {
+            CRYPTO_ctr128_encrypt(
+                ptr,
+                ptr,
+                data.len(),
+                &self.key,
+                self.ivec.as_mut_ptr(),
+                self.ecount.as_mut_ptr(),
+                &mut self.num,
+                AES_encrypt,
+            );
+        }
+    }
+}
+
 unsafe extern "C" {
     fn aesni_set_encrypt_key(
         user_key: *const c_uchar,

@@ -327,6 +327,38 @@ macro_rules! define_aes {
             pub fn encrypt_block(&self, block: &mut [u8; BLOCK_SIZE]) {
                 encrypt_block_with::<$words, $rounds>(&self.rk, block);
             }
+
+            /// Encrypt successive counter values and XOR them into
+            /// `data` in place, advancing `counter`.
+            ///
+            /// The counter is one block, big endian, wrapping at the
+            /// full block width, as SP 800-38A specifies. Whole blocks
+            /// only, like [`Self::encrypt`]; returns bytes consumed.
+            /// This scalar version is the reference the accelerated
+            /// counter kernels are tested against.
+            pub fn ctr(
+                &self,
+                counter: &mut [u8; BLOCK_SIZE],
+                data: &mut [u8],
+            ) -> usize {
+                let (blocks, _tail) = data.as_chunks_mut::<BLOCK_SIZE>();
+                let mut c = u128::from_be_bytes(*counter);
+                let mut keystream = [0u8; BLOCK_SIZE];
+                for block in blocks.iter_mut() {
+                    keystream = c.to_be_bytes();
+                    encrypt_block_with::<$words, $rounds>(
+                        &self.rk,
+                        &mut keystream,
+                    );
+                    for (d, k) in block.iter_mut().zip(&keystream) {
+                        *d ^= *k;
+                    }
+                    c = c.wrapping_add(1);
+                }
+                keystream.zeroize();
+                *counter = c.to_be_bytes();
+                blocks.len() * BLOCK_SIZE
+            }
         }
 
         impl $dec {

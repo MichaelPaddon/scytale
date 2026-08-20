@@ -71,6 +71,38 @@ fn cases(meter: &Meter, tier: &str) -> Result<Tier, String> {
 
     let mut rows = Vec::with_capacity(6 * SIZES.len());
 
+    // CTR against OpenSSL's generic CTR over the same scalar cipher:
+    // the same shape of work, a mode loop driving a block function, with
+    // the same streaming state carried between calls.
+    macro_rules! ctr_ladder {
+        ($rows:expr, $enc:ty, $bits:expr, $len:expr) => {{
+            use scytale::symmetric::Ctr;
+            use scytale_bench::openssl::OpensslCtr;
+
+            let key = [0x2bu8; $len];
+            let iv = [0u8; 16];
+            for bytes in SIZES {
+                let mut ours = Messages::new(bytes);
+                let mut theirs = Messages::new(bytes);
+                let mut ctr = Ctr::try_new(<$enc>::new(&key), &iv)
+                    .map_err(|e| format!("IV rejected: {e}"))?;
+                let mut openssl =
+                    OpensslCtr::try_new(&key, &iv).map_err(bad)?;
+                $rows.push(compare(
+                    meter,
+                    &format!(concat!("aes", $bits, "-ctr/{}"), bytes),
+                    bytes,
+                    || {
+                        ctr.apply_keystream(ours.next());
+                    },
+                    || {
+                        openssl.apply_keystream(theirs.next());
+                    },
+                ));
+            }
+        }};
+    }
+
     if tier == "portable" {
         // Scytale's T-table cipher against OpenSSL's C AES. Both sides are
         // named explicitly: the dispatching types would pick the
@@ -81,6 +113,9 @@ fn cases(meter: &Meter, tier: &str) -> Result<Tier, String> {
                 OpensslAes, OpensslAes, "192", 24);
         ladder!(rows, ttable::Aes256Enc, ttable::Aes256Dec,
                 OpensslAes, OpensslAes, "256", 32);
+        ctr_ladder!(rows, ttable::Aes128Enc, "128", 16);
+        ctr_ladder!(rows, ttable::Aes192Enc, "192", 24);
+        ctr_ladder!(rows, ttable::Aes256Enc, "256", 32);
         return Ok((
             "portable: scytale T-table against OpenSSL C",
             "scytale",
