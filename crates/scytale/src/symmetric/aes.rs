@@ -9,6 +9,9 @@
 //! construct. Prefer `Aes128Enc` when you never decrypt.
 
 pub mod arch;
+pub mod ctr;
+
+pub use ctr::{Aes128Ctr, Aes192Ctr, Aes256Ctr};
 
 use arch::portable::ttable;
 
@@ -60,6 +63,9 @@ mod accel {
         pub fn supported() -> bool {
             false
         }
+
+        /// The counter kernels are no more available than the rest.
+        pub use self::supported as ctr_supported;
     }
 
     pub use vaes as aesni;

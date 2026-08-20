@@ -237,43 +237,6 @@ pub fn ecb_implementations() -> Vec<EcbImpl> {
     all
 }
 
-/// Iterate the test groups of one testType, e.g. "AFT" or "MCT".
-pub fn groups<'a>(
-    vectors: &'a Value,
-    test_type: &str,
-) -> impl Iterator<Item = &'a Value> {
-    vectors
-        .get("testGroups")
-        .and_then(Value::as_array)
-        .expect("vector file has no testGroups array")
-        .iter()
-        .filter(move |g| {
-            g.get("testType").and_then(Value::as_str) == Some(test_type)
-        })
-}
-
-pub fn group_key_len(group: &Value) -> u64 {
-    group
-        .get("keyLen")
-        .and_then(Value::as_u64)
-        .expect("test group has no keyLen")
-}
-
-pub fn group_is_encrypt(group: &Value) -> bool {
-    match group.get("direction").and_then(Value::as_str) {
-        Some("encrypt") => true,
-        Some("decrypt") => false,
-        other => panic!("unexpected direction {other:?}"),
-    }
-}
-
-pub fn group_tests(group: &Value) -> &[Value] {
-    group
-        .get("tests")
-        .and_then(Value::as_array)
-        .expect("test group has no tests array")
-}
-
 /// The generic mode driving one backend's bulk block interface.
 macro_rules! generic_ctr {
     ($name:literal, $m:ident) => {{
@@ -322,11 +285,30 @@ macro_rules! fused_ctr {
 }
 
 /// Every CTR implementation this machine can run: the generic mode over
-/// each cipher, and each fused counter kernel.
+/// each cipher, each fused counter kernel, and the dispatching types.
 pub fn ctr_implementations() -> Vec<CtrImpl> {
+    fn dispatched(key: &Key, iv: &[u8; BLOCK_SIZE], data: &mut [u8]) {
+        match key {
+            Key::K128(k) => {
+                aes::Aes128Ctr::new(k, iv).apply_keystream(data)
+            }
+            Key::K192(k) => {
+                aes::Aes192Ctr::new(k, iv).apply_keystream(data)
+            }
+            Key::K256(k) => {
+                aes::Aes256Ctr::new(k, iv).apply_keystream(data)
+            }
+        }
+    }
+
     let mut all = vec![
         generic_ctr!("generic/ttable", ttable),
         fused_ctr!("fused/ttable", ttable),
+        CtrImpl {
+            name: "dispatch/AesNnnCtr",
+            whole_blocks_only: false,
+            apply: dispatched,
+        },
     ];
 
     #[cfg(target_arch = "x86_64")]
@@ -354,4 +336,41 @@ pub fn ctr_implementations() -> Vec<CtrImpl> {
     }
 
     all
+}
+
+/// Iterate the test groups of one testType, e.g. "AFT" or "MCT".
+pub fn groups<'a>(
+    vectors: &'a Value,
+    test_type: &str,
+) -> impl Iterator<Item = &'a Value> {
+    vectors
+        .get("testGroups")
+        .and_then(Value::as_array)
+        .expect("vector file has no testGroups array")
+        .iter()
+        .filter(move |g| {
+            g.get("testType").and_then(Value::as_str) == Some(test_type)
+        })
+}
+
+pub fn group_key_len(group: &Value) -> u64 {
+    group
+        .get("keyLen")
+        .and_then(Value::as_u64)
+        .expect("test group has no keyLen")
+}
+
+pub fn group_is_encrypt(group: &Value) -> bool {
+    match group.get("direction").and_then(Value::as_str) {
+        Some("encrypt") => true,
+        Some("decrypt") => false,
+        other => panic!("unexpected direction {other:?}"),
+    }
+}
+
+pub fn group_tests(group: &Value) -> &[Value] {
+    group
+        .get("tests")
+        .and_then(Value::as_array)
+        .expect("test group has no tests array")
 }

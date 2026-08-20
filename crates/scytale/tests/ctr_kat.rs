@@ -4,7 +4,9 @@
 //! per algorithm. Exhaustive work belongs in the extended tier.
 
 use scytale::symmetric::aes::arch::portable::ttable;
-use scytale::symmetric::aes::{Aes128Enc, Aes192Enc, Aes256Enc};
+use scytale::symmetric::aes::{
+    Aes128Ctr, Aes128Enc, Aes192Ctr, Aes192Enc, Aes256Ctr, Aes256Enc,
+};
 use scytale::symmetric::{BlockEncrypt, Ctr};
 
 fn unhex(s: &str) -> Vec<u8> {
@@ -70,12 +72,29 @@ fn key<const N: usize>(s: &str) -> [u8; N] {
     unhex(s).try_into().expect("key literal has the wrong length")
 }
 
-/// NIST SP 800-38A, F.5.1 and F.5.2 (CTR-AES128), through the mode over
-/// the dispatching cipher and over the portable backend it must agree
-/// with.
+/// Check a fused AES-CTR type against a vector in both directions.
+macro_rules! check_fused {
+    ($ty:ident, $key:expr, $ct:expr) => {{
+        let iv: [u8; 16] =
+            unhex(IV).try_into().expect("IV literal is one block");
+        let ciphertext = unhex($ct);
+
+        let mut data = unhex(PLAINTEXT);
+        $ty::new($key, &iv).apply_keystream(&mut data);
+        assert_eq!(data, ciphertext, "encrypt");
+
+        $ty::new($key, &iv).apply_keystream(&mut data);
+        assert_eq!(data, unhex(PLAINTEXT), "decrypt");
+    }};
+}
+
+/// NIST SP 800-38A, F.5.1 and F.5.2 (CTR-AES128), through the fused
+/// type, the generic mode over the dispatching cipher, and the generic
+/// mode over the portable backend they must both agree with.
 #[test]
 fn sp800_38a_aes128_ctr() {
     let k: [u8; 16] = key(KEY_128);
+    check_fused!(Aes128Ctr, &k, CT_128);
     check(|| Aes128Enc::new(&k), CT_128);
     check(|| ttable::Aes128Enc::new(&k), CT_128);
 }
@@ -84,6 +103,7 @@ fn sp800_38a_aes128_ctr() {
 #[test]
 fn sp800_38a_aes192_ctr() {
     let k: [u8; 24] = key(KEY_192);
+    check_fused!(Aes192Ctr, &k, CT_192);
     check(|| Aes192Enc::new(&k), CT_192);
     check(|| ttable::Aes192Enc::new(&k), CT_192);
 }
@@ -92,6 +112,7 @@ fn sp800_38a_aes192_ctr() {
 #[test]
 fn sp800_38a_aes256_ctr() {
     let k: [u8; 32] = key(KEY_256);
+    check_fused!(Aes256Ctr, &k, CT_256);
     check(|| Aes256Enc::new(&k), CT_256);
     check(|| ttable::Aes256Enc::new(&k), CT_256);
 }
