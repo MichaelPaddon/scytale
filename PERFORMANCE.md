@@ -126,7 +126,9 @@ three key sizes, both directions, and buffer lengths from 1 to 64 blocks.
 CTR is held to the same standard, including lengths that are not a whole
 number of blocks and messages fed in pieces, since a mode that only agrees
 when handed a whole message is not the mode it claims to be. The full ACVP
-vector set runs under `cargo test --features extended-tests`.
+vector set runs under `cargo test-extended`. Those agreement tests are
+part of the benchmark crate and are the only tests that need OpenSSL;
+testing the library itself never builds it.
 
 ## Reproducing
 

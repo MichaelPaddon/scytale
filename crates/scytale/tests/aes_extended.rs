@@ -1,10 +1,8 @@
 //! Slow AES tests.
 //!
-//! This tier is excluded from `cargo test` and runs under `cargo
-//! extended-test`. It is where exhaustive and long-running checks live, and
-//! where the vendored ACVP vectors will be driven from once they land.
-
-#![cfg(feature = "extended-tests")]
+//! These are marked `#[ignore]`, so a plain `cargo test` compiles them
+//! and skips them; `cargo test-extended` runs them. It is where
+//! exhaustive and long-running checks live.
 
 use scytale::symmetric::aes::{Aes128, Aes192, Aes256};
 
@@ -32,6 +30,7 @@ impl Rng {
 const ROUNDTRIPS: usize = 200_000;
 
 #[test]
+#[ignore = "exhaustive sweep over many keys"]
 fn aes128_roundtrips_over_many_keys() {
     let mut rng = Rng(0x0123_4567_89ab_cdef);
     for i in 0..ROUNDTRIPS {
@@ -50,6 +49,7 @@ fn aes128_roundtrips_over_many_keys() {
 }
 
 #[test]
+#[ignore = "exhaustive sweep over many keys"]
 fn aes192_roundtrips_over_many_keys() {
     let mut rng = Rng(0xfedc_ba98_7654_3210);
     for i in 0..ROUNDTRIPS {
@@ -67,6 +67,7 @@ fn aes192_roundtrips_over_many_keys() {
 }
 
 #[test]
+#[ignore = "exhaustive sweep over many keys"]
 fn aes256_roundtrips_over_many_keys() {
     let mut rng = Rng(0x2468_ace0_1357_9bdf);
     for i in 0..ROUNDTRIPS {
@@ -86,6 +87,7 @@ fn aes256_roundtrips_over_many_keys() {
 /// Flipping one key bit must change the ciphertext. Catches a key schedule
 /// that silently ignores part of the key, which the fixed vectors would not.
 #[test]
+#[ignore = "exhaustive sweep over many keys"]
 fn every_key_bit_affects_the_ciphertext() {
     let base_key = [0x5au8; 32];
     let plaintext = [0xa5u8; 16];
@@ -105,6 +107,7 @@ fn every_key_bit_affects_the_ciphertext() {
 
 /// The same, for every plaintext bit.
 #[test]
+#[ignore = "exhaustive sweep over many keys"]
 fn every_plaintext_bit_affects_the_ciphertext() {
     let key = [0x5au8; 16];
     let base_plaintext = [0xa5u8; 16];

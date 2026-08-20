@@ -1,10 +1,5 @@
 [alias]
-# The fast tier is plain `cargo test`. This adds the slow one on top.
-extended-test = "test --workspace --features scytale/extended-tests"
-
-# Cross testing under emulation. The backend for this target can be built
-# and proved correct here; nothing about timing can be, since qemu does
-# not model a pipeline.
-[target.aarch64-unknown-linux-gnu]
-linker = "aarch64-linux-gnu-gcc"
-runner = "qemu-aarch64 -L /usr/aarch64-linux-gnu"
+# The fast tier is plain `cargo test`; this runs the slow one as well.
+# The slow tests are marked `#[ignore]` rather than hidden behind a
+# feature, so they compile on every build and cannot rot unnoticed.
+test-extended = "test -- --include-ignored"

@@ -1,14 +1,14 @@
 //! NIST ACVP AES-ECB Monte Carlo Tests.
 //!
-//! MCT chains 100 outer iterations of 1000 inner ones per group, so it lives
-//! in the extended tier. It exercises the key schedule far harder than AFT
-//! does, because every outer iteration derives a fresh key from ciphertext.
+//! MCT chains 100 outer iterations of 1000 inner ones per group, so it is
+//! marked `#[ignore]` and runs under `cargo test-extended`. It exercises
+//! the key schedule far harder than AFT does, because every outer
+//! iteration derives a fresh key from ciphertext.
 //!
 //! Every group runs through every AES implementation this machine can
 //! reach, so each key schedule is driven by the chain rather than only
 //! the one a dispatching type would pick.
 
-#![cfg(feature = "extended-tests")]
 
 mod acvp;
 
@@ -107,6 +107,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 #[test]
+#[ignore = "Monte Carlo: 600k chained blocks per implementation"]
 fn acvp_aes_ecb_mct() {
     let Some(vectors) = load(VECTORS) else {
         skipped(VECTORS);

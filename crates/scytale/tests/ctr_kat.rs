@@ -1,7 +1,7 @@
 //! Fast CTR mode known-answer tests.
 //!
 //! This tier runs under a plain `cargo test` and is kept to a few seconds
-//! per algorithm. Exhaustive work belongs in the extended tier.
+//! per algorithm. Exhaustive work belongs in the slow tier.
 
 use scytale::symmetric::aes::arch::portable::ttable;
 use scytale::symmetric::aes::{

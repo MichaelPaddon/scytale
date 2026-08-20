@@ -4,9 +4,9 @@
 //! generic mode over the portable cipher, with random chunkings and a
 //! dense sweep of near-wrap IVs hammering the carry fallback. This
 //! tier trades minutes of run time for coverage the fast tier cannot
-//! afford; run it with `cargo extended-test`.
+//! afford, so it is marked `#[ignore]`: run it with
+//! `cargo test-extended`.
 
-#![cfg(feature = "extended-tests")]
 
 use scytale::symmetric::Ctr;
 use scytale::symmetric::aes::arch::portable::ttable;
@@ -67,6 +67,7 @@ macro_rules! cross_check {
 }
 
 #[test]
+#[ignore = "exhaustive randomized cross-check"]
 fn random_streams_agree_with_the_generic_portable_mode() {
     let mut rng = Rng(0x0123_4567_89ab_cdef);
     for _ in 0..300 {
@@ -81,6 +82,7 @@ fn random_streams_agree_with_the_generic_portable_mode() {
 
 /// A long stream crossing many kernel group boundaries in one call.
 #[test]
+#[ignore = "exhaustive randomized cross-check"]
 fn long_streams_agree_with_the_generic_portable_mode() {
     let mut rng = Rng(0xfedc_ba98_7654_3210);
     for len in [64 * 1024, 256 * 1024 + 7] {
@@ -93,6 +95,7 @@ fn long_streams_agree_with_the_generic_portable_mode() {
 /// Every IV whose low 64 bits sit within a small window of the carry
 /// boundary, so the fallback path runs at every offset within a group.
 #[test]
+#[ignore = "exhaustive randomized cross-check"]
 fn near_wrap_ivs_take_the_carry_fallback() {
     let mut rng = Rng(0x2468_ace0_1357_9bdf);
     for k in 0..64u64 {

@@ -3,6 +3,12 @@
 //! Exits non-zero when any case is slower, so the rule that OpenSSL must
 //! never be faster is machine-checkable.
 
+// Where there is no OpenSSL to compare against, the whole comparison is
+// compiled out and the measurement machinery it drives goes unused. That
+// is the point rather than an oversight, so it is not worth warning
+// about.
+#![cfg_attr(not(openssl_available), allow(dead_code, unused_imports))]
+
 use std::process::ExitCode;
 
 use scytale_bench::harness::{
@@ -17,6 +23,18 @@ const BLOCK: usize = 16;
 const SIZES: [usize; 6] = [16, 64, 256, 1024, 8 * 1024, 16 * 1024];
 
 type Tier = (&'static str, &'static str, &'static str, Verdict, Vec<Row>);
+
+/// Without OpenSSL there is nothing of the same kind to measure
+/// against, and a ratio against nothing is not worth printing.
+///
+/// The build script skips OpenSSL when building for any target but the
+/// host, since the library it builds is the host's, so this binary still
+/// compiles there and says why it has nothing to report.
+#[cfg(not(openssl_available))]
+fn cases(_meter: &Meter, _tier: &str) -> Result<Tier, String> {
+    Err("built without OpenSSL, so there is nothing to compare against"
+        .to_string())
+}
 
 #[cfg(openssl_available)]
 fn cases(meter: &Meter, tier: &str) -> Result<Tier, String> {

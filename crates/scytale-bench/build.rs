@@ -30,6 +30,20 @@ fn main() {
         return;
     }
 
+    // The reference library is built for the machine running the build,
+    // so it cannot be linked into a binary for any other target. Skip it
+    // and let the crate compile without a comparison, rather than
+    // handing the linker two archives of the wrong architecture.
+    let target = std::env::var("TARGET").expect("cargo sets TARGET");
+    let host = std::env::var("HOST").expect("cargo sets HOST");
+    if target != host {
+        println!(
+            "cargo:warning=cross compiling to {target}: skipping the \
+             OpenSSL comparison, which is built for {host}"
+        );
+        return;
+    }
+
     let out_dir =
         PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
     // Keep the build outside OUT_DIR's per-profile churn so cleaning this

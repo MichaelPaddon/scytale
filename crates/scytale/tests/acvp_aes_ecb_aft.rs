@@ -2,7 +2,7 @@
 //!
 //! AFT is the fast tier: 2138 cases across all three key sizes and both
 //! directions, payloads of one to ten blocks, which run in milliseconds. The
-//! Monte Carlo groups in the same file are driven by the extended tier.
+//! Monte Carlo groups in the same file are driven by the slow tier.
 //!
 //! Every case runs through every AES implementation this machine can
 //! reach, not only the one a dispatching type would pick, so a backend is

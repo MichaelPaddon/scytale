@@ -85,14 +85,38 @@ Round keys are zeroized when the value is dropped.
 ## Testing
 
 ```
-cargo test           # fast tier, a few seconds per algorithm
-cargo extended-test  # everything else
+cargo test            # fast tier, a few seconds per algorithm
+cargo test-extended   # everything, including the slow tier
+cargo test -p scytale # the library alone, which needs nothing external
 ```
 
+The slow tests are marked `#[ignore]` rather than hidden behind a
+feature, so a plain `cargo test` still compiles them and they cannot rot.
+`cargo test -- --ignored` runs only those. The alias ends in `--`, so
+cargo's own flags cannot follow it: scope with
+`cargo test -p scytale -- --include-ignored` instead.
+
+A bare `cargo test` covers the workspace, and the benchmark crate builds
+OpenSSL to compare against, which needs `git`, `perl`, `make` and the
+network once. `cargo test -p scytale` is the library on its own and
+depends on none of that.
+
 Correctness is checked against the NIST ACVP vectors vendored in
-`vectors/`. The Algorithm Functional Test groups, 2138 cases for AES-ECB,
-run in the fast tier. Monte Carlo groups, random key sweeps and bit
-influence checks run in the extended tier.
+`vectors/`. The Algorithm Functional Test groups, 2138 cases for AES-ECB
+and 150 for AES-CTR, run in the fast tier, and every one of them runs
+through every implementation the machine can reach rather than only the
+one a dispatching type picks. Monte Carlo groups, random key sweeps and
+bit influence checks run in the slow tier.
+
+The ARMv8 backend has no hardware here, so it is exercised by cross
+compiling and running under emulation. That is a deliberate one-off
+rather than something configured into every build:
+
+```
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="qemu-aarch64 -L /usr/aarch64-linux-gnu" \
+cargo test -p scytale --target aarch64-unknown-linux-gnu
+```
 
 ## Performance
 

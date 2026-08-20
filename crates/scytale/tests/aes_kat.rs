@@ -1,7 +1,7 @@
 //! Fast AES known-answer tests.
 //!
 //! This tier runs under a plain `cargo test` and is kept to a few seconds per
-//! algorithm. Exhaustive work belongs in the extended tier.
+//! algorithm. Exhaustive work belongs in the slow tier.
 
 use scytale::symmetric::aes::{Aes128, Aes192, Aes256};
 
