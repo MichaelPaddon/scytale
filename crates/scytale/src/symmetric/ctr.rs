@@ -1,14 +1,25 @@
 //! Counter (CTR) mode, as specified in NIST SP 800-38A.
 //!
-//! CTR turns a block cipher into a stream cipher: successive values of a
-//! block-wide big-endian counter are encrypted to produce a keystream,
-//! which is XORed with the data. Encryption and decryption are therefore
-//! the same operation, and only an encryption key schedule is ever needed.
+//! CTR turns a block cipher into a stream cipher: successive counter
+//! values are encrypted to produce a keystream, which is XORed with the
+//! data. Encryption and decryption are therefore the same operation, and
+//! only an encryption key schedule is ever needed.
 //!
-//! [`Ctr`] wraps any [`BlockEncrypt`] implementation. It generates the
-//! keystream through the cipher's bulk interface a full parallel width at
-//! a time, so a pipelined or vectorized cipher runs at full speed even
-//! though the mode itself is generic.
+//! # The counter
+//!
+//! The counter is the whole block read as a single big-endian integer,
+//! incremented by one per block, wrapping at `2^(8 * BLOCK_SIZE)`. It
+//! carries the full width of the block rather than a fixed low field,
+//! which is the standard's counter and what the ACVP vectors expect.
+//! Modes that count in a narrower field, such as the 32-bit counter GCM
+//! uses, are a different construction and not what this is.
+//!
+//! [`Ctr`] wraps any [`BlockEncrypt`] implementation and takes its width
+//! from whatever it wraps, so the counter is 128 bits over AES and 64
+//! over a cipher with an eight byte block. Nothing here assumes AES. It
+//! generates the keystream through the cipher's bulk interface a full
+//! parallel width at a time, so a pipelined or vectorized cipher runs at
+//! full speed even though the mode itself is generic.
 //!
 //! # Nonce reuse
 //!
@@ -103,6 +114,9 @@ fn xor_into(data: &mut [u8], keystream: &[u8]) {
 
 /// CTR mode over any block cipher.
 ///
+/// The counter is one block wide, big endian, and wraps at the width of
+/// the cipher being wrapped rather than at any fixed size.
+///
 /// The stream is resumable: [`Self::apply_keystream`] accepts arbitrary
 /// lengths, and feeding a message in pieces produces the same bytes as
 /// feeding it whole. A partial trailing block's unused keystream is kept
@@ -123,10 +137,14 @@ pub struct Ctr<C: BlockEncrypt> {
 impl<C: BlockEncrypt> Ctr<C> {
     /// Wrap `cipher`, starting the counter at `iv`.
     ///
-    /// `iv` must be exactly one block. The buffers live on the heap
-    /// because the cipher's block size and width are trait constants,
-    /// which stable Rust does not accept as array lengths in generic
-    /// code; the allocation happens once, off the hot path.
+    /// `iv` is the initial counter value and must be exactly one block
+    /// of `cipher`, which is 16 bytes for AES. It is read as a
+    /// big-endian integer and counts up from there.
+    ///
+    /// The buffers live on the heap because the cipher's block size and
+    /// width are trait constants, which stable Rust does not accept as
+    /// array lengths in generic code; the allocation happens once, off
+    /// the hot path.
     pub fn try_new(cipher: C, iv: &[u8]) -> Result<Self, InvalidIvLength> {
         if iv.len() != C::BLOCK_SIZE {
             return Err(InvalidIvLength { got: iv.len() });
@@ -215,6 +233,129 @@ impl<C: BlockEncrypt> fmt::Debug for Ctr<C> {
 mod tests {
     use super::*;
     use crate::symmetric::aes::arch::portable::ttable::Aes128Enc;
+
+    /// A stand-in block cipher whose block is not AES's, to hold the
+    /// mode to its promise of following whatever it wraps.
+    ///
+    /// It is not a cipher and claims no security. The mode's job is to
+    /// count, chunk and combine at the width of the thing underneath
+    /// it, and that is all this is here to exercise. The width is odd
+    /// on purpose: three blocks in flight divides neither the counter
+    /// sequence nor any message length used below.
+    struct Stand {
+        key: [u8; STAND_BLOCK],
+    }
+
+    const STAND_BLOCK: usize = 8;
+
+    impl Stand {
+        /// The permutation applied to one block, spelled out so a test
+        /// can predict the keystream without going through the mode.
+        fn block(
+            mut b: [u8; STAND_BLOCK],
+            key: &[u8; STAND_BLOCK],
+        ) -> [u8; STAND_BLOCK] {
+            for (x, k) in b.iter_mut().zip(key) {
+                *x ^= *k;
+            }
+            b.rotate_left(1);
+            b
+        }
+    }
+
+    impl BlockEncrypt for Stand {
+        const BLOCK_SIZE: usize = STAND_BLOCK;
+        const PARALLEL_BLOCKS: usize = 3;
+
+        fn encrypt(&self, data: &mut [u8]) -> usize {
+            let (blocks, _tail) = data.as_chunks_mut::<STAND_BLOCK>();
+            for b in blocks.iter_mut() {
+                *b = Stand::block(*b, &self.key);
+            }
+            blocks.len() * STAND_BLOCK
+        }
+    }
+
+    fn stand() -> Stand {
+        Stand { key: [0x5a, 0x17, 0x03, 0xc4, 0x9e, 0x2b, 0x88, 0x61] }
+    }
+
+    /// The IV is a block of whatever is wrapped, not sixteen bytes.
+    #[test]
+    fn iv_must_match_the_wrapped_block_size() {
+        assert!(Ctr::try_new(stand(), &[0u8; STAND_BLOCK]).is_ok());
+        assert_eq!(
+            Ctr::try_new(stand(), &[0u8; 16]).unwrap_err(),
+            InvalidIvLength { got: 16 },
+            "an AES sized IV is wrong for an eight byte block"
+        );
+    }
+
+    /// The keystream must be the wrapped cipher applied to successive
+    /// counters of the wrapped width, across a partial trailing block.
+    #[test]
+    fn keystream_follows_the_wrapped_block_size() {
+        let iv = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77];
+
+        let mut stream = [0u8; STAND_BLOCK * 3 + 5];
+        Ctr::try_new(stand(), &iv)
+            .expect("block-size IV")
+            .apply_keystream(&mut stream);
+
+        let key = stand().key;
+        let mut counter = u64::from_be_bytes(iv);
+        let mut expected = Vec::new();
+        while expected.len() < stream.len() {
+            expected.extend_from_slice(&Stand::block(
+                counter.to_be_bytes(),
+                &key,
+            ));
+            counter = counter.wrapping_add(1);
+        }
+        assert_eq!(stream[..], expected[..stream.len()]);
+    }
+
+    /// The counter wraps at the wrapped width, not at 2^128.
+    #[test]
+    fn counter_wraps_at_the_wrapped_block_width() {
+        let iv = [0xffu8; STAND_BLOCK];
+
+        let mut stream = [0u8; STAND_BLOCK * 2];
+        Ctr::try_new(stand(), &iv)
+            .expect("block-size IV")
+            .apply_keystream(&mut stream);
+
+        let key = stand().key;
+        assert_eq!(stream[..STAND_BLOCK], Stand::block(iv, &key));
+        assert_eq!(
+            stream[STAND_BLOCK..],
+            Stand::block([0u8; STAND_BLOCK], &key),
+            "the block after ff..ff is the cipher applied to zero"
+        );
+    }
+
+    /// Chunking must not care about the wrapped width either, including
+    /// chunks that straddle the three block staging buffer.
+    #[test]
+    fn chunked_equals_one_shot_at_another_block_size() {
+        let iv = [0x9au8; STAND_BLOCK];
+        let message: Vec<u8> = (0..101u32).map(|i| i as u8).collect();
+
+        let mut whole = message.clone();
+        Ctr::try_new(stand(), &iv)
+            .expect("block-size IV")
+            .apply_keystream(&mut whole);
+
+        for size in [1, 3, 7, 8, 9, 24, 25] {
+            let mut pieces = message.clone();
+            let mut ctr =
+                Ctr::try_new(stand(), &iv).expect("block-size IV");
+            for chunk in pieces.chunks_mut(size) {
+                ctr.apply_keystream(chunk);
+            }
+            assert_eq!(pieces, whole, "chunk size {size}");
+        }
+    }
 
     #[test]
     fn increment_carries() {
