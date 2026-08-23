@@ -56,6 +56,7 @@ simply the one there is so far.
 | XPN | authenticated | GCM under a MACsec extended packet number |
 | XTS | disk sectors | ciphertext stealing for a partial block |
 | FF1, FF3-1 | format preserving | see their documentation first |
+| KW, KWP | key wrapping | deterministic; for keys, not messages |
 
 ## Random numbers
 
@@ -91,6 +92,12 @@ and GCM-SIV so a repeat is impossible rather than merely unlikely.
 independently, which is ECB. On its own that is not a safe way to
 encrypt a message, because equal blocks produce equal ciphertext. Use
 a mode.
+
+Key wrapping is the odd one out: it takes no nonce and is
+deterministic, so wrapping the same key twice gives the same answer.
+That is safe for a key, which cannot be guessed, and unsafe for
+anything an attacker might guess and confirm. Its output is eight
+bytes longer than its input, which is where the check value lives.
 
 The two format-preserving modes are not constant time: they do
 arithmetic in the caller's radix, and division is not a constant-time
