@@ -40,6 +40,13 @@ pub enum Error {
     DomainTooSmall,
     /// The processor lacks the instructions this implementation needs.
     NotSupported,
+    /// The system would not supply random bytes. The number is the
+    /// error the kernel gave, or zero where there is no such call to
+    /// make at all.
+    EntropyUnavailable(i32),
+    /// A nonce sequence has issued every value it holds. Carrying on
+    /// would repeat one, so it stops instead.
+    SequenceExhausted,
 }
 
 impl fmt::Display for Error {
@@ -73,6 +80,12 @@ impl fmt::Display for Error {
             }
             Error::NotSupported => {
                 write!(f, "not supported by this processor")
+            }
+            Error::EntropyUnavailable(n) => {
+                write!(f, "cannot read randomness from the system: error {n}")
+            }
+            Error::SequenceExhausted => {
+                write!(f, "nonce sequence exhausted")
             }
         }
     }
@@ -113,6 +126,14 @@ mod tests {
         assert_eq!(
             render(Error::NotSupported, &mut buf),
             "not supported by this processor"
+        );
+        assert_eq!(
+            render(Error::EntropyUnavailable(38), &mut buf),
+            "cannot read randomness from the system: error 38"
+        );
+        assert_eq!(
+            render(Error::SequenceExhausted, &mut buf),
+            "nonce sequence exhausted"
         );
     }
 

@@ -11,6 +11,7 @@
 mod arch;
 mod error;
 mod math;
+pub mod random;
 pub mod symmetric;
 
 mod util;
