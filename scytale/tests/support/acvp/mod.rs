@@ -7,6 +7,7 @@ pub mod aes_cfb128;
 pub mod aes_cfb8;
 pub mod aes_ctr;
 pub mod aes_ecb;
+pub mod aes_ff1;
 pub mod aes_gcm;
 pub mod aes_gcm_siv;
 pub mod aes_ofb;

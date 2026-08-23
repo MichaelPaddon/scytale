@@ -27,6 +27,13 @@ pub enum Error {
     AuthenticationFailed,
     /// The message is longer than the mode can safely handle.
     MessageTooLong,
+    /// The radix is outside the range the mode allows.
+    InvalidRadix(u32),
+    /// A symbol is not a value the radix allows.
+    InvalidSymbol(u32),
+    /// The set of possible messages is too small to encrypt safely.
+    /// A short string in a small alphabet can simply be searched.
+    DomainTooSmall,
     /// The processor lacks the instructions this implementation needs.
     NotSupported,
 }
@@ -54,6 +61,11 @@ impl fmt::Display for Error {
             }
             Error::MessageTooLong => {
                 write!(f, "message too long for this mode")
+            }
+            Error::InvalidRadix(r) => write!(f, "invalid radix: {r}"),
+            Error::InvalidSymbol(s) => write!(f, "invalid symbol: {s}"),
+            Error::DomainTooSmall => {
+                write!(f, "too few possible messages to encrypt safely")
             }
             Error::NotSupported => {
                 write!(f, "not supported by this processor")
