@@ -6,6 +6,7 @@ pub mod aes_cfb1;
 pub mod aes_cfb128;
 pub mod aes_cfb8;
 pub mod aes_ecb;
+pub mod aes_ofb;
 
 use serde_json::Value;
 

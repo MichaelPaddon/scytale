@@ -10,7 +10,7 @@ mod support;
 
 use support::acvp::{
     aes_cbc as cbc, aes_cfb1 as cfb1, aes_cfb128 as cfb128, aes_cfb8 as cfb8,
-    aes_ecb as ecb,
+    aes_ecb as ecb, aes_ofb as ofb,
 };
 
 /// Defines the suites for an implementation that is always available.
@@ -135,4 +135,9 @@ mod aes_cfb8 {
 /// AES in cipher feedback mode with 1-bit segments.
 mod aes_cfb1 {
     every_aes!(cfb1);
+}
+
+/// AES in output feedback mode (SP 800-38A).
+mod aes_ofb {
+    every_aes!(ofb);
 }

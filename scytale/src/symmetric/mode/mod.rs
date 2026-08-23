@@ -12,11 +12,13 @@ pub mod cbc;
 pub mod cfb1;
 pub mod cfb128;
 pub mod cfb8;
+pub mod ofb;
 
 pub use cbc::Cbc;
 pub use cfb1::Cfb1;
 pub use cfb128::Cfb128;
 pub use cfb8::Cfb8;
+pub use ofb::Ofb;
 
 /// Largest block size the modes support.
 ///
