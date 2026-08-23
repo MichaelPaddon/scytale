@@ -2,6 +2,9 @@
 //! trait so any implementation can run them.
 
 pub mod aes_cbc;
+pub mod aes_cfb1;
+pub mod aes_cfb128;
+pub mod aes_cfb8;
 pub mod aes_ecb;
 
 use serde_json::Value;

@@ -8,7 +8,10 @@
 
 mod support;
 
-use support::acvp::{aes_cbc as cbc, aes_ecb as ecb};
+use support::acvp::{
+    aes_cbc as cbc, aes_cfb1 as cfb1, aes_cfb128 as cfb128, aes_cfb8 as cfb8,
+    aes_ecb as ecb,
+};
 
 /// Defines the suites for an implementation that is always available.
 macro_rules! suites {
@@ -117,4 +120,19 @@ mod aes_ecb {
 /// AES in cipher block chaining mode (SP 800-38A).
 mod aes_cbc {
     every_aes!(cbc);
+}
+
+/// AES in cipher feedback mode with full-block segments.
+mod aes_cfb128 {
+    every_aes!(cfb128);
+}
+
+/// AES in cipher feedback mode with 8-bit segments.
+mod aes_cfb8 {
+    every_aes!(cfb8);
+}
+
+/// AES in cipher feedback mode with 1-bit segments.
+mod aes_cfb1 {
+    every_aes!(cfb1);
 }

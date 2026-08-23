@@ -15,6 +15,8 @@ pub enum Error {
     /// The nonce or initialisation vector is not the length the mode
     /// requires.
     InvalidNonceLength(usize),
+    /// The data length does not match what the call requires.
+    InvalidLength(usize),
     /// The processor lacks the instructions this implementation needs.
     NotSupported,
 }
@@ -30,6 +32,9 @@ impl fmt::Display for Error {
             }
             Error::InvalidNonceLength(n) => {
                 write!(f, "invalid nonce or IV length: {n} bytes")
+            }
+            Error::InvalidLength(n) => {
+                write!(f, "invalid data length: {n}")
             }
             Error::NotSupported => {
                 write!(f, "not supported by this processor")
@@ -116,6 +121,10 @@ mod tests {
         assert_eq!(
             render(Error::InvalidNonceLength(12), &mut buf),
             "invalid nonce or IV length: 12 bytes"
+        );
+        assert_eq!(
+            render(Error::InvalidLength(7), &mut buf),
+            "invalid data length: 7"
         );
         assert_eq!(
             render(Error::NotSupported, &mut buf),
