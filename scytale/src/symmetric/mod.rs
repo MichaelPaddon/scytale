@@ -17,6 +17,16 @@ pub enum Error {
     InvalidNonceLength(usize),
     /// The data length does not match what the call requires.
     InvalidLength(usize),
+    /// The authentication tag is not a length the mode allows.
+    InvalidTagLength(usize),
+    /// The message did not authenticate: it is not what was
+    /// encrypted, under this key, nonce and additional data.
+    ///
+    /// Deliberately says no more than that. Which part failed, or how
+    /// nearly a guess succeeded, would help an attacker.
+    AuthenticationFailed,
+    /// The message is longer than the mode can safely handle.
+    MessageTooLong,
     /// The processor lacks the instructions this implementation needs.
     NotSupported,
 }
@@ -35,6 +45,15 @@ impl fmt::Display for Error {
             }
             Error::InvalidLength(n) => {
                 write!(f, "invalid data length: {n}")
+            }
+            Error::InvalidTagLength(n) => {
+                write!(f, "invalid authentication tag length: {n} bytes")
+            }
+            Error::AuthenticationFailed => {
+                write!(f, "message failed authentication")
+            }
+            Error::MessageTooLong => {
+                write!(f, "message too long for this mode")
             }
             Error::NotSupported => {
                 write!(f, "not supported by this processor")

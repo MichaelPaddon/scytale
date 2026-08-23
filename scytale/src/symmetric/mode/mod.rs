@@ -13,6 +13,8 @@ pub mod cfb1;
 pub mod cfb128;
 pub mod cfb8;
 pub mod ctr;
+pub mod gcm;
+pub(crate) mod ghash;
 pub mod ofb;
 
 pub use cbc::Cbc;
@@ -20,6 +22,7 @@ pub use cfb1::Cfb1;
 pub use cfb128::Cfb128;
 pub use cfb8::Cfb8;
 pub use ctr::Ctr;
+pub use gcm::Gcm;
 pub use ofb::Ofb;
 
 /// Largest block size the modes support.

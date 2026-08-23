@@ -10,7 +10,7 @@ mod support;
 
 use support::acvp::{
     aes_cbc as cbc, aes_cfb1 as cfb1, aes_cfb128 as cfb128, aes_cfb8 as cfb8,
-    aes_ctr as ctr, aes_ecb as ecb, aes_ofb as ofb,
+    aes_ctr as ctr, aes_ecb as ecb, aes_gcm as gcm, aes_ofb as ofb,
 };
 
 /// Defines the suites for an implementation that is always
@@ -190,4 +190,10 @@ mod aes_ofb {
 /// test.
 mod aes_ctr {
     every_aes!(ctr, aft_only);
+}
+
+/// AES in Galois/Counter Mode (SP 800-38D), the first authenticated
+/// mode. This suite has no Monte Carlo test.
+mod aes_gcm {
+    every_aes!(gcm, aft_only);
 }

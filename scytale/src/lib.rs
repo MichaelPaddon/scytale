@@ -9,3 +9,5 @@
 #![warn(missing_docs)]
 
 pub mod symmetric;
+
+mod util;
