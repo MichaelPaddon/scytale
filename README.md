@@ -2,8 +2,8 @@
 
 Cryptographic primitives in Rust.
 
-This is early work. So far it has AES and the block cipher modes
-built on it.
+This is early work. So far it has AES, the block cipher modes built
+on it, and random numbers.
 
 ## Goals
 
@@ -29,7 +29,7 @@ works anywhere, with no lookup tables and no data-dependent branches,
 so it is constant time. The accelerated versions are additions to
 that, never a requirement.
 
-**No setup.** The library is `no_std`, has one dependency
+**No setup.** The library is `no_std`, still has one dependency
 (`zeroize`), and builds with nothing but a stable Rust toolchain: no
 C compiler, no build script, no feature flags, no target-specific
 compiler options. Which implementation to run is decided at run time,
@@ -56,6 +56,21 @@ simply the one there is so far.
 | XPN | authenticated | GCM under a MACsec extended packet number |
 | XTS | disk sectors | ciphertext stealing for a partial block |
 | FF1, FF3-1 | format preserving | see their documentation first |
+
+## Random numbers
+
+Keys and initialisation vectors need randomness, so `scytale::random`
+provides it, reading the kernel through `getrandom` on every call.
+Nothing is kept between calls: a generator held in the process would
+have state, and `fork` or a restored virtual machine snapshot
+duplicates state, which repeats a nonce and loses the key.
+
+This part needs Linux. Everywhere else every call fails rather than
+quietly substituting something weaker.
+
+Most initialisation vectors need to be *unique* rather than random,
+which is a stronger requirement. `mode::Nonces` counts nonces for GCM
+and GCM-SIV so a repeat is impossible rather than merely unlikely.
 
 `encrypt_blocks` on the cipher itself encrypts each block
 independently, which is ECB. On its own that is not a safe way to

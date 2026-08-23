@@ -24,7 +24,7 @@
 //!   A counter for CTR, or a nonce for GCM, must be *unique*, which
 //!   is a different and stronger requirement, and one a counter
 //!   answers with certainty where a draw only answers it with high
-//!   probability.
+//!   probability: see [`Nonces`](crate::symmetric::mode::Nonces).
 //! - A call made very early in boot waits until the kernel's
 //!   generator is ready. That is deliberate. The alternative is
 //!   bytes that are not yet unpredictable.

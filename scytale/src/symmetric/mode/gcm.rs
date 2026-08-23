@@ -25,6 +25,10 @@
 //!   recover the hash key and then forge tags for any message at all.
 //!   If nonces cannot be guaranteed unique, use a mode built to
 //!   survive repeats.
+//! - **Counting beats drawing.** [`Nonces`](super::Nonces) makes a
+//!   repeat impossible. A nonce drawn at random is allowed, but then
+//!   the standard caps one key at 2^32 messages, and counting those
+//!   messages is the caller's job.
 //! - A 96-bit nonce is the usual choice and the one the standard
 //!   treats specially. Other lengths are allowed and supported, but
 //!   they are hashed first, which costs a little and gains nothing.

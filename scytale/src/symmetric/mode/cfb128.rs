@@ -8,7 +8,8 @@
 //! # Using it safely
 //!
 //! - The IV must be unpredictable to an attacker who can influence
-//!   the plaintext, so generate it at random for each message.
+//!   the plaintext, so draw it with [`random`](crate::random) for
+//!   each message.
 //! - Never use the same key and IV for two messages. The keystream
 //!   repeats, and an attacker who knows one plaintext learns another.
 //! - CFB provides no authentication; it does not detect a modified

@@ -25,7 +25,10 @@
 //!   repeats, and combining the two ciphertexts leaves the two
 //!   plaintexts combined with each other. This includes overlapping
 //!   ranges: a long message consumes many counter values, and the
-//!   next message must start beyond them.
+//!   next message must start beyond them. This is a counter, not
+//!   something to draw with [`random`](crate::random): the sequence
+//!   is the caller's to keep, because only the caller knows how many
+//!   blocks the last message spent.
 //! - Counter mode provides no authentication, and flipping a
 //!   ciphertext bit flips exactly that plaintext bit. Prefer an
 //!   authenticated mode; GCM is counter mode with authentication

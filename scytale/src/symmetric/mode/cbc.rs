@@ -7,7 +7,8 @@
 //! # Using it safely
 //!
 //! - The IV must be unpredictable to an attacker who can influence
-//!   the plaintext, so generate it at random for each message. It
+//!   the plaintext, so draw it with [`random`](crate::random) for
+//!   each message. It
 //!   need not be secret and is normally sent alongside the
 //!   ciphertext.
 //! - CBC provides no authentication. On its own it does not detect a

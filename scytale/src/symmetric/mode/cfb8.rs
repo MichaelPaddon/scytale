@@ -10,7 +10,8 @@
 //!
 //! # Using it safely
 //!
-//! - The IV must be unpredictable, and a key and IV pair must never
+//! - The IV must be unpredictable, so draw it with
+//!   [`random`](crate::random). A key and IV pair must never
 //!   be reused across messages.
 //! - CFB provides no authentication. Prefer an authenticated mode.
 //!
