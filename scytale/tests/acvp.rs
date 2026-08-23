@@ -11,7 +11,8 @@ mod support;
 use support::acvp::{
     aes_cbc as cbc, aes_cfb1 as cfb1, aes_cfb128 as cfb128, aes_cfb8 as cfb8,
     aes_ctr as ctr, aes_ecb as ecb, aes_ff1 as ff1, aes_ff3_1 as ff3_1,
-    aes_gcm as gcm, aes_gcm_siv as gcm_siv, aes_ofb as ofb, aes_xts as xts,
+    aes_gcm as gcm, aes_gcm_siv as gcm_siv, aes_ofb as ofb, aes_xpn as xpn,
+    aes_xts as xts,
 };
 
 /// Defines the suites for an implementation that is always
@@ -217,4 +218,9 @@ mod aes_ff1 {
 /// AES-FF3-1, format-preserving encryption (SP 800-38G revision 1).
 mod aes_ff3_1 {
     every_aes!(ff3_1, aft_only);
+}
+
+/// AES-GCM with extended packet numbering, as MACsec uses it.
+mod aes_xpn {
+    every_aes!(xpn, aft_only);
 }

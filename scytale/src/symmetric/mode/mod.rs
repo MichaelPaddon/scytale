@@ -20,6 +20,7 @@ pub mod gcm_siv;
 pub(crate) mod ghash;
 pub mod ofb;
 pub(crate) mod polyval;
+pub mod xpn;
 pub mod xts;
 
 pub use cbc::Cbc;
@@ -32,6 +33,7 @@ pub use ff3_1::Ff3_1;
 pub use gcm::Gcm;
 pub use gcm_siv::GcmSiv;
 pub use ofb::Ofb;
+pub use xpn::Xpn;
 pub use xts::Xts;
 
 /// Largest block size the modes support.

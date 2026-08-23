@@ -12,6 +12,7 @@ pub mod aes_ff3_1;
 pub mod aes_gcm;
 pub mod aes_gcm_siv;
 pub mod aes_ofb;
+pub mod aes_xpn;
 pub mod aes_xts;
 
 use serde_json::Value;
