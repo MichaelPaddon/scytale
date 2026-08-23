@@ -60,13 +60,28 @@ simply the one there is so far.
 ## Random numbers
 
 Keys and initialisation vectors need randomness, so `scytale::random`
-provides it, reading the kernel through `getrandom` on every call.
-Nothing is kept between calls: a generator held in the process would
-have state, and `fork` or a restored virtual machine snapshot
-duplicates state, which repeats a nonce and loses the key.
+provides it, asking afresh every call. Nothing is kept between calls:
+a generator held in the process would have state, and `fork` or a
+restored virtual machine snapshot duplicates state, which repeats a
+nonce and loses the key.
 
-This part needs Linux. Everywhere else every call fails rather than
-quietly substituting something weaker.
+| Where it runs | What it asks |
+| --- | --- |
+| Linux | the `getrandom` system call, made directly |
+| Apple systems, the BSDs, Solaris | `getentropy` |
+| Windows | `ProcessPrng` |
+| No operating system | `rdrand`, `rndr`, or the `seed` register |
+
+Only Linux promises its system call numbers never change, so only
+there is one made directly, which is what lets it work with no C
+library at all. Elsewhere the stable thing to call is a function the
+platform already provides, and naming one costs no dependency.
+
+With no operating system there is nobody to ask but the processor,
+and none of the reasons to prefer a kernel apply. Where the processor
+has no such instruction either, the answer is a refusal, and a board
+with a generator of its own is reached through the `random::Random`
+trait.
 
 Most initialisation vectors need to be *unique* rather than random,
 which is a stronger requirement. `mode::Nonces` counts nonces for GCM

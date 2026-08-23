@@ -2,23 +2,39 @@
 //!
 //! # Where the bytes come from
 //!
-//! Every call asks the kernel, through `getrandom`. There is no
-//! generator kept in this process, and that is the point: a generator
-//! has state, and state gets duplicated. `fork` gives both processes
-//! the same next bytes, and restoring a virtual machine snapshot
-//! gives every restored copy the same. Either one repeats a nonce,
-//! and a repeated nonce is enough to lose the key.
+//! Whoever is best placed to know, asked afresh every call. There is
+//! no generator kept in this process, and that is the point: a
+//! generator has state, and state gets duplicated. `fork` gives both
+//! processes the same next bytes, and restoring a virtual machine
+//! snapshot gives every restored copy the same. Either one repeats a
+//! nonce, and a repeated nonce is enough to lose the key.
 //!
-//! The kernel is seeded from far more than a library can reach, is
-//! told when a virtual machine has been cloned, and mixes in the
-//! processor's own generator where there is one. Reading it directly
-//! is both simpler and safer than anything that could be built here.
+//! | Where it runs | What it asks |
+//! | --- | --- |
+//! | Linux | the `getrandom` system call, made directly |
+//! | Apple systems, the BSDs, Solaris | `getentropy` |
+//! | Windows | `ProcessPrng` |
+//! | No operating system | the processor's own generator |
+//!
+//! With an operating system present, it is the thing to ask: it is
+//! seeded from far more than a library can reach, is told when a
+//! virtual machine has been cloned, and already mixes in the
+//! processor's generator along with everything else.
+//!
+//! With no operating system none of that applies. There is nothing to
+//! fork, no snapshot, and nobody else collecting anything, so the
+//! processor is asked directly where it has an instruction for it:
+//! `rdrand`, `rndr`, or the `seed` register. Where it has none, the
+//! answer is a refusal, and the way in is the [`Random`] trait: a
+//! board with a generator of its own is reached that way.
 //!
 //! # Using it safely
 //!
-//! - **This needs Linux.** Everywhere else every call fails with
-//!   [`Error::EntropyUnavailable`]. It never quietly substitutes
-//!   something weaker.
+//! - **Check the result.** Where nothing above can be reached, every
+//!   call fails with [`Error::EntropyUnavailable`]. Nothing weaker is
+//!   ever quietly substituted, because randomness invented from a
+//!   clock or a process number is worse than none: it looks as though
+//!   it worked.
 //! - Not everything wants randomness. An initialisation vector for
 //!   CBC or CFB must be *unpredictable*, which is what this gives.
 //!   A counter for CTR, or a nonce for GCM, must be *unique*, which
@@ -32,10 +48,10 @@
 //!
 //! # Speed
 //!
-//! Going straight to the kernel means a real system call every time,
-//! rather than the faster path the C library uses. That costs
-//! hundreds of nanoseconds rather than tens. It does not matter for
-//! keys, which are drawn once. It does matter for a nonce per
+//! On Linux, going straight to the kernel means a real system call
+//! every time, rather than the faster path the C library uses. That
+//! costs hundreds of nanoseconds rather than tens. It does not matter
+//! for keys, which are drawn once. It does matter for a nonce per
 //! message, which is the better reason to count nonces than to draw
 //! them.
 //!
@@ -55,7 +71,7 @@
 //! # }
 //! ```
 
-mod system;
+mod source;
 
 use crate::Error;
 
@@ -92,62 +108,15 @@ impl Random for System {
 /// # }
 /// ```
 pub fn fill(out: &mut [u8]) -> Result<(), Error> {
-    fill_from(system::getrandom, out)
-}
-
-/// A signal arrived before the kernel had written anything.
-const EINTR: isize = -4;
-
-/// Kernels report failure as a small negative number; anything
-/// outside this range is not an error code at all.
-const FAILURES: core::ops::Range<isize> = -4095..0;
-
-/// Drives `source` until `out` is full.
-///
-/// Split out from [`fill`] so it can be tested. A request of 256
-/// bytes or fewer is never answered in part and never interrupted,
-/// so on the sizes anything here actually asks for, the loop below
-/// never goes round twice. Handing it a stand-in source is the only
-/// way to reach those paths on purpose.
-fn fill_from(
-    mut source: impl FnMut(&mut [u8]) -> isize,
-    out: &mut [u8],
-) -> Result<(), Error> {
-    let mut done = 0;
-    while done < out.len() {
-        let got = source(&mut out[done..]);
-        if got > 0 {
-            // The kernel cannot report more than it was offered.
-            done += (got as usize).min(out.len() - done);
-        } else if got == EINTR {
-            // Nothing was written. Ask again from the same place.
-            continue;
-        } else if FAILURES.contains(&got) {
-            return Err(Error::EntropyUnavailable(-got as i32));
-        } else {
-            // Zero written with bytes still wanted, or a return no
-            // kernel makes. Neither should happen, and treating it
-            // as progress would loop here forever.
-            return Err(Error::EntropyUnavailable(0));
-        }
-    }
-    Ok(())
+    source::fill(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Only the supported targets have a call to make; elsewhere
-    /// every request is expected to fail.
-    const HAVE_SYSTEM: bool = cfg!(all(
-        target_os = "linux",
-        any(
-            target_arch = "aarch64",
-            target_arch = "riscv64",
-            target_arch = "x86_64"
-        )
-    ));
+    /// Whether this build has anything to ask.
+    const HAVE_SYSTEM: bool = source::AVAILABLE;
 
     /// Guard bytes either side of the target catch a length or
     /// pointer slip in the assembly, on the architecture that made
@@ -206,90 +175,6 @@ mod tests {
         fill(&mut buf).expect("fill");
         let set: u32 = buf.iter().map(|b| b.count_ones()).sum();
         assert!((15600..17200).contains(&set), "{set} bits set of 32768");
-    }
-
-    /// An empty request must not reach the kernel at all: a call
-    /// asking for nothing returns nothing, which the loop would
-    /// otherwise read as failure to make progress.
-    #[test]
-    fn an_empty_request_asks_for_nothing() {
-        let mut asked = 0;
-        fill_from(
-            |_| {
-                asked += 1;
-                0
-            },
-            &mut [],
-        )
-        .expect("empty");
-        assert_eq!(asked, 0);
-    }
-
-    /// A kernel answering a byte at a time must still fill the
-    /// buffer, and must not write the same byte repeatedly.
-    #[test]
-    fn short_answers_still_fill_the_buffer() {
-        let mut out = [0u8; 64];
-        let mut next = 1u8;
-        fill_from(
-            |chunk| {
-                chunk[0] = next;
-                next = next.wrapping_add(1);
-                1
-            },
-            &mut out,
-        )
-        .expect("short");
-        let want: [u8; 64] = core::array::from_fn(|i| i as u8 + 1);
-        assert_eq!(out, want);
-    }
-
-    /// An interrupted call wrote nothing, so the next one must start
-    /// from the same place rather than skipping it.
-    #[test]
-    fn an_interrupted_call_is_retried() {
-        let mut left = 2;
-        let mut out = [0u8; 8];
-        fill_from(
-            |chunk| {
-                if left > 0 {
-                    left -= 1;
-                    return EINTR;
-                }
-                chunk.fill(0xff);
-                chunk.len() as isize
-            },
-            &mut out,
-        )
-        .expect("interrupted");
-        assert_eq!(left, 0, "the failures were not all seen");
-        assert_eq!(out, [0xff; 8]);
-    }
-
-    /// A kernel error is reported with its number, not swallowed.
-    #[test]
-    fn a_refusal_is_reported() {
-        let mut out = [0u8; 8];
-        assert_eq!(
-            fill_from(|_| -38, &mut out).unwrap_err(),
-            Error::EntropyUnavailable(38)
-        );
-    }
-
-    /// The one return that could hang: no progress, no error. It has
-    /// to end the loop rather than go round again.
-    #[test]
-    fn no_progress_is_an_error_rather_than_a_hang() {
-        let mut out = [0u8; 8];
-        assert_eq!(
-            fill_from(|_| 0, &mut out).unwrap_err(),
-            Error::EntropyUnavailable(0)
-        );
-        // Likewise a return no kernel would make.
-        assert_eq!(
-            fill_from(|_| isize::MIN, &mut out).unwrap_err(),
-            Error::EntropyUnavailable(0)
-        );
     }
 
     /// The trait has to be usable with a source of one's own, since
