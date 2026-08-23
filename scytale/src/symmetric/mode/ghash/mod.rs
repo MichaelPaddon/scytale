@@ -15,7 +15,7 @@
 //! also slow, and it is nearly all of GCM's cost. Where the processor
 //! has a carry-less multiply instruction, that is used instead.
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 use core::sync::atomic::{AtomicU8, Ordering};
 
 /// GHASH works only on 128-bit blocks, whatever the cipher's block.
@@ -25,27 +25,55 @@ pub(crate) const BLOCK: usize = 16;
 /// reversed bit order.
 const REDUCE: u64 = 0xe100_0000_0000_0000;
 
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
+#[cfg(target_arch = "aarch64")]
+use self::aarch64 as carryless;
+/// The architectures with a carry-less multiply to use.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+use self::carryless as arch;
+#[cfg(target_arch = "x86_64")]
+use self::x86_64 as carryless;
+
 /// Whether the processor's carry-less multiply is available. Probed
 /// once: 0 unknown, 1 no, 2 yes.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 static PROBED: AtomicU8 = AtomicU8::new(0);
 
-/// The subkey in whatever form the processor's carry-less multiply
-/// wants, or nothing if there is no such instruction here.
-#[cfg(target_arch = "x86_64")]
+/// The subkey ready for the processor's carry-less multiply, or
+/// nothing if there is no such instruction here.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 fn prepared(h: &[u64; 2]) -> Option<[u64; 2]> {
     let known = match PROBED.load(Ordering::Relaxed) {
         0 => {
-            let yes = x86_64::has_carryless_multiply();
+            let yes = arch::has_carryless_multiply();
             PROBED.store(1 + u8::from(yes), Ordering::Relaxed);
             yes
         }
         n => n == 2,
     };
-    known.then(|| x86_64::prepare(h))
+    known.then(|| divide_by_x(h))
+}
+
+/// Divides the subkey by `x` and puts its halves in the order a
+/// vector register wants them, least significant first.
+///
+/// The accelerated multiplies use this so that no product needs
+/// shifting afterwards. Division by `x` is the reverse of
+/// multiplication by it: the top bit says whether the polynomial was
+/// folded in on the way, so it both selects the term to undo and
+/// supplies the bit that comes back at the bottom.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn divide_by_x(h: &[u64; 2]) -> [u64; 2] {
+    let bit = h[0] >> 63;
+    // A mask rather than a branch: the subkey is secret.
+    let mask = 0u64.wrapping_sub(bit);
+    let high = h[0] ^ (mask & (0xe1 << 56));
+    let low = h[1];
+    [(low << 1) | bit, (high << 1) | (low >> 63)]
 }
 
 /// A GHASH computation in progress.
@@ -61,7 +89,7 @@ pub(crate) struct Ghash {
     /// The subkey prepared for the processor's carry-less multiply,
     /// present only when there is one to use. Decided when the hash
     /// starts rather than per block.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     fast: Option<[u64; 2]>,
 }
 
@@ -75,7 +103,7 @@ impl Ghash {
             y: [0, 0],
             block: [0; BLOCK],
             used: 0,
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
             fast: prepared(&h),
         }
     }
@@ -135,11 +163,11 @@ impl Ghash {
     fn absorb(&mut self, block: &[u8]) {
         self.y[0] ^= halve(&block[..8]);
         self.y[1] ^= halve(&block[8..BLOCK]);
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         if let Some(h) = self.fast.as_ref() {
             // SAFETY: the instruction was confirmed present when this
             // hash was started.
-            unsafe { x86_64::multiply(&mut self.y, h) };
+            unsafe { arch::multiply(&mut self.y, h) };
             return;
         }
         multiply(&mut self.y, &self.h);
@@ -201,7 +229,7 @@ fn multiply(value: &mut [u64; 2], h: &[u64; 2]) {
     value[1] = zl;
 }
 
-#[cfg(all(test, target_arch = "x86_64"))]
+#[cfg(all(test, any(target_arch = "aarch64", target_arch = "x86_64")))]
 mod tests {
     extern crate std;
 
@@ -222,10 +250,9 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_arch = "x86_64")]
     #[allow(unsafe_code)]
     fn carryless_multiply_agrees_with_portable() {
-        if !x86_64::has_carryless_multiply() {
+        if !arch::has_carryless_multiply() {
             eprintln!("skipping: no carry-less multiply");
             return;
         }
@@ -235,8 +262,8 @@ mod tests {
             let mut want = start;
             multiply(&mut want, &h);
             let mut got = start;
-            let scaled = x86_64::prepare(&h);
-            unsafe { x86_64::multiply(&mut got, &scaled) };
+            let scaled = divide_by_x(&h);
+            unsafe { arch::multiply(&mut got, &scaled) };
             assert_eq!(got, want, "seed {seed}");
         }
     }
@@ -244,10 +271,9 @@ mod tests {
     /// Zero and one are the cases the folding is most likely to get
     /// wrong, and the random sample is unlikely to hit them.
     #[test]
-    #[cfg(target_arch = "x86_64")]
     #[allow(unsafe_code)]
     fn carryless_multiply_handles_edges() {
-        if !x86_64::has_carryless_multiply() {
+        if !arch::has_carryless_multiply() {
             eprintln!("skipping: no carry-less multiply");
             return;
         }
@@ -259,8 +285,8 @@ mod tests {
                 let mut want = a;
                 multiply(&mut want, &b);
                 let mut got = a;
-                let scaled = x86_64::prepare(&b);
-                unsafe { x86_64::multiply(&mut got, &scaled) };
+                let scaled = divide_by_x(&b);
+                unsafe { arch::multiply(&mut got, &scaled) };
                 assert_eq!(got, want, "{a:x?} * {b:x?}");
             }
         }

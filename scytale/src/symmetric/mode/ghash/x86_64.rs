@@ -38,23 +38,6 @@ pub(super) fn has_carryless_multiply() -> bool {
     __cpuid(1).ecx & (1 << 1) != 0
 }
 
-/// Prepares the subkey for [`multiply`], dividing it by `x` so that
-/// products need no shifting, and putting its halves in the order a
-/// register wants them.
-///
-/// Division by `x` is the reverse of multiplication by it: the top
-/// bit says whether the polynomial was folded in on the way, so it
-/// both selects the term to undo and supplies the bit that comes
-/// back at the bottom.
-pub(super) fn prepare(h: &[u64; 2]) -> [u64; 2] {
-    let bit = h[0] >> 63;
-    // A mask rather than a branch: the subkey is secret.
-    let mask = 0u64.wrapping_sub(bit);
-    let high = h[0] ^ (mask & (0xe1 << 56));
-    let low = h[1];
-    [(low << 1) | bit, (high << 1) | (low >> 63)]
-}
-
 /// Multiplies `value` by the prepared subkey `h`, in place.
 ///
 /// # Safety
