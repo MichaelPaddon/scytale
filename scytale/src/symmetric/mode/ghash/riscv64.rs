@@ -20,6 +20,23 @@
 
 use crate::arch::riscv64::{hwprobe_ima_ext_0, vlenb, EXT_ZVKG, IMA_V};
 
+/// How many blocks the group multiply takes at once. `vgmul` does a
+/// whole field multiplication in one instruction, so there is no
+/// reduction for a group to amortise and no group multiply here.
+pub(super) const GROUP: usize = 1;
+
+/// Never called: [`GROUP`] is one.
+///
+/// # Safety
+/// Unreachable.
+pub(super) unsafe fn multiply_group(
+    _value: &mut [u64; 2],
+    _powers: &[[u64; 2]; super::MAX_GROUP],
+    _blocks: &[u8],
+) {
+    unreachable!("no group multiply on this architecture")
+}
+
 /// Whether the vector GHASH instruction is available: the vector
 /// extension, Zvkg, and registers of at least 128 bits, which the
 /// 128-bit element groups need.

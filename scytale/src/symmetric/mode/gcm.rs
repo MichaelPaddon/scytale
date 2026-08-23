@@ -9,12 +9,13 @@
 //!
 //! # Speed
 //!
-//! Nearly all the time goes into GHASH, not the cipher: the portable
-//! hash walks 128 bits per block with no lookup tables, so that it
-//! leaks nothing, and measures around a thirtieth of the speed of the
-//! counter mode underneath it. Hardware carry-less multiply
-//! instructions exist precisely for this and are the obvious thing to
-//! add next.
+//! GHASH, not the cipher, is what makes GCM slower than counter mode
+//! alone. Where the processor has a carry-less multiply instruction
+//! the hash uses it, and hashes whole groups of blocks at once where
+//! it can, which together bring GCM to within a fifth of the speed of
+//! the counter mode underneath it. Without such an instruction the
+//! hash walks 128 bits per block, which leaks nothing but is slow
+//! enough to dominate everything else here.
 //!
 //! # Using it safely
 //!

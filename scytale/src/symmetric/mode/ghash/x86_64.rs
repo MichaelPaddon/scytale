@@ -33,9 +33,23 @@ use core::arch::x86_64::__cpuid;
 /// leading term, written in the reversed bit order.
 const POLYNOMIAL: u64 = 0xc200_0000_0000_0000;
 
-/// Whether the processor has `pclmulqdq` (CPUID leaf 1, ECX bit 1).
+/// How many blocks the group multiply takes at once. Eight is enough
+/// independent work to fill the multiplier's pipeline, and eight
+/// powers of the subkey still fit comfortably in registers.
+pub(super) const GROUP: usize = 8;
+
+/// Reverses all sixteen bytes of a register, which turns a block as
+/// it arrives into the order the arithmetic below wants.
+const REVERSE: [u8; 16] =
+    [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
+
+/// Whether the processor has the instructions used here: `pclmulqdq`
+/// (CPUID leaf 1, ECX bit 1) and `pshufb`, which comes with SSSE3
+/// (bit 9). Every processor with the first has the second, but the
+/// group multiply below uses both, so both are checked.
 pub(super) fn has_carryless_multiply() -> bool {
-    __cpuid(1).ecx & (1 << 1) != 0
+    let features = __cpuid(1).ecx;
+    features & (1 << 1) != 0 && features & (1 << 9) != 0
 }
 
 /// Prepares the subkey for [`multiply`].
@@ -92,6 +106,93 @@ pub(super) unsafe fn multiply(value: &mut [u64; 2], h: &[u64; 2]) {
         polynomial = in(reg) POLYNOMIAL,
         out("xmm0") _, out("xmm1") _, out("xmm2") _,
         out("xmm3") _, out("xmm4") _, out("xmm5") _, out("xmm6") _,
+        options(nostack),
+    );
+}
+
+/// Multiplies in the whole of `blocks`, which is [`GROUP`] blocks,
+/// leaving the running hash in `value`.
+///
+/// The eight products are accumulated unreduced, in three registers
+/// holding the low, middle and high thirds of the 256-bit sum, and
+/// reduced once at the end. Nothing in the loop depends on the
+/// iteration before it, so the multiplier stays busy.
+///
+/// # Safety
+/// Requires `pclmulqdq` and SSSE3, and `blocks` must be exactly
+/// [`GROUP`] blocks long. `powers` holds the prepared powers of the
+/// subkey, `H` first, so the last block meets `H` and the first meets
+/// `H^8`.
+pub(super) unsafe fn multiply_group(
+    value: &mut [u64; 2],
+    powers: &[[u64; 2]; super::MAX_GROUP],
+    blocks: &[u8],
+) {
+    debug_assert_eq!(blocks.len(), GROUP * super::BLOCK);
+    let count = GROUP as u32;
+    core::arch::asm!(
+        "movdqu    xmm7, [{reverse}]",
+        "pxor      xmm0, xmm0",
+        "pxor      xmm1, xmm1",
+        "pxor      xmm2, xmm2",
+        // The running hash joins the first block and nothing after
+        // it, so the register holding it is cleared once used.
+        "movdqu    xmm3, [{value}]",
+        "pshufd    xmm3, xmm3, 0x4e",
+
+        "2:",
+        "movdqu    xmm4, [{blocks}]",
+        "pshufb    xmm4, xmm7",
+        "pxor      xmm4, xmm3",
+        "pxor      xmm3, xmm3",
+        "movdqu    xmm5, [{powers}]",
+        "movdqa    xmm6, xmm4",
+        "pclmulqdq xmm6, xmm5, 0x00",
+        "pxor      xmm0, xmm6",
+        "movdqa    xmm6, xmm4",
+        "pclmulqdq xmm6, xmm5, 0x11",
+        "pxor      xmm2, xmm6",
+        "movdqa    xmm6, xmm4",
+        "pclmulqdq xmm6, xmm5, 0x10",
+        "pxor      xmm1, xmm6",
+        "pclmulqdq xmm4, xmm5, 0x01",
+        "pxor      xmm1, xmm4",
+        "add       {blocks}, 16",
+        "sub       {powers}, 16",
+        "dec       {count:e}",
+        "jnz       2b",
+
+        // The middle third belongs half in each of the other two.
+        "movdqa    xmm4, xmm1",
+        "pslldq    xmm1, 8",
+        "psrldq    xmm4, 8",
+        "pxor      xmm0, xmm1",
+        "pxor      xmm2, xmm4",
+
+        // Fold the excess down in two halves, as for one block.
+        "movq      xmm6, {polynomial}",
+        "movdqa    xmm4, xmm6",
+        "pclmulqdq xmm4, xmm0, 0x00",
+        "pshufd    xmm5, xmm0, 0x4e",
+        "pxor      xmm5, xmm4",
+        "movdqa    xmm4, xmm6",
+        "pclmulqdq xmm4, xmm5, 0x00",
+        "pshufd    xmm0, xmm5, 0x4e",
+        "pxor      xmm0, xmm4",
+        "pxor      xmm2, xmm0",
+
+        "pshufd    xmm2, xmm2, 0x4e",
+        "movdqu    [{value}], xmm2",
+        value = in(reg) value.as_mut_ptr(),
+        // The first block meets the highest power, so this walks
+        // backwards through the table.
+        powers = inout(reg) powers.as_ptr().add(GROUP - 1) => _,
+        blocks = inout(reg) blocks.as_ptr() => _,
+        count = inout(reg) count => _,
+        reverse = in(reg) REVERSE.as_ptr(),
+        polynomial = in(reg) POLYNOMIAL,
+        out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
+        out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
         options(nostack),
     );
 }

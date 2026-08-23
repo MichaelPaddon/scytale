@@ -166,14 +166,15 @@ Measured on a 13th Gen Intel Core i7-1355U, encrypting 4 KB buffers:
 Short messages are not an afterthought: a buffer of eight blocks or
 fewer costs 8 to 11 ns per call with AES-NI.
 
-The modes, on the same processor with AES-128 and 16 KB buffers:
+The modes, on the same processor with AES-128 and 16 KB buffers.
+Rates are bytes, counted in millions and thousands of millions:
 
 | Mode | Speed |
 | --- | --- |
 | CBC decrypt | 16 GB/s |
 | CTR | 3.5 GB/s |
 | XTS | 2.6 GB/s |
-| GCM | 1.1 GB/s |
+| GCM | 2.7 GB/s |
 
 CBC encryption, OFB and CFB encryption are serial by definition: each
 block waits for the one before it, so they run at the speed of single

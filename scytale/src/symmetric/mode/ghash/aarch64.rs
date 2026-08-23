@@ -18,6 +18,22 @@
 /// leading term, written in the reversed bit order.
 const POLYNOMIAL: u64 = 0xc200_0000_0000_0000;
 
+/// How many blocks the group multiply takes at once. One means there
+/// is no group multiply yet.
+pub(super) const GROUP: usize = 1;
+
+/// Never called: [`GROUP`] is one.
+///
+/// # Safety
+/// Unreachable.
+pub(super) unsafe fn multiply_group(
+    _value: &mut [u64; 2],
+    _powers: &[[u64; 2]; super::MAX_GROUP],
+    _blocks: &[u8],
+) {
+    unreachable!("no group multiply on this architecture")
+}
+
 /// Whether the polynomial multiply is available.
 pub(super) fn has_carryless_multiply() -> bool {
     cfg!(target_feature = "aes") || id_register_reports_pmull()
