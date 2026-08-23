@@ -7,6 +7,15 @@ version = "0.3.0"
 edition = "2021"
 license = "BSD-2-Clause"
 
+# The test suites do a great deal of cipher work: the ACVP Monte
+# Carlo suites are 600,000 chained cipher calls each. Optimising the
+# test build cuts their run time roughly seventeenfold for a little
+# extra compile time, which matters most on the slower machines in
+# CI. Debug assertions stay on, so the checks in the assembly
+# wrappers still fire.
+[profile.test]
+opt-level = 2
+
 [profile.release]
 opt-level = 3
 lto = true
