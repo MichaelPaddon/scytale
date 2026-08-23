@@ -1,0 +1,16 @@
+[package]
+name = "scytale"
+description = "Portable cryptographic primitives"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# ACVP vectors are vendored for development but not shipped, to keep
+# the crate small; without them the ACVP suites skip and the built-in
+# vectors in the unit tests remain.
+exclude = ["tests/vectors"]
+
+[dependencies]
+zeroize = { version = "1", default-features = false, features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

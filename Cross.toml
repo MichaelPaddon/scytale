@@ -1,0 +1,11 @@
+# Settings for `cross` (cross-rs), used only by scripts/test-all-arches
+# to run foreign-architecture tests under qemu. Plain cargo ignores
+# this file.
+
+[target.riscv64gc-unknown-linux-gnu]
+# The stock image's qemu predates hwprobe support for the crypto
+# extensions; see the Dockerfile.
+dockerfile = "scripts/cross/riscv64gc-unknown-linux-gnu.Dockerfile"
+# qemu's default RISC-V CPU lacks the crypto extensions; the script
+# sets QEMU_CPU so the emulated CPU has them.
+env.passthrough = ["QEMU_CPU"]

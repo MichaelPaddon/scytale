@@ -1,0 +1,3 @@
+[alias]
+# Runs every test, including the long ones marked #[ignore].
+test-extended = "test --workspace -- --include-ignored"

@@ -1,0 +1,151 @@
+# scytale
+
+Cryptographic primitives in Rust.
+
+This is early work. AES is the only primitive so far.
+
+## Goals
+
+**Correct.** Every implementation is checked against the standard
+test vectors and against the NIST Automated Cryptographic Validation
+Program (ACVP) vectors: 2138 one-shot cases and 600 Monte Carlo
+steps, the latter being 600,000 chained cipher calls with the key
+re-derived at each step. Every implementation is also compared
+byte for byte against the portable one across a range of buffer
+lengths, so the paths that only some processors take get the same
+scrutiny as the rest.
+
+**Fast.** Where a processor has instructions for a primitive, scytale
+uses them, through hand-written assembly rather than compiler
+intrinsics, so the instruction order and register use can be tuned.
+The block loops interleave enough independent work to keep pipelined
+units busy, and a short buffer is handled in a single pass of the
+right width rather than one block at a time.
+
+**Portable.** Every primitive has a pure Rust implementation that
+works anywhere, with no lookup tables and no data-dependent branches,
+so it is constant time. The accelerated versions are additions to
+that, never a requirement.
+
+**No setup.** The library is `no_std`, has one dependency
+(`zeroize`), and builds with nothing but a stable Rust toolchain: no
+C compiler, no build script, no feature flags, no target-specific
+compiler options. Which implementation to run is decided at run time,
+by asking the processor what it supports, so one binary works across
+a whole architecture.
+
+## Supported algorithms
+
+| Algorithm | Key sizes | Notes |
+| --- | --- | --- |
+| AES (FIPS 197) | 128, 192, 256 | block cipher only; no modes yet |
+
+`encrypt_blocks` encrypts each block independently, which is ECB. On
+its own that is not a safe way to encrypt a message, because equal
+blocks produce equal ciphertext. Modes of operation are not
+implemented yet.
+
+## Supported architectures
+
+| Architecture | Acceleration used | Verified |
+| --- | --- | --- |
+| x86-64 | VAES on 256-bit registers | on hardware |
+| x86-64 | AES-NI on 128-bit registers | on hardware |
+| aarch64 | ARMv8 cryptography extension | under emulation |
+| riscv64 | vector cryptography (Zvkned) | under emulation |
+| riscv64 | scalar cryptography (Zkne, Zknd) | under emulation |
+| any | none needed; portable Rust | on hardware |
+
+Support is detected while the program runs: on x86-64 with CPUID, on
+aarch64 by reading the ID registers, on RISC-V through the kernel's
+`riscv_hwprobe` call. A processor without the instructions falls back
+to the portable code.
+
+## Using it
+
+```rust
+use scytale::symmetric::aes::Aes;
+
+let aes = Aes::try_new(&key)?;
+
+let mut block = [0u8; 16];
+aes.encrypt_block(&mut block);
+aes.decrypt_block(&mut block);
+
+// Any whole number of blocks, each encrypted independently.
+aes.encrypt_blocks(&mut buffer)?;
+```
+
+`Aes` picks the best implementation the processor supports, probing
+once on first use. Each implementation can also be named directly:
+
+| Type | Uses |
+| --- | --- |
+| `symmetric::aes::Aes` | the best of the below for this processor |
+| `aes::x86_64::vaes::Aes` | VAES |
+| `aes::x86_64::aesni::Aes` | AES-NI |
+| `aes::aarch64::armv8::Aes` | ARMv8 cryptography extension |
+| `aes::riscv64::zvkned::Aes` | RISC-V vector cryptography |
+| `aes::riscv64::zkn::Aes` | RISC-V scalar cryptography |
+| `aes::portable::bitsliced::Aes` | portable, constant time |
+| `aes::portable::Aes` | portable, table driven; see below |
+
+The architecture-specific types exist only on their architecture, and
+their `try_new` returns `Error::NotSupported` when the processor
+lacks the instructions. Every implementation wipes its expanded key
+when dropped.
+
+### Choosing an implementation
+
+Prefer `Aes` unless you have a reason not to.
+
+It never chooses `portable::Aes`, the table-driven version. That one
+is about twice the speed of the bitsliced code, but its memory access
+pattern depends on the key, which leaks the key to an attacker who
+can measure the timing, typically by running code on the same
+processor. Use it only where nothing untrusted runs, and read the
+notes in its documentation first.
+
+## Speed
+
+Measured on a 13th Gen Intel Core i7-1355U, encrypting 4 KB buffers:
+
+| Implementation | AES-128 | AES-256 |
+| --- | --- | --- |
+| `vaes` | 30 GB/s | 21 GB/s |
+| `aesni` | 15 GB/s | 11 GB/s |
+| `portable` (tables) | 500 MB/s | 360 MB/s |
+| `portable::bitsliced` | 290 MB/s | 210 MB/s |
+
+Short messages are not an afterthought: a buffer of eight blocks or
+fewer costs 8 to 11 ns per call with AES-NI.
+
+The ARM and RISC-V implementations have only been run under
+emulation, so there are no timings for them.
+
+## Testing
+
+```sh
+cargo test              # unit tests and the one-shot vector suites
+cargo test-extended     # adds the Monte Carlo suites, which are slow
+scripts/test-all-arches # every architecture, foreign ones emulated
+```
+
+The ACVP vectors live in `scytale/tests/vectors` and are not shipped
+in the published crate, to keep it small. Building and using the
+library never needs them; running the tests from a downloaded crate
+skips the ACVP suites and leaves the FIPS 197 and NIST SP 800-38A
+vectors, which are built into the tests, as the check.
+
+`scripts/test-all-arches` runs the host architecture directly and the
+others with [cross](https://github.com/cross-rs/cross), which needs
+Podman or Docker. It is a development convenience; nothing about it
+affects users of the library.
+
+## License
+
+BSD 2-Clause. See `LICENSE`.
+
+The test vectors under `scytale/tests/vectors` come from the NIST
+ACVP-Server project and carry their own notice, in `LICENSE.txt`
+beside them.

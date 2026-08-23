@@ -1,0 +1,9 @@
+[package]
+name = "scytale-cli"
+description = "Command line interface for scytale"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+scytale = { path = "../scytale" }

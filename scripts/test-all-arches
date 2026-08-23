@@ -1,0 +1,58 @@
+#!/bin/sh
+# Runs every test (including the long ones marked #[ignore]) for each
+# architecture. The host architecture runs natively; the others run
+# with `cross`, which builds in a container holding the cross linker,
+# the target's libc and qemu. For development only; CI tests on real
+# hardware.
+#
+# Requirements: `cargo install cross`, `rustup target add <target>`
+# for each foreign target, and Docker or Podman.
+#
+# Usage: scripts/test-all-arches [target ...]
+#   With no arguments, runs the targets listed in TARGETS.
+
+set -eu
+
+TARGETS="x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+riscv64gc-unknown-linux-gnu"
+
+# qemu's default RISC-V CPU has no crypto extensions; `max` has them
+# all (VLEN 128). Override to test other configurations, e.g.
+# QEMU_CPU=rv64,v=on,vlen=256,zk=on,zvkned=on,zvbb=on.
+: "${QEMU_CPU:=max}"
+export QEMU_CPU
+
+cd "$(dirname "$0")/.."
+
+host=$(rustc -vV | sed -n 's/^host: //p')
+
+if ! command -v docker >/dev/null 2>&1 && command -v podman >/dev/null 2>&1
+then
+    export CROSS_CONTAINER_ENGINE=podman
+fi
+
+run_target() {
+    target=$1
+    echo "==> $target"
+    if [ "$target" = "$host" ]; then
+        cargo test --workspace -- --include-ignored
+        return
+    fi
+    if ! command -v cross >/dev/null 2>&1; then
+        echo "missing cross: cargo install cross" >&2
+        exit 1
+    fi
+    if ! rustup target list --installed | grep -qx "$target"; then
+        echo "missing rust-std: rustup target add $target" >&2
+        exit 1
+    fi
+    cross test --workspace --target "$target" -- --include-ignored
+}
+
+if [ $# -gt 0 ]; then
+    TARGETS=$*
+fi
+for target in $TARGETS; do
+    run_target "$target"
+done
+echo "all targets passed"
