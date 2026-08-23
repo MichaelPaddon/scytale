@@ -8,6 +8,7 @@ pub mod aes_cfb8;
 pub mod aes_ctr;
 pub mod aes_ecb;
 pub mod aes_gcm;
+pub mod aes_gcm_siv;
 pub mod aes_ofb;
 
 use serde_json::Value;
@@ -26,7 +27,10 @@ pub fn load(file: &str, algorithm: &str, revision: &str) -> Option<Value> {
     let json = super::vectors::load(file)?;
     let doc: Value = serde_json::from_str(&json).expect("valid JSON");
     assert_eq!(doc["algorithm"], algorithm);
-    assert_eq!(doc["revision"], revision);
+    // Not every suite records a revision.
+    if !doc["revision"].is_null() {
+        assert_eq!(doc["revision"], revision);
+    }
     Some(doc)
 }
 

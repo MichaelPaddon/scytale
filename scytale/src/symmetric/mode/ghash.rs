@@ -104,6 +104,20 @@ impl Ghash {
     }
 }
 
+/// Multiplies a block by `x` in the GHASH field, in place.
+///
+/// POLYVAL is defined in terms of GHASH and needs this to convert its
+/// key; see [`polyval`](super::polyval).
+pub(crate) fn multiply_by_x(block: &mut [u8; BLOCK]) {
+    let mut high = halve(&block[..8]);
+    let mut low = halve(&block[8..]);
+    let overflow = 0u64.wrapping_sub(low & 1);
+    low = (low >> 1) | (high << 63);
+    high = (high >> 1) ^ (REDUCE & overflow);
+    block[..8].copy_from_slice(&high.to_be_bytes());
+    block[8..].copy_from_slice(&low.to_be_bytes());
+}
+
 /// Reads eight bytes as a big-endian word, which is how GHASH's bit
 /// order maps onto integers.
 fn halve(bytes: &[u8]) -> u64 {
