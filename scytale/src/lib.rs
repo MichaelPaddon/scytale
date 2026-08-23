@@ -9,7 +9,10 @@
 #![warn(missing_docs)]
 
 mod arch;
+mod error;
 mod math;
 pub mod symmetric;
 
 mod util;
+
+pub use error::Error;
