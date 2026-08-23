@@ -23,7 +23,7 @@
 //!
 //! ```
 //! use scytale::symmetric::aes::riscv64::zkn::Aes;
-//! use scytale::symmetric::Error;
+//! use scytale::Error;
 //!
 //! # fn main() -> Result<(), Error> {
 //! match Aes::try_new(&[0u8; 16]) {
@@ -44,7 +44,8 @@ use core::fmt;
 
 use super::has_zkn;
 use crate::symmetric::aes::{KeySize, BLOCK_SIZE};
-use crate::symmetric::{as_block, BlockCipher, Error};
+use crate::symmetric::{as_block, BlockCipher};
+use crate::Error;
 use zeroize::ZeroizeOnDrop;
 
 /// 64-bit halves in the longest key schedule (15 round keys).

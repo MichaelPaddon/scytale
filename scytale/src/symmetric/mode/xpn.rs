@@ -33,7 +33,7 @@
 //! use scytale::symmetric::aes::Aes;
 //! use scytale::symmetric::mode::Xpn;
 //!
-//! # fn main() -> Result<(), scytale::symmetric::Error> {
+//! # fn main() -> Result<(), scytale::Error> {
 //! let xpn = Xpn::try_new(Aes::try_new(&[0u8; 16])?)?;
 //! let salt = [0x5a; 12];
 //!
@@ -53,7 +53,8 @@
 //! ```
 
 use super::gcm::Gcm;
-use crate::symmetric::{BlockCipher, Error};
+use crate::symmetric::BlockCipher;
+use crate::Error;
 
 /// The length of both the salt and the frame identifier.
 const HALF: usize = 12;

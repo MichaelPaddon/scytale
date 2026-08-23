@@ -45,7 +45,7 @@
 //! use scytale::symmetric::aes::Aes;
 //! use scytale::symmetric::mode::Gcm;
 //!
-//! # fn main() -> Result<(), scytale::symmetric::Error> {
+//! # fn main() -> Result<(), scytale::Error> {
 //! let gcm = Gcm::try_new(Aes::try_new(&[0u8; 16])?)?;
 //! let nonce = [0u8; 12];
 //! let header = b"to: alice";
@@ -62,8 +62,9 @@
 
 use super::ghash::{Ghash, BLOCK};
 use super::{xor, LANES};
-use crate::symmetric::{BlockCipher, Error};
+use crate::symmetric::BlockCipher;
 use crate::util;
+use crate::Error;
 
 /// The most message bytes GCM may protect under one key and nonce:
 /// 2^39 - 256 bits, the limit at which counter mode would repeat.

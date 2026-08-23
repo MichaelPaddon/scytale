@@ -43,7 +43,7 @@
 //! use scytale::symmetric::aes::Aes;
 //! use scytale::symmetric::mode::Ff1;
 //!
-//! # fn main() -> Result<(), scytale::symmetric::Error> {
+//! # fn main() -> Result<(), scytale::Error> {
 //! // Decimal digits.
 //! let ff1 = Ff1::try_new(Aes::try_new(&[0u8; 16])?, 10)?;
 //!
@@ -60,7 +60,8 @@
 
 use super::ghash::BLOCK;
 use crate::math::natural::Natural;
-use crate::symmetric::{BlockCipher, Error};
+use crate::symmetric::BlockCipher;
+use crate::Error;
 
 /// Rounds of the Feistel network, fixed by the standard.
 const ROUNDS: usize = 10;

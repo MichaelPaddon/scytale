@@ -20,7 +20,7 @@
 //!
 //! ```
 //! use scytale::symmetric::aes::x86_64::aesni::Aes;
-//! use scytale::symmetric::Error;
+//! use scytale::Error;
 //!
 //! # fn main() -> Result<(), Error> {
 //! match Aes::try_new(&[0u8; 16]) {
@@ -41,7 +41,8 @@ use core::fmt;
 
 use super::{expand, has_aesni, RoundKeys};
 use crate::symmetric::aes::BLOCK_SIZE;
-use crate::symmetric::{as_block, BlockCipher, Error};
+use crate::symmetric::{as_block, BlockCipher};
+use crate::Error;
 use zeroize::ZeroizeOnDrop;
 
 /// An AES cipher with an expanded key, using AES-NI.

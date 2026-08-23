@@ -38,7 +38,7 @@
 //! use scytale::symmetric::aes::Aes;
 //! use scytale::symmetric::mode::Xts;
 //!
-//! # fn main() -> Result<(), scytale::symmetric::Error> {
+//! # fn main() -> Result<(), scytale::Error> {
 //! // Two 128-bit keys, joined.
 //! let mut key = [0u8; 32];
 //! key[16..].copy_from_slice(&[1u8; 16]);
@@ -58,8 +58,9 @@
 
 use super::ghash::BLOCK;
 use super::{xor, LANES};
-use crate::symmetric::{BlockCipher, Error};
+use crate::symmetric::BlockCipher;
 use crate::util;
+use crate::Error;
 
 /// XTS over a block cipher.
 #[derive(Clone, Debug)]

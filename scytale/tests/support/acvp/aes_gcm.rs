@@ -8,7 +8,8 @@
 
 use super::{groups as suite_groups, hex};
 use scytale::symmetric::mode::Gcm;
-use scytale::symmetric::{BlockCipher, Error};
+use scytale::symmetric::BlockCipher;
+use scytale::Error;
 use serde_json::Value;
 
 const FILE: &str = "ACVP-AES-GCM-1.0/internalProjection.json";

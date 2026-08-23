@@ -13,7 +13,7 @@
 //! ```
 //! use scytale::symmetric::aes::{portable, Aes};
 //!
-//! # fn main() -> Result<(), scytale::symmetric::Error> {
+//! # fn main() -> Result<(), scytale::Error> {
 //! let fastest = Aes::try_new(&[0u8; 16])?;
 //! let portable = portable::Aes::try_new(&[0u8; 16])?;
 //!
@@ -37,7 +37,8 @@ pub mod x86_64;
 use core::fmt;
 use core::sync::atomic::{AtomicU8, Ordering};
 
-use crate::symmetric::{as_block, BlockCipher, Error};
+use crate::symmetric::{as_block, BlockCipher};
+use crate::Error;
 
 /// AES block size in bytes.
 pub const BLOCK_SIZE: usize = 16;

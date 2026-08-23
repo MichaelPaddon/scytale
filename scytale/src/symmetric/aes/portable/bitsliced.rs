@@ -22,7 +22,7 @@
 //! ```
 //! use scytale::symmetric::aes::portable::bitsliced::Aes;
 //!
-//! # fn main() -> Result<(), scytale::symmetric::Error> {
+//! # fn main() -> Result<(), scytale::Error> {
 //! let aes = Aes::try_new(&[0u8; 16])?;
 //! let mut block = [0u8; 16];
 //! aes.encrypt_block(&mut block);
@@ -35,7 +35,8 @@
 use core::fmt;
 
 use crate::symmetric::aes::{expand_words, KeySize, BLOCK_SIZE};
-use crate::symmetric::{as_block, BlockCipher, Error};
+use crate::symmetric::{as_block, BlockCipher};
+use crate::Error;
 use zeroize::ZeroizeOnDrop;
 
 /// Round keys for the largest key size (AES-256: 15 round keys).

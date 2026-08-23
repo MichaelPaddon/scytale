@@ -3,7 +3,7 @@
 pub mod aes;
 pub mod mode;
 
-pub use crate::Error;
+use crate::Error;
 
 /// Views a slice as a fixed-size block, for forwarding the trait's
 /// single-block methods to a cipher's inherent ones.

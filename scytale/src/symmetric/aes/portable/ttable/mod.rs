@@ -37,7 +37,7 @@
 //! ```
 //! use scytale::symmetric::aes::portable::Aes;
 //!
-//! # fn main() -> Result<(), scytale::symmetric::Error> {
+//! # fn main() -> Result<(), scytale::Error> {
 //! let aes = Aes::try_new(&[0u8; 16])?;
 //! let mut block = [0u8; 16];
 //! aes.encrypt_block(&mut block);
@@ -52,7 +52,8 @@ pub(crate) mod tables;
 use core::fmt;
 
 use crate::symmetric::aes::{expand_words, KeySize, BLOCK_SIZE, MAX_WORDS};
-use crate::symmetric::{as_block, BlockCipher, Error};
+use crate::symmetric::{as_block, BlockCipher};
+use crate::Error;
 use tables::{INV_SBOX, SBOX, TD, TE};
 use zeroize::ZeroizeOnDrop;
 

@@ -17,7 +17,7 @@
 //!
 //! ```
 //! use scytale::symmetric::aes::x86_64::vaes::Aes;
-//! use scytale::symmetric::Error;
+//! use scytale::Error;
 //!
 //! # fn main() -> Result<(), Error> {
 //! match Aes::try_new(&[0u8; 16]) {
@@ -38,7 +38,8 @@ use core::fmt;
 
 use super::{aesni, expand, has_vaes256, RoundKeys};
 use crate::symmetric::aes::{KeySize, BLOCK_SIZE};
-use crate::symmetric::{as_block, BlockCipher, Error};
+use crate::symmetric::{as_block, BlockCipher};
+use crate::Error;
 use zeroize::ZeroizeOnDrop;
 
 /// Bytes in one 256-bit register: two blocks.

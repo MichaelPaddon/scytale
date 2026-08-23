@@ -22,7 +22,7 @@
 //!
 //! ```
 //! use scytale::symmetric::aes::aarch64::armv8::Aes;
-//! use scytale::symmetric::Error;
+//! use scytale::Error;
 //!
 //! # fn main() -> Result<(), Error> {
 //! match Aes::try_new(&[0u8; 16]) {
@@ -48,7 +48,8 @@ use core::arch::aarch64::{
 use core::fmt;
 
 use crate::symmetric::aes::{expand_words, KeySize, BLOCK_SIZE, MAX_WORDS};
-use crate::symmetric::{as_block, BlockCipher, Error};
+use crate::symmetric::{as_block, BlockCipher};
+use crate::Error;
 use zeroize::ZeroizeOnDrop;
 
 /// An AES cipher with an expanded key, using the ARMv8 instructions.

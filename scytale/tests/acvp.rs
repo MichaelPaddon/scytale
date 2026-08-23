@@ -54,7 +54,7 @@ macro_rules! hardware_suites {
     ($name:ident, $ty:ty, $suite:ident, $what:literal, $kind:ident) => {
         mod $name {
             use super::*;
-            use scytale::symmetric::Error;
+            use scytale::Error;
 
             /// Whether to run, reporting a skip when the processor
             /// cannot. A silent skip would look like a pass.

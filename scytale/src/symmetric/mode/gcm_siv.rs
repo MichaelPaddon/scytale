@@ -35,7 +35,7 @@
 //! use scytale::symmetric::aes::Aes;
 //! use scytale::symmetric::mode::GcmSiv;
 //!
-//! # fn main() -> Result<(), scytale::symmetric::Error> {
+//! # fn main() -> Result<(), scytale::Error> {
 //! let siv: GcmSiv<Aes> = GcmSiv::try_new(&[0u8; 16])?;
 //! let nonce = [0u8; 12];
 //!
@@ -52,8 +52,9 @@
 use super::ghash::BLOCK;
 use super::polyval::Polyval;
 use super::{xor, LANES};
-use crate::symmetric::{BlockCipher, Error};
+use crate::symmetric::BlockCipher;
 use crate::util;
+use crate::Error;
 
 /// The nonce length, fixed by the standard.
 const NONCE: usize = 12;

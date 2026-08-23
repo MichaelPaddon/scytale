@@ -6,7 +6,7 @@
 //!
 //! [`BlockCipher`]: crate::symmetric::BlockCipher
 
-use crate::symmetric::Error;
+use crate::Error;
 
 pub mod cbc;
 pub mod cfb1;

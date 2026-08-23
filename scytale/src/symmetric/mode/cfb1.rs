@@ -24,7 +24,7 @@
 //! use scytale::symmetric::aes::Aes;
 //! use scytale::symmetric::mode::Cfb1;
 //!
-//! # fn main() -> Result<(), scytale::symmetric::Error> {
+//! # fn main() -> Result<(), scytale::Error> {
 //! let cfb = Cfb1::new(Aes::try_new(&[0u8; 16])?);
 //! let iv = [0u8; 16];
 //!
@@ -38,7 +38,8 @@
 //! ```
 
 use super::{bit, register_from, set_bit, shift_in_bit, MAX_BLOCK_SIZE};
-use crate::symmetric::{BlockCipher, Error};
+use crate::symmetric::BlockCipher;
+use crate::Error;
 
 /// CFB with 1-bit segments over a block cipher.
 #[derive(Clone, Debug)]
