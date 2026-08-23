@@ -8,6 +8,7 @@
 #![allow(clippy::chunks_exact_to_as_chunks)]
 #![warn(missing_docs)]
 
+mod arch;
 mod math;
 pub mod symmetric;
 

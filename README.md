@@ -2,18 +2,20 @@
 
 Cryptographic primitives in Rust.
 
-This is early work. AES is the only primitive so far.
+This is early work. So far it has AES and the block cipher modes
+built on it.
 
 ## Goals
 
 **Correct.** Every implementation is checked against the standard
 test vectors and against the NIST Automated Cryptographic Validation
-Program (ACVP) vectors: 2138 one-shot cases and 600 Monte Carlo
-steps, the latter being 600,000 chained cipher calls with the key
-re-derived at each step. Every implementation is also compared
-byte for byte against the portable one across a range of buffer
-lengths, so the paths that only some processors take get the same
-scrutiny as the rest.
+Program (ACVP) vectors: 14,750 one-shot cases and 3600 Monte Carlo
+steps, the latter being 3.6 million chained cipher calls with the key
+re-derived at each step. Each case runs against every implementation
+the processor supports, not just one. Every implementation is also
+compared byte for byte against the portable one across a range of
+buffer lengths, so the paths that only some processors take get the
+same scrutiny as the rest.
 
 **Fast.** Where a processor has instructions for a primitive, scytale
 uses them, through hand-written assembly rather than compiler
@@ -38,23 +40,49 @@ a whole architecture.
 
 | Algorithm | Key sizes | Notes |
 | --- | --- | --- |
-| AES (FIPS 197) | 128, 192, 256 | block cipher only; no modes yet |
+| AES (FIPS 197) | 128, 192, 256 | the block cipher itself |
 
-`encrypt_blocks` encrypts each block independently, which is ECB. On
-its own that is not a safe way to encrypt a message, because equal
-blocks produce equal ciphertext. Modes of operation are not
-implemented yet.
+Every mode below is generic: it wraps any block cipher, and AES is
+simply the one there is so far.
+
+| Mode | Kind | Notes |
+| --- | --- | --- |
+| CBC | confidentiality | whole blocks only; no padding |
+| CFB1, CFB8, CFB128 | confidentiality | the three NIST segment sizes |
+| OFB | confidentiality | |
+| CTR | confidentiality | |
+| GCM | authenticated | GMAC is GCM with no plaintext |
+| GCM-SIV | authenticated | survives a repeated nonce (RFC 8452) |
+| XPN | authenticated | GCM under a MACsec extended packet number |
+| XTS | disk sectors | ciphertext stealing for a partial block |
+| FF1, FF3-1 | format preserving | see their documentation first |
+
+`encrypt_blocks` on the cipher itself encrypts each block
+independently, which is ECB. On its own that is not a safe way to
+encrypt a message, because equal blocks produce equal ciphertext. Use
+a mode.
+
+The two format-preserving modes are not constant time: they do
+arithmetic in the caller's radix, and division is not a constant-time
+instruction on any of these processors. Their documentation says so
+too.
 
 ## Supported architectures
 
-| Architecture | Acceleration used | Verified |
-| --- | --- | --- |
-| x86-64 | VAES on 256-bit registers | on hardware |
-| x86-64 | AES-NI on 128-bit registers | on hardware |
-| aarch64 | ARMv8 cryptography extension | under emulation |
-| riscv64 | vector cryptography (Zvkned) | under emulation |
-| riscv64 | scalar cryptography (Zkne, Zknd) | under emulation |
-| any | none needed; portable Rust | on hardware |
+| Architecture | Acceleration used | For | Verified |
+| --- | --- | --- | --- |
+| x86-64 | VAES on 256-bit registers | AES | on hardware |
+| x86-64 | AES-NI on 128-bit registers | AES | on hardware |
+| x86-64 | PCLMULQDQ | GHASH | on hardware |
+| aarch64 | ARMv8 cryptography extension | AES | under emulation |
+| aarch64 | PMULL | GHASH | under emulation |
+| riscv64 | vector cryptography (Zvkned) | AES | under emulation |
+| riscv64 | scalar cryptography (Zkne, Zknd) | AES | under emulation |
+| riscv64 | vector GHASH (Zvkg) | GHASH | under emulation |
+| any | none needed; portable Rust | both | on hardware |
+
+GHASH is the hash inside GCM, GCM-SIV and XPN. Without a carry-less
+multiply instruction it costs more than the cipher does.
 
 Support is detected while the program runs: on x86-64 with CPUID, on
 aarch64 by reading the ID registers, on RISC-V through the kernel's
@@ -75,6 +103,24 @@ aes.decrypt_block(&mut block);
 // Any whole number of blocks, each encrypted independently.
 aes.encrypt_blocks(&mut buffer)?;
 ```
+
+A mode wraps the cipher. Authenticated encryption returns a tag, and
+decryption checks it before the plaintext is worth anything:
+
+```rust
+use scytale::symmetric::{aes::Aes, mode::Gcm};
+
+let gcm = Gcm::try_new(Aes::try_new(&key)?)?;
+
+let mut tag = [0u8; 16];
+gcm.encrypt(&nonce, associated_data, &mut buffer, &mut tag)?;
+gcm.decrypt(&nonce, associated_data, &mut buffer, &tag)?;
+```
+
+Every mode also has an incremental form for data that arrives in
+pieces. Note that incremental decryption hands back plaintext before
+the tag has been checked; the one-shot call above is the safe
+default.
 
 `Aes` picks the best implementation the processor supports, probing
 once on first use. Each implementation can also be named directly:
@@ -119,6 +165,19 @@ Measured on a 13th Gen Intel Core i7-1355U, encrypting 4 KB buffers:
 
 Short messages are not an afterthought: a buffer of eight blocks or
 fewer costs 8 to 11 ns per call with AES-NI.
+
+The modes, on the same processor with AES-128 and 16 KB buffers:
+
+| Mode | Speed |
+| --- | --- |
+| CBC decrypt | 16 GB/s |
+| CTR | 3.5 GB/s |
+| XTS | 2.6 GB/s |
+| GCM | 1.1 GB/s |
+
+CBC encryption, OFB and CFB encryption are serial by definition: each
+block waits for the one before it, so they run at the speed of single
+blocks and no amount of interleaving helps.
 
 The ARM and RISC-V implementations have only been run under
 emulation, so there are no timings for them.

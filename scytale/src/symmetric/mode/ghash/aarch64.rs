@@ -49,6 +49,11 @@ fn id_register_reports_pmull() -> bool {
     false
 }
 
+/// Prepares the subkey for [`multiply`].
+pub(super) fn prepare(h: &[u64; 2]) -> [u64; 2] {
+    super::divide_by_x(h)
+}
+
 /// Multiplies `value` by the prepared subkey `h`, in place.
 ///
 /// # Safety
