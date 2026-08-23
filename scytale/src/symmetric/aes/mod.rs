@@ -37,7 +37,7 @@ pub mod x86_64;
 use core::fmt;
 use core::sync::atomic::{AtomicU8, Ordering};
 
-use crate::symmetric::{BlockCipher, Error};
+use crate::symmetric::{as_block, BlockCipher, Error};
 
 /// AES block size in bytes.
 pub const BLOCK_SIZE: usize = 16;
@@ -306,6 +306,16 @@ impl BlockCipher for Aes {
 
     fn try_new(key: &[u8]) -> Result<Self, Error> {
         Aes::try_new(key)
+    }
+
+    fn encrypt_block(&self, block: &mut [u8]) -> Result<(), Error> {
+        Aes::encrypt_block(self, as_block(block)?);
+        Ok(())
+    }
+
+    fn decrypt_block(&self, block: &mut [u8]) -> Result<(), Error> {
+        Aes::decrypt_block(self, as_block(block)?);
+        Ok(())
     }
 
     fn encrypt_blocks(&self, data: &mut [u8]) -> Result<(), Error> {

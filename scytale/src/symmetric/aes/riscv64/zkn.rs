@@ -44,7 +44,7 @@ use core::fmt;
 
 use super::has_zkn;
 use crate::symmetric::aes::{KeySize, BLOCK_SIZE};
-use crate::symmetric::{BlockCipher, Error};
+use crate::symmetric::{as_block, BlockCipher, Error};
 use zeroize::ZeroizeOnDrop;
 
 /// 64-bit halves in the longest key schedule (15 round keys).
@@ -193,6 +193,16 @@ impl BlockCipher for Aes {
 
     fn try_new(key: &[u8]) -> Result<Self, Error> {
         Aes::try_new(key)
+    }
+
+    fn encrypt_block(&self, block: &mut [u8]) -> Result<(), Error> {
+        Aes::encrypt_block(self, as_block(block)?);
+        Ok(())
+    }
+
+    fn decrypt_block(&self, block: &mut [u8]) -> Result<(), Error> {
+        Aes::decrypt_block(self, as_block(block)?);
+        Ok(())
     }
 
     fn encrypt_blocks(&self, data: &mut [u8]) -> Result<(), Error> {

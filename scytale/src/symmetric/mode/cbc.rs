@@ -1,0 +1,321 @@
+//! Cipher block chaining (NIST SP 800-38A).
+//!
+//! Each block is combined with the one before it before encryption,
+//! starting from an initialisation vector, so identical plaintext
+//! blocks do not produce identical ciphertext.
+//!
+//! # Using it safely
+//!
+//! - The IV must be unpredictable to an attacker who can influence
+//!   the plaintext, so generate it at random for each message. It
+//!   need not be secret and is normally sent alongside the
+//!   ciphertext.
+//! - CBC provides no authentication. On its own it does not detect a
+//!   modified message, and decrypting attacker-controlled ciphertext
+//!   has historically been the source of padding-oracle attacks.
+//!   Prefer an authenticated mode.
+//! - The message must be a whole number of blocks. Padding is the
+//!   caller's business; this mode adds none.
+//!
+//! # Example
+//!
+//! ```
+//! use scytale::symmetric::aes::Aes;
+//! use scytale::symmetric::mode::Cbc;
+//!
+//! # fn main() -> Result<(), scytale::symmetric::Error> {
+//! let cbc = Cbc::new(Aes::try_new(&[0u8; 16])?);
+//! let iv = [0u8; 16];
+//!
+//! let mut data = [0u8; 32];
+//! cbc.encrypt(&iv, &mut data)?;
+//! cbc.decrypt(&iv, &mut data)?;
+//! assert_eq!(data, [0u8; 32]);
+//! # Ok(())
+//! # }
+//! ```
+
+use super::{xor, LANES, MAX_BLOCK_SIZE};
+use crate::symmetric::{BlockCipher, Error};
+
+/// CBC over a block cipher.
+#[derive(Clone, Debug)]
+pub struct Cbc<C> {
+    cipher: C,
+}
+
+impl<C: BlockCipher> Cbc<C> {
+    /// Wraps `cipher`.
+    ///
+    /// # Panics
+    /// If the cipher's block is larger than the modes support, which
+    /// no cipher in this library is.
+    pub fn new(cipher: C) -> Self {
+        assert!(
+            C::BLOCK_SIZE > 0 && C::BLOCK_SIZE <= MAX_BLOCK_SIZE,
+            "block size is outside the range the modes support"
+        );
+        Cbc { cipher }
+    }
+
+    /// Encrypts `data` in place under `iv`.
+    ///
+    /// `iv` must be one block and `data` a whole number of blocks.
+    pub fn encrypt(&self, iv: &[u8], data: &mut [u8]) -> Result<(), Error> {
+        self.encryptor(iv)?.update(data)
+    }
+
+    /// Decrypts `data` in place under `iv`.
+    ///
+    /// `iv` must be one block and `data` a whole number of blocks.
+    pub fn decrypt(&self, iv: &[u8], data: &mut [u8]) -> Result<(), Error> {
+        self.decryptor(iv)?.update(data)
+    }
+
+    /// Starts encrypting a message that arrives in pieces.
+    pub fn encryptor(&self, iv: &[u8]) -> Result<Encryptor<'_, C>, Error> {
+        Ok(Encryptor {
+            cipher: &self.cipher,
+            chain: chain_from(iv, C::BLOCK_SIZE)?,
+        })
+    }
+
+    /// Starts decrypting a message that arrives in pieces.
+    pub fn decryptor(&self, iv: &[u8]) -> Result<Decryptor<'_, C>, Error> {
+        Ok(Decryptor {
+            cipher: &self.cipher,
+            chain: chain_from(iv, C::BLOCK_SIZE)?,
+        })
+    }
+}
+
+/// Copies `iv` into a fixed-size chaining block.
+fn chain_from(iv: &[u8], size: usize) -> Result<[u8; MAX_BLOCK_SIZE], Error> {
+    if iv.len() != size {
+        return Err(Error::InvalidNonceLength(iv.len()));
+    }
+    let mut chain = [0u8; MAX_BLOCK_SIZE];
+    chain[..size].copy_from_slice(iv);
+    Ok(chain)
+}
+
+/// Encrypts one message, a piece at a time.
+///
+/// Every piece must be a whole number of blocks, since a block cannot
+/// be encrypted until all of it has arrived. There is nothing to
+/// finish: the state can simply be dropped when the message ends.
+#[derive(Debug)]
+pub struct Encryptor<'a, C> {
+    cipher: &'a C,
+    chain: [u8; MAX_BLOCK_SIZE],
+}
+
+impl<C: BlockCipher> Encryptor<'_, C> {
+    /// Encrypts the next piece of the message in place.
+    ///
+    /// Encryption chains, so this runs one block at a time and cannot
+    /// use the cipher's bulk path.
+    pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
+        let size = C::BLOCK_SIZE;
+        if !data.len().is_multiple_of(size) {
+            return Err(Error::NotBlockAligned(data.len()));
+        }
+        for block in data.chunks_exact_mut(size) {
+            xor(block, &self.chain[..size]);
+            self.cipher.encrypt_block(block)?;
+            self.chain[..size].copy_from_slice(block);
+        }
+        Ok(())
+    }
+}
+
+/// Decrypts one message, a piece at a time.
+///
+/// Every piece must be a whole number of blocks. There is nothing to
+/// finish.
+#[derive(Debug)]
+pub struct Decryptor<'a, C> {
+    cipher: &'a C,
+    chain: [u8; MAX_BLOCK_SIZE],
+}
+
+impl<C: BlockCipher> Decryptor<'_, C> {
+    /// Decrypts the next piece of the message in place.
+    ///
+    /// Decryption does not chain through the cipher, so blocks go
+    /// through the bulk path in groups. Each group's ciphertext is
+    /// kept first, because decrypting in place overwrites the very
+    /// bytes the next block needs.
+    pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
+        let size = C::BLOCK_SIZE;
+        if !data.len().is_multiple_of(size) {
+            return Err(Error::NotBlockAligned(data.len()));
+        }
+        let mut seen = [0u8; LANES * MAX_BLOCK_SIZE];
+        for group in data.chunks_mut(LANES * size) {
+            let seen = &mut seen[..group.len()];
+            seen.copy_from_slice(group);
+            self.cipher.decrypt_blocks(group)?;
+
+            let mut previous = &self.chain[..size];
+            for (i, block) in group.chunks_exact_mut(size).enumerate() {
+                xor(block, previous);
+                previous = &seen[i * size..(i + 1) * size];
+            }
+            self.chain[..size].copy_from_slice(&seen[seen.len() - size..]);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::symmetric::aes::Aes;
+
+    /// Largest buffer any test here uses.
+    const MAX: usize = 24 * 16;
+
+    fn unhex<const N: usize>(s: &str) -> [u8; N] {
+        let mut out = [0u8; N];
+        for (i, pair) in s.as_bytes().chunks_exact(2).enumerate() {
+            let hex = core::str::from_utf8(pair).unwrap();
+            out[i] = u8::from_str_radix(hex, 16).unwrap();
+        }
+        out
+    }
+
+    fn cbc(key: &[u8]) -> Cbc<Aes> {
+        Cbc::new(Aes::try_new(key).unwrap())
+    }
+
+    /// Fills `buf` with something that is not all one byte.
+    fn fill(buf: &mut [u8]) {
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = (i * 7 + 1) as u8;
+        }
+    }
+
+    /// NIST SP 800-38A F.2.1 and F.2.2, AES-128.
+    #[test]
+    fn sp800_38a_aes128() {
+        let key: [u8; 16] = unhex("2b7e151628aed2a6abf7158809cf4f3c");
+        let iv: [u8; 16] = unhex("000102030405060708090a0b0c0d0e0f");
+        let plain: [u8; 64] = unhex(
+            "6bc1bee22e409f96e93d7e117393172a\
+             ae2d8a571e03ac9c9eb76fac45af8e51\
+             30c81c46a35ce411e5fbc1191a0a52ef\
+             f69f2445df4f9b17ad2b417be66c3710",
+        );
+        let cipher: [u8; 64] = unhex(
+            "7649abac8119b246cee98e9b12e9197d\
+             5086cb9b507219ee95db113a917678b2\
+             73bed6b8e3c1743b7116e69e22229516\
+             3ff1caa1681fac09120eca307586e1a7",
+        );
+        let cbc = cbc(&key);
+
+        let mut data = plain;
+        cbc.encrypt(&iv, &mut data).unwrap();
+        assert_eq!(data, cipher, "encrypt");
+        cbc.decrypt(&iv, &mut data).unwrap();
+        assert_eq!(data, plain, "decrypt");
+    }
+
+    /// Chaining must actually happen: equal plaintext blocks must not
+    /// give equal ciphertext blocks, which is the point of CBC over
+    /// ECB.
+    #[test]
+    fn equal_blocks_differ() {
+        let cbc = cbc(&[0x11; 16]);
+        let mut data = [0u8; 32];
+        cbc.encrypt(&[0x22; 16], &mut data).unwrap();
+        assert_ne!(data[..16], data[16..]);
+    }
+
+    #[test]
+    fn round_trips_at_many_lengths() {
+        let cbc = cbc(&[0x5a; 32]);
+        let iv = [0x77u8; 16];
+        let mut plain = [0u8; MAX];
+        fill(&mut plain);
+        // Zero, one, and enough blocks to cross the group the
+        // decryption path works in.
+        for blocks in [0, 1, 2, 7, 8, 9, 16, 17, 24] {
+            let n = blocks * 16;
+            let mut data = [0u8; MAX];
+            data[..n].copy_from_slice(&plain[..n]);
+
+            cbc.encrypt(&iv, &mut data[..n]).unwrap();
+            if blocks > 0 {
+                assert_ne!(data[..n], plain[..n], "{blocks} blocks");
+            }
+            cbc.decrypt(&iv, &mut data[..n]).unwrap();
+            assert_eq!(data[..n], plain[..n], "{blocks} blocks");
+        }
+    }
+
+    /// Feeding the message in pieces must match one call, in both
+    /// directions.
+    #[test]
+    fn pieces_match_one_call() {
+        let cbc = cbc(&[0x33; 24]);
+        let iv = [1u8; 16];
+        let mut plain = [0u8; MAX];
+        fill(&mut plain);
+
+        for split in [1, 2, 7, 8, 15] {
+            let mut whole = plain;
+            cbc.encrypt(&iv, &mut whole).unwrap();
+
+            let mut pieces = plain;
+            let mut e = cbc.encryptor(&iv).unwrap();
+            let (a, b) = pieces.split_at_mut(split * 16);
+            e.update(a).unwrap();
+            e.update(b).unwrap();
+            assert_eq!(pieces, whole, "encrypt split at {split}");
+
+            let mut d = cbc.decryptor(&iv).unwrap();
+            let (a, b) = pieces.split_at_mut(split * 16);
+            d.update(a).unwrap();
+            d.update(b).unwrap();
+            assert_eq!(pieces, plain, "decrypt split at {split}");
+        }
+    }
+
+    #[test]
+    fn rejects_wrong_iv_length() {
+        let cbc = cbc(&[0; 16]);
+        let source = [0u8; 32];
+        for n in [0, 1, 15, 17, 32] {
+            let iv = &source[..n];
+            assert_eq!(
+                cbc.encrypt(iv, &mut [0; 16]).unwrap_err(),
+                Error::InvalidNonceLength(n)
+            );
+            assert_eq!(
+                cbc.decrypt(iv, &mut [0; 16]).unwrap_err(),
+                Error::InvalidNonceLength(n)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_partial_block() {
+        let cbc = cbc(&[0; 16]);
+        let iv = [0u8; 16];
+        for n in [1, 15, 17, 31, 33] {
+            let mut data = [0x44u8; 33];
+            let data = &mut data[..n];
+            assert_eq!(
+                cbc.encrypt(&iv, data).unwrap_err(),
+                Error::NotBlockAligned(n)
+            );
+            assert_eq!(
+                cbc.decrypt(&iv, data).unwrap_err(),
+                Error::NotBlockAligned(n)
+            );
+            assert!(data.iter().all(|&b| b == 0x44), "data untouched");
+        }
+    }
+}

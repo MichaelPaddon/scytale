@@ -1,6 +1,6 @@
 //! ACVP-AES-ECB 1.0, run through the [`BlockCipher`] trait.
 
-use super::{hex, load};
+use super::{groups as suite_groups, hex};
 use scytale::symmetric::BlockCipher;
 use serde_json::Value;
 
@@ -32,26 +32,9 @@ pub fn run_mct<C: BlockCipher>() {
     assert!(count >= 600, "only {count} MCT steps");
 }
 
-/// The groups of one test type, each with its direction; `None` if
-/// the vectors are not vendored.
+/// The groups of one test type; `None` without the vectors.
 fn groups(test_type: &str) -> Option<Vec<(Value, bool)>> {
-    let doc = load(FILE, "ACVP-AES-ECB", "1.0")?;
-    let mut selected = Vec::new();
-    for group in doc["testGroups"].as_array().expect("testGroups") {
-        let encrypt = match group["direction"].as_str() {
-            Some("encrypt") => true,
-            Some("decrypt") => false,
-            other => panic!("unknown direction {other:?}"),
-        };
-        match group["testType"].as_str() {
-            Some(t) if t == test_type => {
-                selected.push((group.clone(), encrypt))
-            }
-            Some("AFT") | Some("MCT") => {}
-            other => panic!("unknown testType {other:?}"),
-        }
-    }
-    Some(selected)
+    suite_groups(FILE, "ACVP-AES-ECB", "1.0", test_type)
 }
 
 fn apply<C: BlockCipher>(cipher: &C, encrypt: bool, data: &mut [u8]) {

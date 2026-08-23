@@ -8,7 +8,7 @@
 
 mod support;
 
-use support::acvp::aes_ecb;
+use support::acvp::{aes_cbc as cbc, aes_ecb as ecb};
 
 /// Defines the suites for an implementation that is always available.
 macro_rules! suites {
@@ -71,32 +71,50 @@ macro_rules! hardware_suites {
     };
 }
 
-/// AES (FIPS 197), through the ACVP-AES-ECB suites.
-mod aes {
-    use super::*;
-    use scytale::symmetric::aes;
+/// Runs one suite against every AES implementation this architecture
+/// has.
+macro_rules! every_aes {
+    ($suite:ident) => {
+        use super::*;
+        use scytale::symmetric::aes;
 
-    suites!(automatic, aes::Aes, aes_ecb);
-    suites!(portable, aes::portable::Aes, aes_ecb);
-    suites!(bitsliced, aes::portable::bitsliced::Aes, aes_ecb);
+        suites!(automatic, aes::Aes, $suite);
+        suites!(portable, aes::portable::Aes, $suite);
+        suites!(bitsliced, aes::portable::bitsliced::Aes, $suite);
 
-    #[cfg(target_arch = "x86_64")]
-    hardware_suites!(aesni, aes::x86_64::aesni::Aes, aes_ecb, "AES-NI");
+        #[cfg(target_arch = "x86_64")]
+        hardware_suites!(aesni, aes::x86_64::aesni::Aes, $suite, "AES-NI");
 
-    #[cfg(target_arch = "x86_64")]
-    hardware_suites!(vaes, aes::x86_64::vaes::Aes, aes_ecb, "VAES");
+        #[cfg(target_arch = "x86_64")]
+        hardware_suites!(vaes, aes::x86_64::vaes::Aes, $suite, "VAES");
 
-    #[cfg(target_arch = "aarch64")]
-    hardware_suites!(armv8, aes::aarch64::armv8::Aes, aes_ecb, "ARMv8 AES");
+        #[cfg(target_arch = "aarch64")]
+        hardware_suites!(armv8, aes::aarch64::armv8::Aes, $suite, "ARMv8 AES");
 
-    #[cfg(target_arch = "riscv64")]
-    hardware_suites!(zkn, aes::riscv64::zkn::Aes, aes_ecb, "RISC-V scalar AES");
+        #[cfg(target_arch = "riscv64")]
+        hardware_suites!(
+            zkn,
+            aes::riscv64::zkn::Aes,
+            $suite,
+            "RISC-V scalar AES"
+        );
 
-    #[cfg(target_arch = "riscv64")]
-    hardware_suites!(
-        zvkned,
-        aes::riscv64::zvkned::Aes,
-        aes_ecb,
-        "RISC-V vector AES"
-    );
+        #[cfg(target_arch = "riscv64")]
+        hardware_suites!(
+            zvkned,
+            aes::riscv64::zvkned::Aes,
+            $suite,
+            "RISC-V vector AES"
+        );
+    };
+}
+
+/// AES (FIPS 197) with each block encrypted independently.
+mod aes_ecb {
+    every_aes!(ecb);
+}
+
+/// AES in cipher block chaining mode (SP 800-38A).
+mod aes_cbc {
+    every_aes!(cbc);
 }

@@ -43,7 +43,7 @@ use core::fmt;
 
 use super::has_zvkned;
 use crate::symmetric::aes::{expand_words, KeySize, BLOCK_SIZE, MAX_WORDS};
-use crate::symmetric::{BlockCipher, Error};
+use crate::symmetric::{as_block, BlockCipher, Error};
 use zeroize::ZeroizeOnDrop;
 
 /// An AES cipher with an expanded key, using the Zvkned instructions.
@@ -180,6 +180,16 @@ impl BlockCipher for Aes {
 
     fn try_new(key: &[u8]) -> Result<Self, Error> {
         Aes::try_new(key)
+    }
+
+    fn encrypt_block(&self, block: &mut [u8]) -> Result<(), Error> {
+        Aes::encrypt_block(self, as_block(block)?);
+        Ok(())
+    }
+
+    fn decrypt_block(&self, block: &mut [u8]) -> Result<(), Error> {
+        Aes::decrypt_block(self, as_block(block)?);
+        Ok(())
     }
 
     fn encrypt_blocks(&self, data: &mut [u8]) -> Result<(), Error> {

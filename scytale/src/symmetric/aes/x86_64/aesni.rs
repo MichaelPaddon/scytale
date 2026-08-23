@@ -41,7 +41,7 @@ use core::fmt;
 
 use super::{expand, has_aesni, RoundKeys};
 use crate::symmetric::aes::BLOCK_SIZE;
-use crate::symmetric::{BlockCipher, Error};
+use crate::symmetric::{as_block, BlockCipher, Error};
 use zeroize::ZeroizeOnDrop;
 
 /// An AES cipher with an expanded key, using AES-NI.
@@ -135,6 +135,16 @@ impl BlockCipher for Aes {
 
     fn try_new(key: &[u8]) -> Result<Self, Error> {
         Aes::try_new(key)
+    }
+
+    fn encrypt_block(&self, block: &mut [u8]) -> Result<(), Error> {
+        Aes::encrypt_block(self, as_block(block)?);
+        Ok(())
+    }
+
+    fn decrypt_block(&self, block: &mut [u8]) -> Result<(), Error> {
+        Aes::decrypt_block(self, as_block(block)?);
+        Ok(())
     }
 
     fn encrypt_blocks(&self, data: &mut [u8]) -> Result<(), Error> {

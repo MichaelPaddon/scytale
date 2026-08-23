@@ -1,6 +1,7 @@
 //! Drivers for NIST ACVP vector files, generic over the primitive's
 //! trait so any implementation can run them.
 
+pub mod aes_cbc;
 pub mod aes_ecb;
 
 use serde_json::Value;
@@ -21,4 +22,32 @@ pub fn load(file: &str, algorithm: &str, revision: &str) -> Option<Value> {
     assert_eq!(doc["algorithm"], algorithm);
     assert_eq!(doc["revision"], revision);
     Some(doc)
+}
+
+/// The groups of one test type in a suite, each paired with whether
+/// it is the encrypt direction. `None` if the vectors are not
+/// vendored in this copy.
+pub fn groups(
+    file: &str,
+    algorithm: &str,
+    revision: &str,
+    test_type: &str,
+) -> Option<Vec<(Value, bool)>> {
+    let doc = load(file, algorithm, revision)?;
+    let mut selected = Vec::new();
+    for group in doc["testGroups"].as_array().expect("testGroups") {
+        let encrypt = match group["direction"].as_str() {
+            Some("encrypt") => true,
+            Some("decrypt") => false,
+            other => panic!("unknown direction {other:?}"),
+        };
+        match group["testType"].as_str() {
+            Some(t) if t == test_type => {
+                selected.push((group.clone(), encrypt))
+            }
+            Some("AFT") | Some("MCT") => {}
+            other => panic!("unknown testType {other:?}"),
+        }
+    }
+    Some(selected)
 }
