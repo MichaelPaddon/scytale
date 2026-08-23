@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch supersedes an older run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Every architecture runs its own tests natively: no emulation, so
+  # the assembly is exercised on real hardware. The vendored ACVP
+  # vectors are in the checkout, so the full suites run.
+  #
+  # The RISC-V runners are the RISE ones, installed as a GitHub App.
+  test:
+    name: test (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86-64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: riscv64
+            runner: ubuntu-24.04-riscv
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          if command -v rustup > /dev/null; then
+              rustup update --no-self-update stable
+              rustup default stable
+              rustup component add clippy
+          else
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+                  | sh -s -- -y --profile minimal \
+                        --default-toolchain stable --component clippy
+              echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Report toolchain and processor
+        run: |
+          uname -m
+          cargo --version
+          rustc --version --verbose
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Test
+        # The alias in .cargo/config.toml; includes the slow Monte
+        # Carlo suites, which are quick enough on real hardware.
+        run: cargo test-extended
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Docs
+        run: cargo doc --workspace --no-deps
+
+  # Architecture-independent checks, so once is enough.
+  style:
+    name: style
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup update --no-self-update stable
+          rustup default stable
+          rustup component add rustfmt
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Line length
+        run: |
+          long=$(find scytale scytale-cli -name '*.rs' \
+              -exec awk 'length > 80 {print FILENAME": "FNR}' {} +)
+          if [ -n "$long" ]; then
+              echo "lines over 80 columns:" >&2
+              echo "$long" >&2
+              exit 1
+          fi
+
+      - name: ASCII only
+        run: |
+          if grep -rnP '[^\x00-\x7F]' \
+              scytale/src scytale-cli/src scytale/tests/support \
+              scytale/tests/*.rs; then
+              echo "non-ASCII characters found" >&2
+              exit 1
+          fi
+
+  # The published crate omits the vendored vectors, so check that it
+  # still builds and that nothing else went missing.
+  package:
+    name: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup update --no-self-update stable
+          rustup default stable
+
+      - name: Package and build the crate as published
+        run: cargo package -p scytale
+
+      - name: Report crate size
+        run: ls -lh target/package/*.crate
