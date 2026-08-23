@@ -9,11 +9,14 @@
 //!
 //! # Speed
 //!
-//! The multiplication here walks all 128 bits with masks rather than
-//! branches, and uses no lookup tables, so it takes the same time
-//! whatever the key and leaks nothing through the cache. It is also
-//! slow: this is the part of GCM that hardware carry-less multiply
-//! instructions exist to replace.
+//! The portable multiplication walks all 128 bits with masks rather
+//! than branches, and uses no lookup tables, so it takes the same
+//! time whatever the key and leaks nothing through the cache. It is
+//! also slow, and it is nearly all of GCM's cost. Where the processor
+//! has a carry-less multiply instruction, that is used instead.
+
+#[cfg(target_arch = "x86_64")]
+use core::sync::atomic::{AtomicU8, Ordering};
 
 /// GHASH works only on 128-bit blocks, whatever the cipher's block.
 pub(crate) const BLOCK: usize = 16;
@@ -21,6 +24,29 @@ pub(crate) const BLOCK: usize = 16;
 /// The reduction constant: the polynomial's low terms, in GHASH's
 /// reversed bit order.
 const REDUCE: u64 = 0xe100_0000_0000_0000;
+
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
+
+/// Whether the processor's carry-less multiply is available. Probed
+/// once: 0 unknown, 1 no, 2 yes.
+#[cfg(target_arch = "x86_64")]
+static PROBED: AtomicU8 = AtomicU8::new(0);
+
+/// The subkey in whatever form the processor's carry-less multiply
+/// wants, or nothing if there is no such instruction here.
+#[cfg(target_arch = "x86_64")]
+fn prepared(h: &[u64; 2]) -> Option<[u64; 2]> {
+    let known = match PROBED.load(Ordering::Relaxed) {
+        0 => {
+            let yes = x86_64::has_carryless_multiply();
+            PROBED.store(1 + u8::from(yes), Ordering::Relaxed);
+            yes
+        }
+        n => n == 2,
+    };
+    known.then(|| x86_64::prepare(h))
+}
 
 /// A GHASH computation in progress.
 #[derive(Clone)]
@@ -32,17 +58,25 @@ pub(crate) struct Ghash {
     /// Bytes of a block not yet complete.
     block: [u8; BLOCK],
     used: usize,
+    /// The subkey prepared for the processor's carry-less multiply,
+    /// present only when there is one to use. Decided when the hash
+    /// starts rather than per block.
+    #[cfg(target_arch = "x86_64")]
+    fast: Option<[u64; 2]>,
 }
 
 impl Ghash {
     /// Starts a hash under subkey `h`, which is one block.
     pub(crate) fn new(h: &[u8]) -> Self {
         debug_assert_eq!(h.len(), BLOCK);
+        let h = [halve(&h[..8]), halve(&h[8..])];
         Ghash {
-            h: [halve(&h[..8]), halve(&h[8..])],
+            h,
             y: [0, 0],
             block: [0; BLOCK],
             used: 0,
+            #[cfg(target_arch = "x86_64")]
+            fast: prepared(&h),
         }
     }
 
@@ -97,9 +131,17 @@ impl Ghash {
     }
 
     /// Adds one whole block: `y = (y + block) * h`.
+    #[allow(unsafe_code)]
     fn absorb(&mut self, block: &[u8]) {
         self.y[0] ^= halve(&block[..8]);
         self.y[1] ^= halve(&block[8..BLOCK]);
+        #[cfg(target_arch = "x86_64")]
+        if let Some(h) = self.fast.as_ref() {
+            // SAFETY: the instruction was confirmed present when this
+            // hash was started.
+            unsafe { x86_64::multiply(&mut self.y, h) };
+            return;
+        }
         multiply(&mut self.y, &self.h);
     }
 }
@@ -157,4 +199,70 @@ fn multiply(value: &mut [u64; 2], h: &[u64; 2]) {
 
     value[0] = zh;
     value[1] = zl;
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    extern crate std;
+
+    use super::*;
+    use std::eprintln;
+
+    /// A cheap spread of test values. The multiply is linear in each
+    /// operand, so agreement on a varied sample is strong evidence.
+    fn values(seed: u64) -> [u64; 2] {
+        let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        [next(), next()]
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    #[allow(unsafe_code)]
+    fn carryless_multiply_agrees_with_portable() {
+        if !x86_64::has_carryless_multiply() {
+            eprintln!("skipping: no carry-less multiply");
+            return;
+        }
+        for seed in 0..500 {
+            let h = values(seed);
+            let start = values(seed ^ 0x5555_5555);
+            let mut want = start;
+            multiply(&mut want, &h);
+            let mut got = start;
+            let scaled = x86_64::prepare(&h);
+            unsafe { x86_64::multiply(&mut got, &scaled) };
+            assert_eq!(got, want, "seed {seed}");
+        }
+    }
+
+    /// Zero and one are the cases the folding is most likely to get
+    /// wrong, and the random sample is unlikely to hit them.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    #[allow(unsafe_code)]
+    fn carryless_multiply_handles_edges() {
+        if !x86_64::has_carryless_multiply() {
+            eprintln!("skipping: no carry-less multiply");
+            return;
+        }
+        // In this bit order the identity is the top bit of the first
+        // word, and the all-ones value exercises every fold term.
+        let edges = [[0, 0], [1 << 63, 0], [0, 1], [!0, !0]];
+        for a in edges {
+            for b in edges {
+                let mut want = a;
+                multiply(&mut want, &b);
+                let mut got = a;
+                let scaled = x86_64::prepare(&b);
+                unsafe { x86_64::multiply(&mut got, &scaled) };
+                assert_eq!(got, want, "{a:x?} * {b:x?}");
+            }
+        }
+    }
 }
