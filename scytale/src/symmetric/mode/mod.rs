@@ -43,9 +43,17 @@ pub use xts::Xts;
 /// block cipher in current use.
 pub(crate) const MAX_BLOCK_SIZE: usize = 16;
 
-/// Blocks handed to the cipher in one bulk call, where a mode can use
-/// the bulk path. Matches the interleave the implementations use.
-pub(crate) const LANES: usize = 8;
+/// Blocks handed to the cipher in one bulk call.
+///
+/// The implementations interleave eight blocks, so anything from
+/// eight up keeps them busy; the gain from a larger group is in
+/// calling into the assembly less often. Measured on this machine,
+/// going from eight to sixteen was worth about a sixth of counter
+/// mode's throughput and a fifth of cipher block chaining's
+/// decryption, and going further gained little more. Each block of
+/// group costs a block of stack in the modes that keep a scratch
+/// buffer.
+pub(crate) const LANES: usize = 16;
 
 /// XORs `src` into `dst`, over as many bytes as both have.
 #[inline]
