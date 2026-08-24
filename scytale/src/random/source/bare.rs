@@ -1,24 +1,38 @@
-//! No operating system: ask the processor itself.
+//! Taking raw samples from the processor's own generator.
 //!
-//! On bare metal there is no kernel to ask, and none of the reasons
-//! to prefer one apply. There is nothing to fork, no virtual machine
-//! to snapshot, and nobody else to mix the processor's generator with
-//! everything they collected. It is the source, so it is used
-//! directly.
+//! This is a noise source and nothing more. What comes out of it is
+//! not fit to hand to a caller: it is unconditioned, it is credited
+//! with less entropy than it holds bits, and on RISC-V the register
+//! that produces it says outright that its output must be conditioned
+//! before use. Everything above turns these samples into random bytes
+//! by way of health tests and a derivation function; nothing here
+//! does, which is why this offers no way to fill a buffer.
 //!
 //! Each of these instructions can decline. They draw from a physical
 //! process that needs time to gather, and a burst of requests can
-//! outrun it, so every one of them is asked again a bounded number of
-//! times before the attempt is given up. Retrying forever would hang
-//! a machine whose generator has failed outright, which is a thing
+//! outrun it, so every one is asked again a bounded number of times
+//! before the attempt is given up. Retrying forever would hang a
+//! machine whose generator has failed outright, which is a thing
 //! these instructions are specified to report.
 //!
 //! Where the processor has no such instruction there is nothing left
-//! to try, and the answer is a refusal rather than something weaker.
-//! Supply a source of your own through the
-//! [`Random`](crate::random::Random) trait: on a board with a
-//! hardware generator on a bus, or a ring oscillator, that is the
-//! way in.
+//! to try, and [`Sampler::try_new`] refuses at once rather than
+//! leaving a generator that fails on every use. Supply a source of
+//! your own through the [`Entropy`](crate::random::Entropy) trait: on
+//! a board with a hardware generator on a bus, or a ring oscillator,
+//! that is the way in.
+//!
+//! # Why `rdseed` here, and `rdrand` only if it is missing
+//!
+//! `rdseed` is the raw entropy source and `rdrand` is the generator
+//! Intel builds on top of it, so which to ask depends on what is
+//! being built. Asking `rdseed` for every word of output exhausts it,
+//! and an earlier version of this file did exactly that and had its
+//! second call refused. It is not asked for output any more: it is
+//! asked for a seed, which is what its name says and what Intel says
+//! to use it for, and two dozen words cover a whole generator. Where
+//! `rdseed` is absent, `rdrand` is asked instead, and the derivation
+//! function above treats either with the same suspicion.
 
 #![allow(unsafe_code)]
 // Built on every system, so that the tests below run somewhere they
@@ -34,86 +48,121 @@ pub(crate) const AVAILABLE: bool = cfg!(any(
     target_arch = "x86_64"
 ));
 
-/// How many times one word is asked for before giving up. Ten is
-/// what Intel suggests, and these instructions are specified to
-/// report a generator that has actually failed rather than simply
+/// How many times one word is asked for before giving up. Ten is what
+/// Intel suggests for `rdrand`, and these instructions are specified
+/// to report a generator that has actually failed rather than simply
 /// staying busy, so a bound is safe to have.
 const TRIES: usize = 10;
 
-/// Fills `out` with random bytes from the processor.
-pub(crate) fn fill(out: &mut [u8]) -> Result<(), Error> {
-    for piece in out.chunks_mut(8) {
-        let word = word()?;
-        piece.copy_from_slice(&word.to_ne_bytes()[..piece.len()]);
-    }
-    Ok(())
+/// The same for `rdseed`, which is rate limited by design and needs
+/// more patience: it is gathering, not expanding.
+const SEED_TRIES: usize = 100;
+
+/// The number a system uses for a device that is not working.
+const BROKEN: i32 = 5;
+
+/// The processor's noise source, once it is known to be there.
+///
+/// Holding it rather than looking it up per call keeps `cpuid` out of
+/// the sampling loop, where under a hypervisor it can cost more than
+/// the instruction it is asking about.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Sampler {
+    /// Which instruction answers. A unit on the architectures that
+    /// offer only one.
+    choice: Choice,
 }
 
-/// Eight random bytes from the processor, or a refusal once it has
-/// declined [`TRIES`] times running.
-#[cfg(any(
-    target_arch = "aarch64",
-    target_arch = "riscv64",
-    target_arch = "x86_64"
-))]
-fn word() -> Result<u64, Error> {
-    for _ in 0..TRIES {
-        if let Some(word) = draw() {
-            return Ok(word);
+impl Sampler {
+    /// The processor's noise source, or [`Error::NotSupported`] where
+    /// it has none.
+    pub(crate) fn try_new() -> Result<Self, Error> {
+        Ok(Sampler {
+            choice: Choice::try_new()?,
+        })
+    }
+
+    /// One sixty-four bit sample, or a refusal once the processor has
+    /// declined often enough to mean it is not merely busy.
+    pub(crate) fn draw(&self) -> Result<u64, Error> {
+        for _ in 0..self.choice.tries() {
+            if let Some(word) = self.choice.attempt() {
+                return Ok(word);
+            }
+        }
+        Err(Error::EntropyUnavailable(BROKEN))
+    }
+}
+
+/// Stands back for a moment after a refusal. Intel asks for this, and
+/// it costs nothing when the instruction succeeds first time, which
+/// it nearly always does.
+#[cfg(target_arch = "x86_64")]
+fn pause() {
+    // SAFETY: a hint to the processor; it touches nothing.
+    unsafe { core::arch::asm!("pause", options(nomem, nostack)) };
+}
+
+#[cfg(target_arch = "x86_64")]
+#[derive(Clone, Copy, Debug)]
+enum Choice {
+    /// The raw source, preferred.
+    Seed,
+    /// The generator built on it, where the raw source is absent.
+    Rand,
+}
+
+#[cfg(target_arch = "x86_64")]
+impl Choice {
+    fn try_new() -> Result<Self, Error> {
+        if has_rdseed() {
+            Ok(Choice::Seed)
+        } else if has_rdrand() {
+            Ok(Choice::Rand)
+        } else {
+            Err(Error::NotSupported)
         }
     }
-    // The number a system uses for a device that is not working.
-    Err(Error::EntropyUnavailable(5))
-}
 
-#[cfg(not(any(
-    target_arch = "aarch64",
-    target_arch = "riscv64",
-    target_arch = "x86_64"
-)))]
-fn word() -> Result<u64, Error> {
-    // The number a system uses for a call it does not implement.
-    Err(Error::EntropyUnavailable(38))
-}
+    fn tries(&self) -> usize {
+        match self {
+            Choice::Seed => SEED_TRIES,
+            Choice::Rand => TRIES,
+        }
+    }
 
-/// One attempt at `rdrand`, which reports whether it had anything to
-/// give in the carry flag.
-///
-/// `rdrand`, not `rdseed`. The two look interchangeable and are not.
-/// `rdseed` is the raw entropy source, deliberately rate limited, and
-/// asking it for a buffer's worth in a row exhausts it: this was
-/// written with `rdseed` first and the tests refused the second call.
-/// `rdrand` is what the processor builds on top, a generator of the
-/// approved kind reseeded from that source, and it is the one Intel
-/// says to use for random numbers rather than for seeding. Since
-/// nothing here keeps a generator of its own, that is exactly the job.
-#[cfg(target_arch = "x86_64")]
-fn draw() -> Option<u64> {
-    if !has_rdrand() {
-        return None;
+    fn attempt(&self) -> Option<u64> {
+        let word: u64;
+        let ok: u8;
+        // SAFETY: neither instruction touches memory, and the one
+        // named was confirmed present before this sampler was built.
+        // Each reports in the carry flag whether it had anything to
+        // give, so neither can claim to preserve the flags.
+        unsafe {
+            match self {
+                Choice::Seed => core::arch::asm!(
+                    "rdseed {word}",
+                    "setc {ok}",
+                    word = out(reg) word,
+                    ok = out(reg_byte) ok,
+                    options(nomem, nostack),
+                ),
+                Choice::Rand => core::arch::asm!(
+                    "rdrand {word}",
+                    "setc {ok}",
+                    word = out(reg) word,
+                    ok = out(reg_byte) ok,
+                    options(nomem, nostack),
+                ),
+            }
+        }
+        if ok == 0 {
+            // Busy rather than broken.
+            pause();
+            return None;
+        }
+        Some(word)
     }
-    let word: u64;
-    let ok: u8;
-    // SAFETY: the instruction touches no memory, and was confirmed
-    // present just above.
-    unsafe {
-        core::arch::asm!(
-            "rdrand {word}",
-            "setc {ok}",
-            word = out(reg) word,
-            ok = out(reg_byte) ok,
-            options(nomem, nostack),
-        );
-    }
-    if ok == 0 {
-        // Busy rather than broken. Standing back for a moment is what
-        // Intel asks for, and costs nothing when it succeeds first
-        // time, which it nearly always does.
-        // SAFETY: a hint to the processor; it touches nothing.
-        unsafe { core::arch::asm!("pause", options(nomem, nostack)) };
-        return None;
-    }
-    Some(word)
 }
 
 /// Whether the processor has `rdrand` (CPUID leaf 1, ECX bit 30).
@@ -122,92 +171,160 @@ fn has_rdrand() -> bool {
     core::arch::x86_64::__cpuid(1).ecx & (1 << 30) != 0
 }
 
-/// One attempt at `rndr`, which reports failure by setting the zero
-/// flag and returning nothing.
-#[cfg(target_arch = "aarch64")]
-fn draw() -> Option<u64> {
-    if !has_rndr() {
-        return None;
-    }
-    let word: u64;
-    let failed: u64;
-    // SAFETY: reads a register the architecture provides for this,
-    // confirmed present just above. It touches no memory, but it does
-    // set the flags, so it cannot claim to preserve them.
-    unsafe {
-        core::arch::asm!(
-            // Named by its encoding rather than as RNDR, which the
-            // assembler only accepts when told the target has it.
-            // This always assembles, and the check above is what
-            // decides whether it runs.
-            "mrs {word}, S3_3_C2_C4_0",
-            "cset {failed}, eq",
-            word = out(reg) word,
-            failed = out(reg) failed,
-            options(nomem, nostack),
-        );
-    }
-    (failed == 0).then_some(word)
+/// Whether the processor has `rdseed` (CPUID leaf 7, subleaf 0, EBX
+/// bit 18), on a processor that reports that leaf at all.
+#[cfg(target_arch = "x86_64")]
+fn has_rdseed() -> bool {
+    core::arch::x86_64::__cpuid(0).eax >= 7
+        && core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 18) != 0
 }
 
-/// Whether the processor has `rndr` (ID_AA64ISAR0_EL1 bits 63:60).
 #[cfg(target_arch = "aarch64")]
-fn has_rndr() -> bool {
-    let isar0: u64;
-    // SAFETY: reads an identification register, which is what they
-    // are for; no memory is touched.
-    unsafe {
-        core::arch::asm!(
-            "mrs {}, ID_AA64ISAR0_EL1",
-            out(reg) isar0,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-    isar0 >> 60 != 0
-}
+#[derive(Clone, Copy, Debug)]
+struct Choice;
 
-/// One attempt at the `seed` register, which yields sixteen bits at a
-/// time and says in its top half whether those bits are any good.
-///
-/// Four reads make a word. A read that is still warming up is not a
-/// failure, so it does not count against the attempts; a generator
-/// reporting itself broken is, and stops immediately.
-#[cfg(target_arch = "riscv64")]
-fn draw() -> Option<u64> {
-    /// The register's verdict, in bits 31:16 of what it returns.
-    const WAIT: u64 = 1;
-    const READY: u64 = 2;
-
-    let mut word = 0u64;
-    for half in 0..4 {
-        let mut got = None;
-        for _ in 0..TRIES {
-            let seed: u64;
-            // SAFETY: reads the register the Zkr extension provides
-            // for this. Reading it consumes entropy, so it can be
-            // neither dropped nor repeated: not `nomem`, not `pure`.
-            unsafe {
-                core::arch::asm!(
-                    "csrrw {seed}, 0x015, x0",
-                    seed = out(reg) seed,
-                    options(nostack, preserves_flags),
-                );
-            }
-            match seed >> 16 {
-                READY => {
-                    got = Some(seed & 0xffff);
-                    break;
-                }
-                // Still gathering. Worth asking again.
-                WAIT => continue,
-                // Self-test, or reporting itself dead. Neither will
-                // improve by asking again.
-                _ => return None,
-            }
+#[cfg(target_arch = "aarch64")]
+impl Choice {
+    /// Whether the processor has `rndr` (ID_AA64ISAR0_EL1 bits
+    /// 63:60).
+    fn try_new() -> Result<Self, Error> {
+        let isar0: u64;
+        // SAFETY: reads an identification register, which is what
+        // they are for; no memory is touched.
+        unsafe {
+            core::arch::asm!(
+                "mrs {}, ID_AA64ISAR0_EL1",
+                out(reg) isar0,
+                options(nomem, nostack, preserves_flags),
+            );
         }
-        word |= got? << (16 * half);
+        if isar0 >> 60 != 0 {
+            Ok(Choice)
+        } else {
+            Err(Error::NotSupported)
+        }
     }
-    Some(word)
+
+    fn tries(&self) -> usize {
+        TRIES
+    }
+
+    /// One attempt at `rndr`, which reports failure by setting the
+    /// zero flag and returning nothing.
+    fn attempt(&self) -> Option<u64> {
+        let word: u64;
+        let failed: u64;
+        // SAFETY: reads a register the architecture provides for
+        // this, confirmed present when this sampler was built. It
+        // touches no memory, but it does set the flags, so it cannot
+        // claim to preserve them.
+        unsafe {
+            core::arch::asm!(
+                // Named by its encoding rather than as RNDR, which
+                // the assembler only accepts when told the target has
+                // it. This always assembles, and the check above is
+                // what decides whether it runs.
+                "mrs {word}, S3_3_C2_C4_0",
+                "cset {failed}, eq",
+                word = out(reg) word,
+                failed = out(reg) failed,
+                options(nomem, nostack),
+            );
+        }
+        (failed == 0).then_some(word)
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+#[derive(Clone, Copy, Debug)]
+struct Choice;
+
+#[cfg(target_arch = "riscv64")]
+impl Choice {
+    /// There is no register to ask whether the `seed` register may be
+    /// read: where the machine has not opened it, reading raises an
+    /// illegal instruction rather than answering. So there is nothing
+    /// to check here, and a machine that has not opened it does not
+    /// reach this code at all.
+    fn try_new() -> Result<Self, Error> {
+        Ok(Choice)
+    }
+
+    fn tries(&self) -> usize {
+        TRIES
+    }
+
+    /// One attempt at the `seed` register, which yields sixteen bits
+    /// at a time and says in its top half whether those bits are any
+    /// good.
+    ///
+    /// Four reads make a word. A read that is still warming up is not
+    /// a failure, so it does not count against the attempts; a
+    /// generator reporting itself broken is, and stops immediately.
+    fn attempt(&self) -> Option<u64> {
+        /// The register's verdict, in bits 31:16 of what it returns.
+        const WAIT: u64 = 1;
+        const READY: u64 = 2;
+
+        let mut word = 0u64;
+        for half in 0..4 {
+            let mut got = None;
+            for _ in 0..TRIES {
+                let seed: u64;
+                // SAFETY: reads the register the Zkr extension
+                // provides for this. Reading it consumes entropy, so
+                // it can be neither dropped nor repeated: not
+                // `nomem`, not `pure`.
+                unsafe {
+                    core::arch::asm!(
+                        "csrrw {seed}, 0x015, x0",
+                        seed = out(reg) seed,
+                        options(nostack, preserves_flags),
+                    );
+                }
+                match seed >> 16 {
+                    READY => {
+                        got = Some(seed & 0xffff);
+                        break;
+                    }
+                    // Still gathering. Worth asking again.
+                    WAIT => continue,
+                    // Self-test, or reporting itself dead. Neither
+                    // will improve by asking again.
+                    _ => return None,
+                }
+            }
+            word |= got? << (16 * half);
+        }
+        Some(word)
+    }
+}
+
+#[cfg(not(any(
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    target_arch = "x86_64"
+)))]
+#[derive(Clone, Copy, Debug)]
+struct Choice;
+
+#[cfg(not(any(
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    target_arch = "x86_64"
+)))]
+impl Choice {
+    fn try_new() -> Result<Self, Error> {
+        Err(Error::NotSupported)
+    }
+
+    fn tries(&self) -> usize {
+        TRIES
+    }
+
+    fn attempt(&self) -> Option<u64> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -226,48 +343,51 @@ mod tests {
     const TESTABLE: bool =
         cfg!(any(target_arch = "aarch64", target_arch = "x86_64"));
 
-    /// The processor's own generator, where the machine running the
-    /// tests has one, must behave like any other source.
+    /// The processor's own noise source, where the machine running
+    /// the tests has one, must produce samples that differ.
     #[test]
-    fn the_processor_fills_a_buffer() {
+    fn the_processor_draws_samples() {
         if !TESTABLE || !AVAILABLE {
             return;
         }
-        let mut first = [0u8; 64];
-        if fill(&mut first).is_err() {
+        let Ok(sampler) = Sampler::try_new() else {
             // No such instruction on this particular processor.
             return;
-        }
-        let mut second = [0u8; 64];
-        fill(&mut second).expect("second");
+        };
+        let first = sampler.draw().expect("first");
+        let second = sampler.draw().expect("second");
         assert_ne!(first, second);
-
-        let set: u32 = first.iter().map(|b| b.count_ones()).sum();
-        assert!((190..=326).contains(&set), "{set} bits set of 512");
+        assert_ne!(first, 0);
+        assert_ne!(first, u64::MAX);
     }
 
-    /// Lengths that are not a whole number of words must still be
-    /// filled exactly, without running past the end.
+    /// Enough draws in a row to seed a generator many times over must
+    /// all succeed. This is the case that failed when `rdseed` was
+    /// being asked for output rather than for a seed, so it is worth
+    /// asking for rather more than one seed's worth.
     #[test]
-    fn odd_lengths_stay_inside_the_buffer() {
+    fn a_burst_of_draws_all_succeed() {
         if !TESTABLE || !AVAILABLE {
             return;
         }
-        const PAD: usize = 16;
-        let mut buf = [0xaau8; PAD + 40 + PAD];
-        for len in [0, 1, 7, 8, 9, 31, 40] {
-            buf.fill(0xaa);
-            if fill(&mut buf[PAD..PAD + len]).is_err() {
-                return;
-            }
-            assert!(
-                buf[..PAD].iter().all(|&b| b == 0xaa),
-                "{len}: wrote before the start"
-            );
-            assert!(
-                buf[PAD + len..].iter().all(|&b| b == 0xaa),
-                "{len}: wrote past the end"
-            );
+        let Ok(sampler) = Sampler::try_new() else {
+            return;
+        };
+        let mut previous = 0;
+        for n in 0..512 {
+            let word = sampler.draw().unwrap_or_else(|e| panic!("{n}: {e}"));
+            assert_ne!(word, previous, "{n}: repeated");
+            previous = word;
         }
+    }
+
+    /// Where there is no instruction, the refusal comes at
+    /// construction rather than at every use.
+    #[test]
+    fn a_processor_without_one_refuses_at_construction() {
+        if AVAILABLE {
+            return;
+        }
+        assert_eq!(Sampler::try_new().err(), Some(Error::NotSupported));
     }
 }

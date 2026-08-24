@@ -16,6 +16,7 @@ pub mod aes_kwp;
 pub mod aes_ofb;
 pub mod aes_xpn;
 pub mod aes_xts;
+pub mod ctr_drbg;
 
 use serde_json::Value;
 

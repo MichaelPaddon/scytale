@@ -9,7 +9,7 @@ on it, and random numbers.
 
 **Correct.** Every implementation is checked against the standard
 test vectors and against the NIST Automated Cryptographic Validation
-Program (ACVP) vectors: 14,750 one-shot cases and 3600 Monte Carlo
+Program (ACVP) vectors: 14,765 one-shot cases and 3600 Monte Carlo
 steps, the latter being 3.6 million chained cipher calls with the key
 re-derived at each step. Each case runs against every implementation
 the processor supports, not just one. Every implementation is also
@@ -29,8 +29,9 @@ works anywhere, with no lookup tables and no data-dependent branches,
 so it is constant time. The accelerated versions are additions to
 that, never a requirement.
 
-**No setup.** The library is `no_std`, still has one dependency
-(`zeroize`), and builds with nothing but a stable Rust toolchain: no
+**No setup.** The library is `no_std`, has two dependencies
+(`zeroize`, and `getrandom` where there is an operating system to
+ask), and builds with nothing but a stable Rust toolchain: no
 C compiler, no build script, no feature flags, no target-specific
 compiler options. Which implementation to run is decided at run time,
 by asking the processor what it supports, so one binary works across
@@ -61,28 +62,61 @@ simply the one there is so far.
 ## Random numbers
 
 Keys and initialisation vectors need randomness, so `scytale::random`
-provides it, asking afresh every call. Nothing is kept between calls:
-a generator held in the process would have state, and `fork` or a
-restored virtual machine snapshot duplicates state, which repeats a
-nonce and loses the key.
+provides a generator you hold:
 
-| Where it runs | What it asks |
+```rust
+use scytale::random::{Random, Rng, System};
+
+let mut rng = Rng::try_new(System::try_new()?)?;
+let mut key = [0u8; 32];
+rng.fill(&mut key)?;
+```
+
+It is the CTR_DRBG of NIST SP 800-90A: AES-256 driven by a counter,
+with its key and counter replaced after every request, checked
+against the ACVP vectors for that mechanism alongside everything
+else. Seed material of any length and any density is condensed by the
+standard's derivation function, so entropy from a slow or biased
+source is worth its full weight.
+
+| Where it runs | What seeds it |
 | --- | --- |
-| Linux | the `getrandom` system call, made directly |
-| Apple systems, the BSDs, Solaris | `getentropy` |
-| Windows | `ProcessPrng` |
-| No operating system | `rdrand`, `rndr`, or the `seed` register |
+| Linux, Apple systems, the BSDs, Solaris, Windows | the operating system, through `getrandom` |
+| Wasm | the host's crypto object, through the same |
+| No operating system | `rdseed` or `rdrand`, `rndr`, or the `seed` register |
+| Anywhere | entropy you supply, or hardware of your own |
 
-Only Linux promises its system call numbers never change, so only
-there is one made directly, which is what lets it work with no C
-library at all. Elsewhere the stable thing to call is a function the
-platform already provides, and naming one costs no dependency.
+The operating system is asked through the `getrandom` crate rather
+than by writing out each kernel's interface here, which is the one
+dependency beyond `zeroize`. It is not pulled in at all for a target
+with no operating system, and on Linux with no C library it still
+makes the system call directly. On wasm it reaches the surrounding
+JavaScript, which costs every other target nothing: the binding is
+asked for only on that target.
 
-With no operating system there is nobody to ask but the processor,
-and none of the reasons to prefer a kernel apply. Where the processor
-has no such instruction either, the answer is a refusal, and a board
-with a generator of its own is reached through the `random::Random`
-trait.
+With no operating system there is nobody to ask but the processor.
+Those instructions can fail without saying so, and parts have shipped
+that return all ones while reporting success, so the raw samples are
+health tested in the manner of SP 800-90B: a startup test of a
+thousand samples when the source is constructed, and a repetition
+count and adaptive proportion test on every sample after that. A
+processor whose generator is dead or stuck yields no generator at all
+rather than one that hands out its output.
+
+Where the processor has no such instruction either, construction
+fails and the program does not start, rather than every later call
+failing. That is not the end of the road on such a board: a hardware
+generator on a bus, a ring oscillator or a chip on I2C is supplied
+through the `random::Entropy` trait, and entropy gathered some other
+way goes in through `Rng::from_seed`. Either is served exactly as
+well as a machine with an instruction for it.
+
+Because the generator has state, it is yours to look after. After a
+`fork`, or after a virtual machine is restored from a snapshot, the
+state has been duplicated and the child must reseed or start again;
+nothing here can detect that without asking the kernel on every call,
+which is most of the reason to hold a generator at all. The state is
+wiped when the generator is dropped.
 
 Most initialisation vectors need to be *unique* rather than random,
 which is a stronger requirement. `mode::Nonces` counts nonces for GCM

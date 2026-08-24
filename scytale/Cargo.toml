@@ -14,3 +14,20 @@ zeroize = { version = "1", default-features = false, features = ["derive"] }
 
 [dev-dependencies]
 serde_json = "1"
+
+# Only where there is something to ask. A bare metal target has
+# nobody, and takes the processor's own generator instead; the same
+# condition selects `System`'s body in src/random/source/mod.rs, and
+# the two have to agree.
+[target.'cfg(not(target_os = "none"))'.dependencies]
+getrandom = { version = "0.4.3", default-features = false }
+
+# Wasm with no host interface of its own reaches the surrounding
+# JavaScript, which is where that target runs. The feature is asked
+# for here rather than in the entry above so that no other target sees
+# it: `wasm-bindgen` and `js-sys` are gated to OS-less wasm inside
+# `getrandom` too, so nothing else gains a dependency.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4.3", default-features = false, features = [
+    "wasm_js",
+] }

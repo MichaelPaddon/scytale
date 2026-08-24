@@ -12,7 +12,7 @@ use support::acvp::{
     aes_cbc as cbc, aes_cfb1 as cfb1, aes_cfb128 as cfb128, aes_cfb8 as cfb8,
     aes_ctr as ctr, aes_ecb as ecb, aes_ff1 as ff1, aes_ff3_1 as ff3_1,
     aes_gcm as gcm, aes_gcm_siv as gcm_siv, aes_kw as kw, aes_kwp as kwp,
-    aes_ofb as ofb, aes_xpn as xpn, aes_xts as xts,
+    aes_ofb as ofb, aes_xpn as xpn, aes_xts as xts, ctr_drbg as drbg,
 };
 
 /// Defines the suites for an implementation that is always
@@ -236,4 +236,16 @@ mod aes_kw {
 /// from one byte up. This suite has no Monte Carlo test.
 mod aes_kwp {
     every_aes!(kwp, aft_only);
+}
+
+/// The CTR_DRBG random number generator (SP 800-90A). Not generic
+/// over a block cipher: it is AES-256 by construction, so there is
+/// one run rather than one per implementation.
+mod ctr_drbg {
+    use super::*;
+
+    #[test]
+    fn acvp_aft() {
+        drbg::run_aft();
+    }
 }

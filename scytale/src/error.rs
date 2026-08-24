@@ -47,6 +47,10 @@ pub enum Error {
     /// A nonce sequence has issued every value it holds. Carrying on
     /// would repeat one, so it stops instead.
     SequenceExhausted,
+    /// A generator has drawn as much as it may from one seeding, and
+    /// has no source of its own to reseed from. Supply fresh entropy
+    /// before asking again.
+    ReseedRequired,
 }
 
 impl fmt::Display for Error {
@@ -86,6 +90,9 @@ impl fmt::Display for Error {
             }
             Error::SequenceExhausted => {
                 write!(f, "nonce sequence exhausted")
+            }
+            Error::ReseedRequired => {
+                write!(f, "generator needs fresh entropy")
             }
         }
     }
@@ -134,6 +141,10 @@ mod tests {
         assert_eq!(
             render(Error::SequenceExhausted, &mut buf),
             "nonce sequence exhausted"
+        );
+        assert_eq!(
+            render(Error::ReseedRequired, &mut buf),
+            "generator needs fresh entropy"
         );
     }
 

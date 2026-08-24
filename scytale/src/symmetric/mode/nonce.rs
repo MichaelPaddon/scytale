@@ -37,13 +37,15 @@
 //! # Example
 //!
 //! ```
+//! use scytale::random::{Rng, System};
 //! use scytale::symmetric::aes::Aes;
 //! use scytale::symmetric::mode::{Gcm, Nonces};
 //! use scytale::symmetric::BlockCipher;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let gcm = Gcm::try_new(Aes::try_new(&[0u8; 16])?)?;
-//! let mut nonces = Nonces::random()?;
+//! let mut rng = Rng::try_new(System::try_new()?)?;
+//! let mut nonces = Nonces::random(&mut rng)?;
 //!
 //! let mut message = *b"hello";
 //! let mut tag = [0u8; 16];
@@ -56,7 +58,7 @@
 //! # }
 //! ```
 
-use crate::random;
+use crate::random::Random;
 use crate::Error;
 
 /// The nonce length this builds, in bytes.
@@ -76,15 +78,15 @@ pub struct Nonces {
 }
 
 impl Nonces {
-    /// A sequence under a prefix of the operating system's choosing,
-    /// counting from zero.
+    /// A sequence under a prefix drawn from `source`, counting from
+    /// zero.
     ///
     /// For programs that cannot store a counter between runs. Each
     /// run gets a prefix of its own, so the sequences do not overlap
     /// unless two runs draw the same sixty-four bits.
-    pub fn random() -> Result<Self, Error> {
+    pub fn random(source: &mut impl Random) -> Result<Self, Error> {
         let mut prefix = [0u8; 8];
-        random::fill(&mut prefix)?;
+        source.fill(&mut prefix)?;
         Ok(Nonces::new(u64::from_be_bytes(prefix), 0))
     }
 
@@ -128,6 +130,8 @@ impl Nonces {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::random::{Rng, MIN_SEED};
 
     /// The layout the standard describes: the prefix unchanged in
     /// every nonce, the counter advancing by one, most significant
@@ -183,8 +187,9 @@ mod tests {
     /// overlap, which rests entirely on the prefix differing.
     #[test]
     fn separate_runs_get_separate_prefixes() {
-        let one = Nonces::random().expect("random");
-        let two = Nonces::random().expect("random");
+        let mut rng = Rng::from_seed(&[0x5au8; MIN_SEED]).expect("seed");
+        let one = Nonces::random(&mut rng).expect("random");
+        let two = Nonces::random(&mut rng).expect("random");
         assert_ne!(one.prefix, two.prefix);
     }
 }
