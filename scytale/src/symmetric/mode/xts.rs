@@ -58,7 +58,7 @@
 
 use super::ghash::BLOCK;
 use super::{xor, LANES};
-use crate::symmetric::BlockCipher;
+use crate::symmetric::{Block, BlockCipher};
 use crate::util;
 use crate::Error;
 
@@ -69,21 +69,13 @@ pub struct Xts<C> {
     tweak: C,
 }
 
-impl<C: BlockCipher> Xts<C> {
+impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
     /// Takes the two keys joined together, the first half for the
     /// data and the second for the tweak.
     ///
     /// The halves must differ: XTS with one key repeated is a weaker
     /// construction, and the standard forbids it.
-    ///
-    /// # Panics
-    /// If the cipher's block is not 128 bits.
     pub fn try_new(key: &[u8]) -> Result<Self, Error> {
-        assert_eq!(
-            C::BLOCK_SIZE,
-            BLOCK,
-            "XTS is defined only for a 128-bit block cipher"
-        );
         if !key.len().is_multiple_of(2) {
             return Err(Error::InvalidKeyLength(key.len()));
         }
@@ -104,14 +96,16 @@ impl<C: BlockCipher> Xts<C> {
     pub fn encrypt(&self, tweak: &[u8], data: &mut [u8]) -> Result<(), Error> {
         let mut t = self.start(tweak, data.len())?;
         let (whole, stolen) = self.split(data);
-        self.bulk(whole, &mut t, true)?;
+        self.bulk(whole, &mut t, true);
         if let Some((last, short)) = stolen {
+            let last: &mut [u8; BLOCK] =
+                last.try_into().expect("one whole block");
             // The last whole block is encrypted first, then its head
             // becomes the short ciphertext and its tail completes the
             // short plaintext into a block, which is encrypted in the
             // last block's place.
             xor(last, &t);
-            self.data.encrypt_block(last)?;
+            self.data.encrypt_block(last);
             xor(last, &t);
             multiply_by_alpha(&mut t);
 
@@ -122,7 +116,7 @@ impl<C: BlockCipher> Xts<C> {
             short.copy_from_slice(&last[..n]);
 
             xor(&mut carried, &t);
-            self.data.encrypt_block(&mut carried)?;
+            self.data.encrypt_block(&mut carried);
             xor(&mut carried, &t);
             last.copy_from_slice(&carried);
         }
@@ -133,8 +127,10 @@ impl<C: BlockCipher> Xts<C> {
     pub fn decrypt(&self, tweak: &[u8], data: &mut [u8]) -> Result<(), Error> {
         let mut t = self.start(tweak, data.len())?;
         let (whole, stolen) = self.split(data);
-        self.bulk(whole, &mut t, false)?;
+        self.bulk(whole, &mut t, false);
         if let Some((last, short)) = stolen {
+            let last: &mut [u8; BLOCK] =
+                last.try_into().expect("one whole block");
             // The mirror of encryption: the last whole block is
             // decrypted under the *later* tweak, because that is the
             // one it was encrypted with.
@@ -142,7 +138,7 @@ impl<C: BlockCipher> Xts<C> {
             multiply_by_alpha(&mut later);
 
             xor(last, &later);
-            self.data.decrypt_block(last)?;
+            self.data.decrypt_block(last);
             xor(last, &later);
 
             let mut carried = [0u8; BLOCK];
@@ -152,7 +148,7 @@ impl<C: BlockCipher> Xts<C> {
             short.copy_from_slice(&last[..n]);
 
             xor(&mut carried, &t);
-            self.data.decrypt_block(&mut carried)?;
+            self.data.decrypt_block(&mut carried);
             xor(&mut carried, &t);
             last.copy_from_slice(&carried);
         }
@@ -170,7 +166,7 @@ impl<C: BlockCipher> Xts<C> {
         }
         let mut start = [0u8; BLOCK];
         start.copy_from_slice(tweak);
-        self.tweak.encrypt_block(&mut start)?;
+        self.tweak.encrypt_block(&mut start);
         Ok(start)
     }
 
@@ -194,28 +190,27 @@ impl<C: BlockCipher> Xts<C> {
 
     /// Runs the blocks that need no stealing, in groups, advancing
     /// the tweak as it goes.
-    fn bulk(
-        &self,
-        data: &mut [u8],
-        t: &mut [u8; BLOCK],
-        encrypt: bool,
-    ) -> Result<(), Error> {
-        let mut tweaks = [0u8; LANES * BLOCK];
-        for group in data.chunks_mut(LANES * BLOCK) {
-            let n = group.len();
-            for tweak in tweaks[..n].chunks_exact_mut(BLOCK) {
-                tweak.copy_from_slice(t);
+    fn bulk(&self, data: &mut [u8], t: &mut [u8; BLOCK], encrypt: bool) {
+        let (whole, _) = <[u8; BLOCK]>::split_mut(data);
+        let mut tweaks = [[0u8; BLOCK]; LANES];
+        for group in whole.chunks_mut(LANES) {
+            let tweaks = &mut tweaks[..group.len()];
+            for tweak in tweaks.iter_mut() {
+                *tweak = *t;
                 multiply_by_alpha(t);
             }
-            xor(group, &tweaks[..n]);
-            if encrypt {
-                self.data.encrypt_blocks(group)?;
-            } else {
-                self.data.decrypt_blocks(group)?;
+            for (block, tweak) in group.iter_mut().zip(&*tweaks) {
+                xor(block, tweak);
             }
-            xor(group, &tweaks[..n]);
+            if encrypt {
+                self.data.encrypt_blocks(group);
+            } else {
+                self.data.decrypt_blocks(group);
+            }
+            for (block, tweak) in group.iter_mut().zip(&*tweaks) {
+                xor(block, tweak);
+            }
         }
-        Ok(())
     }
 }
 

@@ -52,8 +52,8 @@
 //! # }
 //! ```
 
-use super::{register_from, xor, LANES, MAX_BLOCK_SIZE};
-use crate::symmetric::BlockCipher;
+use super::{register_from, xor, LANES};
+use crate::symmetric::{Block, BlockCipher};
 use crate::Error;
 
 /// Counter mode over a block cipher.
@@ -64,14 +64,7 @@ pub struct Ctr<C> {
 
 impl<C: BlockCipher> Ctr<C> {
     /// Wraps `cipher`.
-    ///
-    /// # Panics
-    /// If the cipher's block is larger than the modes support.
     pub fn new(cipher: C) -> Self {
-        assert!(
-            C::BLOCK_SIZE > 0 && C::BLOCK_SIZE <= MAX_BLOCK_SIZE,
-            "block size is outside the range the modes support"
-        );
         Ctr { cipher }
     }
 
@@ -102,17 +95,26 @@ impl<C: BlockCipher> Ctr<C> {
     pub fn stream(&self, counter: &[u8]) -> Result<Stream<'_, C>, Error> {
         Ok(Stream {
             cipher: &self.cipher,
-            counter: register_from(counter, C::BLOCK_SIZE)?,
-            keystream: [0u8; MAX_BLOCK_SIZE],
-            used: C::BLOCK_SIZE,
+            counter: register_from(counter)?,
+            keystream: C::Block::ZERO,
+            used: C::Block::SIZE,
         })
     }
 }
 
 /// Adds one to a big-endian counter, wrapping round at the top.
+///
+/// A sixteen-byte counter is one 128-bit addition. The byte loop
+/// below is correct for any width, but the compiler cannot see the
+/// width through a slice and unrolls the carry into a branch for
+/// every byte, so the common case says its size out loud.
 #[inline]
-pub(crate) fn increment(counter: &mut [u8]) {
-    for byte in counter.iter_mut().rev() {
+pub(crate) fn increment<B: Block>(counter: &mut B) {
+    if let Ok(block) = <&mut [u8; 16]>::try_from(counter.as_mut()) {
+        *block = u128::from_be_bytes(*block).wrapping_add(1).to_be_bytes();
+        return;
+    }
+    for byte in counter.as_mut().iter_mut().rev() {
         let (sum, carried) = byte.overflowing_add(1);
         *byte = sum;
         if !carried {
@@ -127,11 +129,11 @@ pub(crate) fn increment(counter: &mut [u8]) {
 /// keystream block: the rest of that block is kept for the next one.
 /// There is nothing to finish.
 #[derive(Debug)]
-pub struct Stream<'a, C> {
+pub struct Stream<'a, C: BlockCipher> {
     cipher: &'a C,
-    counter: [u8; MAX_BLOCK_SIZE],
+    counter: C::Block,
     /// The keystream block a previous piece ended inside.
-    keystream: [u8; MAX_BLOCK_SIZE],
+    keystream: C::Block,
     /// Bytes of that block already used. Starts full, so the first
     /// byte generates a block.
     used: usize,
@@ -140,40 +142,40 @@ pub struct Stream<'a, C> {
 impl<C: BlockCipher> Stream<'_, C> {
     /// Applies the keystream to the next piece of the message.
     pub fn update(&mut self, mut data: &mut [u8]) -> Result<(), Error> {
-        let size = C::BLOCK_SIZE;
+        let size = C::Block::SIZE;
 
         // Finish the block a previous piece stopped inside.
         if self.used < size {
             let take = data.len().min(size - self.used);
             let (now, rest) = data.split_at_mut(take);
-            xor(now, &self.keystream[self.used..self.used + take]);
+            xor(now, &self.keystream.as_ref()[self.used..self.used + take]);
             self.used += take;
             data = rest;
         }
 
         // Whole blocks, in groups: their counters are known in
         // advance, so the cipher sees them all at once.
-        let mut blocks = [0u8; LANES * MAX_BLOCK_SIZE];
-        while data.len() >= size {
-            let count = (data.len() / size).min(LANES);
-            let n = count * size;
-            for block in blocks[..n].chunks_exact_mut(size) {
-                block.copy_from_slice(&self.counter[..size]);
-                increment(&mut self.counter[..size]);
+        let (whole, tail) = C::Block::split_mut(data);
+        let mut keystream = [C::Block::ZERO; LANES];
+        for group in whole.chunks_mut(LANES) {
+            let keystream = &mut keystream[..group.len()];
+            for block in keystream.iter_mut() {
+                *block = self.counter;
+                increment(&mut self.counter);
             }
-            self.cipher.encrypt_blocks(&mut blocks[..n])?;
-            let (now, rest) = data.split_at_mut(n);
-            xor(now, &blocks[..n]);
-            data = rest;
+            self.cipher.encrypt_blocks(keystream);
+            for (block, key) in group.iter_mut().zip(&*keystream) {
+                xor(block.as_mut(), key.as_ref());
+            }
         }
 
         // A final piece of a block, whose remainder is kept.
-        if !data.is_empty() {
-            self.keystream[..size].copy_from_slice(&self.counter[..size]);
-            increment(&mut self.counter[..size]);
-            self.cipher.encrypt_block(&mut self.keystream[..size])?;
-            xor(data, &self.keystream[..size]);
-            self.used = data.len();
+        if !tail.is_empty() {
+            self.keystream = self.counter;
+            increment(&mut self.counter);
+            self.cipher.encrypt_block(&mut self.keystream);
+            xor(tail, self.keystream.as_ref());
+            self.used = tail.len();
         }
         Ok(())
     }

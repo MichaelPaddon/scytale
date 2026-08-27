@@ -52,7 +52,7 @@ pub(crate) mod tables;
 use core::fmt;
 
 use crate::symmetric::aes::{expand_words, KeySize, BLOCK_SIZE, MAX_WORDS};
-use crate::symmetric::{as_block, BlockCipher};
+use crate::symmetric::{Block, BlockCipher};
 use crate::Error;
 use tables::{INV_SBOX, SBOX, TD, TE};
 use zeroize::ZeroizeOnDrop;
@@ -141,62 +141,48 @@ impl Aes {
         }
     }
 
-    /// Encrypts every block of `data` in place, independently (ECB).
-    ///
-    /// `data.len()` must be a multiple of 16; nothing is changed
-    /// otherwise.
-    pub fn encrypt_blocks(&self, data: &mut [u8]) -> Result<(), Error> {
-        if !data.len().is_multiple_of(BLOCK_SIZE) {
-            return Err(Error::NotBlockAligned(data.len()));
-        }
+    /// Encrypts every block in place, independently (ECB).
+    pub fn encrypt_blocks(&self, blocks: &mut [[u8; BLOCK_SIZE]]) {
+        let data = Block::flatten_mut(blocks);
         match self.size {
             KeySize::Aes128 => encrypt_many::<10>(&self.enc, data),
             KeySize::Aes192 => encrypt_many::<12>(&self.enc, data),
             KeySize::Aes256 => encrypt_many::<14>(&self.enc, data),
         }
-        Ok(())
     }
 
-    /// Decrypts every block of `data` in place, independently (ECB).
-    ///
-    /// `data.len()` must be a multiple of 16; nothing is changed
-    /// otherwise.
-    pub fn decrypt_blocks(&self, data: &mut [u8]) -> Result<(), Error> {
-        if !data.len().is_multiple_of(BLOCK_SIZE) {
-            return Err(Error::NotBlockAligned(data.len()));
-        }
+    /// Decrypts every block in place, independently (ECB).
+    pub fn decrypt_blocks(&self, blocks: &mut [[u8; BLOCK_SIZE]]) {
+        let data = Block::flatten_mut(blocks);
         match self.size {
             KeySize::Aes128 => decrypt_many::<10>(&self.dec, data),
             KeySize::Aes192 => decrypt_many::<12>(&self.dec, data),
             KeySize::Aes256 => decrypt_many::<14>(&self.dec, data),
         }
-        Ok(())
     }
 }
 
 impl BlockCipher for Aes {
-    const BLOCK_SIZE: usize = BLOCK_SIZE;
+    type Block = [u8; BLOCK_SIZE];
 
     fn try_new(key: &[u8]) -> Result<Self, Error> {
         Aes::try_new(key)
     }
 
-    fn encrypt_block(&self, block: &mut [u8]) -> Result<(), Error> {
-        Aes::encrypt_block(self, as_block(block)?);
-        Ok(())
+    fn encrypt_block(&self, block: &mut Self::Block) {
+        Aes::encrypt_block(self, block)
     }
 
-    fn decrypt_block(&self, block: &mut [u8]) -> Result<(), Error> {
-        Aes::decrypt_block(self, as_block(block)?);
-        Ok(())
+    fn decrypt_block(&self, block: &mut Self::Block) {
+        Aes::decrypt_block(self, block)
     }
 
-    fn encrypt_blocks(&self, data: &mut [u8]) -> Result<(), Error> {
-        Aes::encrypt_blocks(self, data)
+    fn encrypt_blocks(&self, blocks: &mut [Self::Block]) {
+        Aes::encrypt_blocks(self, blocks)
     }
 
-    fn decrypt_blocks(&self, data: &mut [u8]) -> Result<(), Error> {
-        Aes::decrypt_blocks(self, data)
+    fn decrypt_blocks(&self, blocks: &mut [Self::Block]) {
+        Aes::decrypt_blocks(self, blocks)
     }
 }
 
@@ -426,46 +412,25 @@ mod tests {
             let aes = Aes::try_new(&[0x5a; 32][..klen]).unwrap();
             // Lengths cover zero, one lane group, leftovers and more.
             for nblocks in 0..9 {
-                let mut data = [0u8; 8 * BLOCK_SIZE];
-                for (i, b) in data.iter_mut().enumerate() {
+                let mut data = [[0u8; BLOCK_SIZE]; 8];
+                for (i, b) in data.as_flattened_mut().iter_mut().enumerate() {
                     *b = (i * 7 + klen) as u8;
                 }
-                let data = &mut data[..nblocks * BLOCK_SIZE];
-                let mut expected = [0u8; 8 * BLOCK_SIZE];
+                let data = &mut data[..nblocks];
+                let mut expected = [[0u8; BLOCK_SIZE]; 8];
                 let expected = &mut expected[..data.len()];
                 expected.copy_from_slice(data);
-                for block in expected.chunks_exact_mut(BLOCK_SIZE) {
-                    aes.encrypt_block(block.try_into().unwrap());
+                for block in expected.iter_mut() {
+                    aes.encrypt_block(block);
                 }
-                let orig: [u8; 8 * BLOCK_SIZE] = {
-                    let mut o = [0u8; 8 * BLOCK_SIZE];
-                    o[..data.len()].copy_from_slice(data);
-                    o
-                };
+                let mut orig = [[0u8; BLOCK_SIZE]; 8];
+                orig[..data.len()].copy_from_slice(data);
 
-                aes.encrypt_blocks(data).unwrap();
+                aes.encrypt_blocks(data);
                 assert_eq!(data, expected, "encrypt {klen} {nblocks}");
-                aes.decrypt_blocks(data).unwrap();
+                aes.decrypt_blocks(data);
                 assert_eq!(data, &orig[..data.len()], "decrypt {klen}");
             }
-        }
-    }
-
-    #[test]
-    fn blocks_reject_partial_block() {
-        let aes = Aes::try_new(&[0; 16]).unwrap();
-        for n in [1, 15, 17, 31, 33] {
-            let mut data = [0x33u8; 33];
-            let data = &mut data[..n];
-            assert_eq!(
-                aes.encrypt_blocks(data).unwrap_err(),
-                Error::NotBlockAligned(n)
-            );
-            assert_eq!(
-                aes.decrypt_blocks(data).unwrap_err(),
-                Error::NotBlockAligned(n)
-            );
-            assert!(data.iter().all(|&b| b == 0x33), "data untouched");
         }
     }
 
@@ -477,11 +442,11 @@ mod tests {
             <Aes as BlockCipher>::try_new(&[1; 20]).unwrap_err(),
             Error::InvalidKeyLength(20)
         );
-        let mut data = [7u8; 48];
-        BlockCipher::encrypt_blocks(&a, &mut data).unwrap();
-        assert_ne!(data, [7u8; 48]);
-        BlockCipher::decrypt_blocks(&a, &mut data).unwrap();
-        assert_eq!(data, [7u8; 48]);
+        let mut data = [[7u8; BLOCK_SIZE]; 3];
+        BlockCipher::encrypt_blocks(&a, &mut data);
+        assert_ne!(data, [[7u8; BLOCK_SIZE]; 3]);
+        BlockCipher::decrypt_blocks(&a, &mut data);
+        assert_eq!(data, [[7u8; BLOCK_SIZE]; 3]);
     }
 
     #[test]

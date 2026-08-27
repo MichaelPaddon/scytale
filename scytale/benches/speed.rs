@@ -42,7 +42,7 @@ use cpu_time::ThreadTime;
 
 use scytale::symmetric::aes::portable;
 use scytale::symmetric::mode::{Cbc, Ctr, Gcm, GcmSiv, Xts};
-use scytale::symmetric::{aes, BlockCipher};
+use scytale::symmetric::{aes, Block, BlockCipher};
 use scytale::Error;
 
 /// Buffer sizes reported, the ones `openssl speed` uses.
@@ -221,7 +221,7 @@ fn report(options: &Options) -> ExitCode {
 ///
 /// An implementation the processor cannot run is left out rather than
 /// reported as nothing, and so is one every filter rejected.
-fn section<C: BlockCipher>(
+fn section<C: BlockCipher<Block = [u8; 16]>>(
     implementation: &str,
     options: &Options,
 ) -> bool {
@@ -275,7 +275,7 @@ const ALGORITHMS: [&str; 12] = [
 
 /// Everything an implementation's rows are built from, held together
 /// so that the borrows in [`Keys::tasks`] all have one owner.
-struct Keys<C> {
+struct Keys<C: BlockCipher> {
     ecb128: C,
     ecb256: C,
     cbc: Cbc<C>,
@@ -311,7 +311,7 @@ const TWEAK: [u8; 16] = [0x3c; 16];
 /// the wipe on a bad tag out of the measurement.
 const CHECKED_TAG: [u8; 16] = [0; 16];
 
-impl<C: BlockCipher> Keys<C> {
+impl<C: BlockCipher<Block = [u8; 16]>> Keys<C> {
     fn try_new() -> Result<Self, Error> {
         Ok(Keys {
             ecb128: C::try_new(&KEY128)?,
@@ -350,19 +350,19 @@ impl<C: BlockCipher> Keys<C> {
             (
                 "aes-128-ecb-enc",
                 Box::new(|d: &mut [u8]| {
-                    let _ = ecb128.encrypt_blocks(d);
+                    ecb128.encrypt_blocks(blocks_of(d));
                 }) as Operation<'_>,
             ),
             (
                 "aes-128-ecb-dec",
                 Box::new(|d: &mut [u8]| {
-                    let _ = ecb128.decrypt_blocks(d);
+                    ecb128.decrypt_blocks(blocks_of(d));
                 }),
             ),
             (
                 "aes-256-ecb-enc",
                 Box::new(|d: &mut [u8]| {
-                    let _ = ecb256.encrypt_blocks(d);
+                    ecb256.encrypt_blocks(blocks_of(d));
                 }),
             ),
             (
@@ -427,6 +427,14 @@ impl<C: BlockCipher> Keys<C> {
             ),
         ]
     }
+}
+
+/// The whole blocks of `data`. Every size the benchmark uses is a
+/// multiple of the block, so nothing is ever left over.
+fn blocks_of(data: &mut [u8]) -> &mut [[u8; 16]] {
+    let (blocks, rest) = <[u8; 16]>::split_mut(data);
+    debug_assert!(rest.is_empty());
+    blocks
 }
 
 /// The column headings, the buffer sizes.

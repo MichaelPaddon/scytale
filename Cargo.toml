@@ -5,6 +5,9 @@ members = ["scytale", "scytale-cli"]
 [workspace.package]
 version = "0.3.0"
 edition = "2021"
+# `as_chunks_mut`, which turns a byte slice into cipher blocks without
+# unsafe, landed in 1.88.
+rust-version = "1.88"
 license = "BSD-2-Clause"
 
 # The test suites do a great deal of cipher work: the ACVP Monte

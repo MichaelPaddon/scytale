@@ -34,7 +34,7 @@
 //! # }
 //! ```
 
-use super::{register_from, shift_in_byte, MAX_BLOCK_SIZE};
+use super::{register_from, shift_in_byte};
 use crate::symmetric::BlockCipher;
 use crate::Error;
 
@@ -46,14 +46,7 @@ pub struct Cfb8<C> {
 
 impl<C: BlockCipher> Cfb8<C> {
     /// Wraps `cipher`.
-    ///
-    /// # Panics
-    /// If the cipher's block is larger than the modes support.
     pub fn new(cipher: C) -> Self {
-        assert!(
-            C::BLOCK_SIZE > 0 && C::BLOCK_SIZE <= MAX_BLOCK_SIZE,
-            "block size is outside the range the modes support"
-        );
         Cfb8 { cipher }
     }
 
@@ -72,7 +65,7 @@ impl<C: BlockCipher> Cfb8<C> {
     pub fn encryptor(&self, iv: &[u8]) -> Result<Encryptor<'_, C>, Error> {
         Ok(Encryptor {
             cipher: &self.cipher,
-            register: register_from(iv, C::BLOCK_SIZE)?,
+            register: register_from(iv)?,
         })
     }
 
@@ -80,7 +73,7 @@ impl<C: BlockCipher> Cfb8<C> {
     pub fn decryptor(&self, iv: &[u8]) -> Result<Decryptor<'_, C>, Error> {
         Ok(Decryptor {
             cipher: &self.cipher,
-            register: register_from(iv, C::BLOCK_SIZE)?,
+            register: register_from(iv)?,
         })
     }
 }
@@ -88,21 +81,19 @@ impl<C: BlockCipher> Cfb8<C> {
 /// Encrypts one message, a piece at a time. Pieces may be any
 /// length; there is nothing to finish.
 #[derive(Debug)]
-pub struct Encryptor<'a, C> {
+pub struct Encryptor<'a, C: BlockCipher> {
     cipher: &'a C,
-    register: [u8; MAX_BLOCK_SIZE],
+    register: C::Block,
 }
 
 impl<C: BlockCipher> Encryptor<'_, C> {
     /// Encrypts the next piece of the message in place.
     pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
-        let size = C::BLOCK_SIZE;
-        let mut keystream = [0u8; MAX_BLOCK_SIZE];
         for byte in data.iter_mut() {
-            keystream[..size].copy_from_slice(&self.register[..size]);
-            self.cipher.encrypt_block(&mut keystream[..size])?;
-            *byte ^= keystream[0];
-            shift_in_byte(&mut self.register[..size], *byte);
+            let mut keystream = self.register;
+            self.cipher.encrypt_block(&mut keystream);
+            *byte ^= keystream.as_ref()[0];
+            shift_in_byte(self.register.as_mut(), *byte);
         }
         Ok(())
     }
@@ -111,24 +102,22 @@ impl<C: BlockCipher> Encryptor<'_, C> {
 /// Decrypts one message, a piece at a time. Pieces may be any
 /// length; there is nothing to finish.
 #[derive(Debug)]
-pub struct Decryptor<'a, C> {
+pub struct Decryptor<'a, C: BlockCipher> {
     cipher: &'a C,
-    register: [u8; MAX_BLOCK_SIZE],
+    register: C::Block,
 }
 
 impl<C: BlockCipher> Decryptor<'_, C> {
     /// Decrypts the next piece of the message in place.
     pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
-        let size = C::BLOCK_SIZE;
-        let mut keystream = [0u8; MAX_BLOCK_SIZE];
         for byte in data.iter_mut() {
-            keystream[..size].copy_from_slice(&self.register[..size]);
-            self.cipher.encrypt_block(&mut keystream[..size])?;
+            let mut keystream = self.register;
+            self.cipher.encrypt_block(&mut keystream);
             // The register takes the ciphertext, so save it before
             // the byte becomes plaintext.
             let ciphertext = *byte;
-            *byte ^= keystream[0];
-            shift_in_byte(&mut self.register[..size], ciphertext);
+            *byte ^= keystream.as_ref()[0];
+            shift_in_byte(self.register.as_mut(), ciphertext);
         }
         Ok(())
     }

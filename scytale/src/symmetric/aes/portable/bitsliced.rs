@@ -35,7 +35,7 @@
 use core::fmt;
 
 use crate::symmetric::aes::{expand_words, KeySize, BLOCK_SIZE};
-use crate::symmetric::{as_block, BlockCipher};
+use crate::symmetric::{Block, BlockCipher};
 use crate::Error;
 use zeroize::ZeroizeOnDrop;
 
@@ -117,62 +117,48 @@ impl Aes {
         }
     }
 
-    /// Encrypts every block of `data` in place, independently (ECB).
-    ///
-    /// `data.len()` must be a multiple of 16; nothing is changed
-    /// otherwise.
-    pub fn encrypt_blocks(&self, data: &mut [u8]) -> Result<(), Error> {
-        if !data.len().is_multiple_of(BLOCK_SIZE) {
-            return Err(Error::NotBlockAligned(data.len()));
-        }
+    /// Encrypts every block in place, independently (ECB).
+    pub fn encrypt_blocks(&self, blocks: &mut [[u8; BLOCK_SIZE]]) {
+        let data = Block::flatten_mut(blocks);
         match self.size {
             KeySize::Aes128 => encrypt_many::<10>(&self.keys, data),
             KeySize::Aes192 => encrypt_many::<12>(&self.keys, data),
             KeySize::Aes256 => encrypt_many::<14>(&self.keys, data),
         }
-        Ok(())
     }
 
-    /// Decrypts every block of `data` in place, independently (ECB).
-    ///
-    /// `data.len()` must be a multiple of 16; nothing is changed
-    /// otherwise.
-    pub fn decrypt_blocks(&self, data: &mut [u8]) -> Result<(), Error> {
-        if !data.len().is_multiple_of(BLOCK_SIZE) {
-            return Err(Error::NotBlockAligned(data.len()));
-        }
+    /// Decrypts every block in place, independently (ECB).
+    pub fn decrypt_blocks(&self, blocks: &mut [[u8; BLOCK_SIZE]]) {
+        let data = Block::flatten_mut(blocks);
         match self.size {
             KeySize::Aes128 => decrypt_many::<10>(&self.keys, data),
             KeySize::Aes192 => decrypt_many::<12>(&self.keys, data),
             KeySize::Aes256 => decrypt_many::<14>(&self.keys, data),
         }
-        Ok(())
     }
 }
 
 impl BlockCipher for Aes {
-    const BLOCK_SIZE: usize = BLOCK_SIZE;
+    type Block = [u8; BLOCK_SIZE];
 
     fn try_new(key: &[u8]) -> Result<Self, Error> {
         Aes::try_new(key)
     }
 
-    fn encrypt_block(&self, block: &mut [u8]) -> Result<(), Error> {
-        Aes::encrypt_block(self, as_block(block)?);
-        Ok(())
+    fn encrypt_block(&self, block: &mut Self::Block) {
+        Aes::encrypt_block(self, block)
     }
 
-    fn decrypt_block(&self, block: &mut [u8]) -> Result<(), Error> {
-        Aes::decrypt_block(self, as_block(block)?);
-        Ok(())
+    fn decrypt_block(&self, block: &mut Self::Block) {
+        Aes::decrypt_block(self, block)
     }
 
-    fn encrypt_blocks(&self, data: &mut [u8]) -> Result<(), Error> {
-        Aes::encrypt_blocks(self, data)
+    fn encrypt_blocks(&self, blocks: &mut [Self::Block]) {
+        Aes::encrypt_blocks(self, blocks)
     }
 
-    fn decrypt_blocks(&self, data: &mut [u8]) -> Result<(), Error> {
-        Aes::decrypt_blocks(self, data)
+    fn decrypt_blocks(&self, blocks: &mut [Self::Block]) {
+        Aes::decrypt_blocks(self, blocks)
     }
 }
 
@@ -718,21 +704,21 @@ mod tests {
             let tt = portable::Aes::try_new(&key[..klen]).unwrap();
             // Lengths cover zero, partial and whole groups of four.
             for nblocks in 0..MAX {
-                let mut data = [0u8; MAX * BLOCK_SIZE];
-                for (i, b) in data.iter_mut().enumerate() {
+                let mut data = [[0u8; BLOCK_SIZE]; MAX];
+                for (i, b) in data.as_flattened_mut().iter_mut().enumerate() {
                     *b = (i * 13 + klen) as u8;
                 }
-                let data = &mut data[..nblocks * BLOCK_SIZE];
-                let mut expected = [0u8; MAX * BLOCK_SIZE];
+                let data = &mut data[..nblocks];
+                let mut expected = [[0u8; BLOCK_SIZE]; MAX];
                 let expected = &mut expected[..data.len()];
                 expected.copy_from_slice(data);
-                let mut orig = [0u8; MAX * BLOCK_SIZE];
+                let mut orig = [[0u8; BLOCK_SIZE]; MAX];
                 orig[..data.len()].copy_from_slice(data);
 
-                tt.encrypt_blocks(expected).unwrap();
-                bs.encrypt_blocks(data).unwrap();
+                tt.encrypt_blocks(expected);
+                bs.encrypt_blocks(data);
                 assert_eq!(data, expected, "encrypt {klen} {nblocks}");
-                bs.decrypt_blocks(data).unwrap();
+                bs.decrypt_blocks(data);
                 assert_eq!(data, &orig[..data.len()], "decrypt {klen}");
             }
         }
@@ -745,24 +731,6 @@ mod tests {
                 Aes::try_new(&[0; 64][..n]).unwrap_err(),
                 Error::InvalidKeyLength(n)
             );
-        }
-    }
-
-    #[test]
-    fn blocks_reject_partial_block() {
-        let aes = Aes::try_new(&[0; 16]).unwrap();
-        for n in [1, 15, 17, 31, 33] {
-            let mut data = [0x33u8; 33];
-            let data = &mut data[..n];
-            assert_eq!(
-                aes.encrypt_blocks(data).unwrap_err(),
-                Error::NotBlockAligned(n)
-            );
-            assert_eq!(
-                aes.decrypt_blocks(data).unwrap_err(),
-                Error::NotBlockAligned(n)
-            );
-            assert!(data.iter().all(|&b| b == 0x33), "data untouched");
         }
     }
 

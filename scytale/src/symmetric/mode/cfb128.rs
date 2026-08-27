@@ -35,8 +35,8 @@
 //! # }
 //! ```
 
-use super::{register_from, xor, LANES, MAX_BLOCK_SIZE};
-use crate::symmetric::BlockCipher;
+use super::{register_from, xor, LANES};
+use crate::symmetric::{Block, BlockCipher};
 use crate::Error;
 
 /// CFB with 128-bit segments over a block cipher.
@@ -47,14 +47,7 @@ pub struct Cfb128<C> {
 
 impl<C: BlockCipher> Cfb128<C> {
     /// Wraps `cipher`.
-    ///
-    /// # Panics
-    /// If the cipher's block is larger than the modes support.
     pub fn new(cipher: C) -> Self {
-        assert!(
-            C::BLOCK_SIZE > 0 && C::BLOCK_SIZE <= MAX_BLOCK_SIZE,
-            "block size is outside the range the modes support"
-        );
         Cfb128 { cipher }
     }
 
@@ -76,7 +69,7 @@ impl<C: BlockCipher> Cfb128<C> {
     pub fn encryptor(&self, iv: &[u8]) -> Result<Encryptor<'_, C>, Error> {
         Ok(Encryptor {
             cipher: &self.cipher,
-            register: register_from(iv, C::BLOCK_SIZE)?,
+            register: register_from(iv)?,
         })
     }
 
@@ -84,7 +77,7 @@ impl<C: BlockCipher> Cfb128<C> {
     pub fn decryptor(&self, iv: &[u8]) -> Result<Decryptor<'_, C>, Error> {
         Ok(Decryptor {
             cipher: &self.cipher,
-            register: register_from(iv, C::BLOCK_SIZE)?,
+            register: register_from(iv)?,
         })
     }
 }
@@ -94,9 +87,9 @@ impl<C: BlockCipher> Cfb128<C> {
 /// Every piece must be a whole number of blocks. There is nothing to
 /// finish: drop the state when the message ends.
 #[derive(Debug)]
-pub struct Encryptor<'a, C> {
+pub struct Encryptor<'a, C: BlockCipher> {
     cipher: &'a C,
-    register: [u8; MAX_BLOCK_SIZE],
+    register: C::Block,
 }
 
 impl<C: BlockCipher> Encryptor<'_, C> {
@@ -105,16 +98,15 @@ impl<C: BlockCipher> Encryptor<'_, C> {
     /// The register takes the ciphertext just produced, so this runs
     /// one block at a time and cannot use the cipher's bulk path.
     pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
-        let size = C::BLOCK_SIZE;
-        if !data.len().is_multiple_of(size) {
+        let (blocks, rest) = C::Block::split_mut(data);
+        if !rest.is_empty() {
             return Err(Error::NotBlockAligned(data.len()));
         }
-        let mut keystream = [0u8; MAX_BLOCK_SIZE];
-        for block in data.chunks_exact_mut(size) {
-            keystream[..size].copy_from_slice(&self.register[..size]);
-            self.cipher.encrypt_block(&mut keystream[..size])?;
-            xor(block, &keystream[..size]);
-            self.register[..size].copy_from_slice(block);
+        for block in blocks {
+            let mut keystream = self.register;
+            self.cipher.encrypt_block(&mut keystream);
+            xor(block.as_mut(), keystream.as_ref());
+            self.register = *block;
         }
         Ok(())
     }
@@ -125,9 +117,9 @@ impl<C: BlockCipher> Encryptor<'_, C> {
 /// Every piece must be a whole number of blocks. There is nothing to
 /// finish.
 #[derive(Debug)]
-pub struct Decryptor<'a, C> {
+pub struct Decryptor<'a, C: BlockCipher> {
     cipher: &'a C,
-    register: [u8; MAX_BLOCK_SIZE],
+    register: C::Block,
 }
 
 impl<C: BlockCipher> Decryptor<'_, C> {
@@ -138,24 +130,26 @@ impl<C: BlockCipher> Decryptor<'_, C> {
     /// built first and encrypted in one bulk call, unlike encryption,
     /// which has to wait for its own output.
     pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
-        let size = C::BLOCK_SIZE;
-        if !data.len().is_multiple_of(size) {
+        let (blocks, rest) = C::Block::split_mut(data);
+        if !rest.is_empty() {
             return Err(Error::NotBlockAligned(data.len()));
         }
-        let mut seen = [0u8; LANES * MAX_BLOCK_SIZE];
-        let mut keystream = [0u8; LANES * MAX_BLOCK_SIZE];
-        for group in data.chunks_mut(LANES * size) {
+        let mut seen = [C::Block::ZERO; LANES];
+        let mut keystream = [C::Block::ZERO; LANES];
+        for group in blocks.chunks_mut(LANES) {
             let n = group.len();
             let seen = &mut seen[..n];
             seen.copy_from_slice(group);
 
             let keystream = &mut keystream[..n];
-            keystream[..size].copy_from_slice(&self.register[..size]);
-            keystream[size..].copy_from_slice(&seen[..n - size]);
-            self.cipher.encrypt_blocks(keystream)?;
+            keystream[0] = self.register;
+            keystream[1..].copy_from_slice(&seen[..n - 1]);
+            self.cipher.encrypt_blocks(keystream);
 
-            xor(group, keystream);
-            self.register[..size].copy_from_slice(&seen[n - size..]);
+            for (block, key) in group.iter_mut().zip(&*keystream) {
+                xor(block.as_mut(), key.as_ref());
+            }
+            self.register = seen[n - 1];
         }
         Ok(())
     }

@@ -78,31 +78,20 @@ pub struct Kw<C> {
     forward: bool,
 }
 
-impl<C: BlockCipher> Kw<C> {
+impl<C: BlockCipher<Block = [u8; BLOCK]>> Kw<C> {
     /// Wraps with the cipher's forward direction, as RFC 3394
     /// describes.
-    ///
-    /// # Panics
-    /// If the cipher's block is not 128 bits.
     pub fn new(cipher: C) -> Self {
         Kw::with_direction(cipher, true)
     }
 
     /// Wraps with the cipher's inverse direction, the other choice
     /// the standard allows.
-    ///
-    /// # Panics
-    /// If the cipher's block is not 128 bits.
     pub fn new_inverse(cipher: C) -> Self {
         Kw::with_direction(cipher, false)
     }
 
     pub(super) fn with_direction(cipher: C, forward: bool) -> Self {
-        assert_eq!(
-            C::BLOCK_SIZE,
-            BLOCK,
-            "key wrapping is defined only for a 128-bit block cipher"
-        );
         Kw { cipher, forward }
     }
 
@@ -163,7 +152,7 @@ impl<C: BlockCipher> Kw<C> {
 /// check value into one semiblock and taking a new one back out. The
 /// counter that is mixed in differs at every one of the `6n` steps,
 /// which is what stops the semiblocks being reordered.
-pub(super) fn wrap_body<C: BlockCipher>(
+pub(super) fn wrap_body<C: BlockCipher<Block = [u8; BLOCK]>>(
     cipher: &C,
     forward: bool,
     a: &mut [u8; SEMIBLOCK],
@@ -175,7 +164,7 @@ pub(super) fn wrap_body<C: BlockCipher>(
         for (i, semi) in body.chunks_exact_mut(SEMIBLOCK).enumerate() {
             block[..SEMIBLOCK].copy_from_slice(a);
             block[SEMIBLOCK..].copy_from_slice(semi);
-            apply(cipher, forward, &mut block)?;
+            apply(cipher, forward, &mut block);
             let step = n as u64 * round + i as u64 + 1;
             a.copy_from_slice(&block[..SEMIBLOCK]);
             for (byte, count) in a.iter_mut().zip(step.to_be_bytes()) {
@@ -188,7 +177,7 @@ pub(super) fn wrap_body<C: BlockCipher>(
 }
 
 /// The inverse of [`wrap_body`]: the same passes, backwards.
-pub(super) fn unwrap_body<C: BlockCipher>(
+pub(super) fn unwrap_body<C: BlockCipher<Block = [u8; BLOCK]>>(
     cipher: &C,
     forward: bool,
     a: &mut [u8; SEMIBLOCK],
@@ -206,7 +195,7 @@ pub(super) fn unwrap_body<C: BlockCipher>(
                 *byte ^= count;
             }
             block[SEMIBLOCK..].copy_from_slice(semi);
-            apply(cipher, !forward, &mut block)?;
+            apply(cipher, !forward, &mut block);
             a.copy_from_slice(&block[..SEMIBLOCK]);
             semi.copy_from_slice(&block[SEMIBLOCK..]);
         }
@@ -216,11 +205,11 @@ pub(super) fn unwrap_body<C: BlockCipher>(
 
 /// One block through the cipher, in whichever direction this
 /// wrapping was built on.
-pub(super) fn apply<C: BlockCipher>(
+pub(super) fn apply<C: BlockCipher<Block = [u8; BLOCK]>>(
     cipher: &C,
     forward: bool,
     block: &mut [u8; BLOCK],
-) -> Result<(), Error> {
+) {
     if forward {
         cipher.encrypt_block(block)
     } else {

@@ -13,7 +13,7 @@ const FILE: &str = "ACVP-AES-FF1-1.0/internalProjection.json";
 
 /// Runs the one-shot (AFT) groups against `C`; a no-op without the
 /// vendored vectors.
-pub fn run_aft<C: BlockCipher>() {
+pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
     let Some(groups) = groups("AFT") else { return };
     let count: usize = groups
         .iter()
@@ -45,7 +45,10 @@ fn text(values: &[u16], alphabet: &str) -> String {
     values.iter().map(|&v| letters[v as usize]).collect()
 }
 
-fn aft<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
+fn aft<C: BlockCipher<Block = [u8; 16]>>(
+    group: &Value,
+    encrypt: bool,
+) -> usize {
     let alphabet = group["alphabet"].as_str().expect("alphabet");
     let radix = group["radix"].as_u64().expect("radix") as u32;
     let mut count = 0;

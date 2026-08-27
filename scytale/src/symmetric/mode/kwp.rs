@@ -56,31 +56,20 @@ pub struct Kwp<C> {
     forward: bool,
 }
 
-impl<C: BlockCipher> Kwp<C> {
+impl<C: BlockCipher<Block = [u8; BLOCK]>> Kwp<C> {
     /// Wraps with the cipher's forward direction, as RFC 5649
     /// describes.
-    ///
-    /// # Panics
-    /// If the cipher's block is not 128 bits.
     pub fn new(cipher: C) -> Self {
         Kwp::with_direction(cipher, true)
     }
 
     /// Wraps with the cipher's inverse direction, the other choice
     /// the standard allows.
-    ///
-    /// # Panics
-    /// If the cipher's block is not 128 bits.
     pub fn new_inverse(cipher: C) -> Self {
         Kwp::with_direction(cipher, false)
     }
 
     fn with_direction(cipher: C, forward: bool) -> Self {
-        assert_eq!(
-            C::BLOCK_SIZE,
-            BLOCK,
-            "key wrapping is defined only for a 128-bit block cipher"
-        );
         Kwp { cipher, forward }
     }
 
@@ -111,7 +100,7 @@ impl<C: BlockCipher> Kwp<C> {
             let mut block = [0u8; BLOCK];
             block[..SEMIBLOCK].copy_from_slice(&a);
             block[SEMIBLOCK..].copy_from_slice(&out[SEMIBLOCK..]);
-            apply(&self.cipher, self.forward, &mut block)?;
+            apply(&self.cipher, self.forward, &mut block);
             out.copy_from_slice(&block);
             return Ok(total);
         }
@@ -146,7 +135,7 @@ impl<C: BlockCipher> Kwp<C> {
         if wrapped.len() == BLOCK {
             let mut block = [0u8; BLOCK];
             block.copy_from_slice(wrapped);
-            apply(&self.cipher, !self.forward, &mut block)?;
+            apply(&self.cipher, !self.forward, &mut block);
             a.copy_from_slice(&block[..SEMIBLOCK]);
             out.copy_from_slice(&block[SEMIBLOCK..]);
         } else {
@@ -284,7 +273,7 @@ mod tests {
         let mut block = [0u8; BLOCK];
         block[..SEMIBLOCK].copy_from_slice(&a);
         block[SEMIBLOCK..].copy_from_slice(&body);
-        apply(&cipher, true, &mut block).unwrap();
+        apply(&cipher, true, &mut block);
 
         let mut back = [0u8; 8];
         assert_eq!(

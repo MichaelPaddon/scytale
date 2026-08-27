@@ -52,7 +52,7 @@
 use super::ghash::BLOCK;
 use super::polyval::Polyval;
 use super::{xor, LANES};
-use crate::symmetric::BlockCipher;
+use crate::symmetric::{Block, BlockCipher};
 use crate::util;
 use crate::Error;
 
@@ -75,18 +75,10 @@ pub struct GcmSiv<C> {
     key_len: usize,
 }
 
-impl<C: BlockCipher> GcmSiv<C> {
+impl<C: BlockCipher<Block = [u8; BLOCK]>> GcmSiv<C> {
     /// Takes the key that all others are derived from, which must be
     /// 16 or 32 bytes.
-    ///
-    /// # Panics
-    /// If the cipher's block is not 128 bits.
     pub fn try_new(key: &[u8]) -> Result<Self, Error> {
-        assert_eq!(
-            C::BLOCK_SIZE,
-            BLOCK,
-            "GCM-SIV is defined only for a 128-bit block cipher"
-        );
         if key.len() != 16 && key.len() != 32 {
             return Err(Error::InvalidKeyLength(key.len()));
         }
@@ -111,7 +103,7 @@ impl<C: BlockCipher> GcmSiv<C> {
         let full = authenticate(&hash_key, &cipher, nonce, aad, data)?;
         let mut counter = full;
         counter[BLOCK - 1] |= 0x80;
-        apply(&cipher, &mut counter, data)?;
+        apply(&cipher, &mut counter, data);
 
         tag.copy_from_slice(&full);
         Ok(())
@@ -137,7 +129,7 @@ impl<C: BlockCipher> GcmSiv<C> {
         let mut counter = [0u8; BLOCK];
         counter.copy_from_slice(tag);
         counter[BLOCK - 1] |= 0x80;
-        apply(&cipher, &mut counter, data)?;
+        apply(&cipher, &mut counter, data);
 
         let full = authenticate(&hash_key, &cipher, nonce, aad, data)?;
         if util::equal(&full, tag) {
@@ -158,7 +150,7 @@ impl<C: BlockCipher> GcmSiv<C> {
             let mut block = [0u8; BLOCK];
             block[..4].copy_from_slice(&(i as u32).to_le_bytes());
             block[4..BLOCK].copy_from_slice(nonce);
-            self.cipher.encrypt_block(&mut block)?;
+            self.cipher.encrypt_block(&mut block);
             material[i * 8..(i + 1) * 8].copy_from_slice(&block[..8]);
         }
         let mut hash_key = [0u8; BLOCK];
@@ -189,7 +181,7 @@ fn check(
 
 /// The tag for a plaintext: POLYVAL over the additional data, the
 /// message and their lengths, combined with the nonce and encrypted.
-fn authenticate<C: BlockCipher>(
+fn authenticate<C: BlockCipher<Block = [u8; BLOCK]>>(
     hash_key: &[u8; BLOCK],
     cipher: &C,
     nonce: &[u8],
@@ -214,36 +206,36 @@ fn authenticate<C: BlockCipher>(
     // The top bit is cleared here and set again in the counter, which
     // keeps the tag out of the counter's own range.
     tag[BLOCK - 1] &= 0x7f;
-    cipher.encrypt_block(&mut tag)?;
+    cipher.encrypt_block(&mut tag);
     Ok(tag)
 }
 
 /// Counter mode as GCM-SIV defines it: the counter is the first four
 /// bytes, read the little-endian way round.
-fn apply<C: BlockCipher>(
+fn apply<C: BlockCipher<Block = [u8; BLOCK]>>(
     cipher: &C,
     counter: &mut [u8; BLOCK],
-    mut data: &mut [u8],
-) -> Result<(), Error> {
-    let mut blocks = [0u8; LANES * BLOCK];
-    while data.len() >= BLOCK {
-        let n = (data.len() / BLOCK).min(LANES) * BLOCK;
-        for block in blocks[..n].chunks_exact_mut(BLOCK) {
-            block.copy_from_slice(counter);
+    data: &mut [u8],
+) {
+    let (whole, tail) = <[u8; BLOCK]>::split_mut(data);
+    let mut keystream = [[0u8; BLOCK]; LANES];
+    for group in whole.chunks_mut(LANES) {
+        let keystream = &mut keystream[..group.len()];
+        for block in keystream.iter_mut() {
+            *block = *counter;
             increment(counter);
         }
-        cipher.encrypt_blocks(&mut blocks[..n])?;
-        let (now, rest) = data.split_at_mut(n);
-        xor(now, &blocks[..n]);
-        data = rest;
+        cipher.encrypt_blocks(keystream);
+        for (block, key) in group.iter_mut().zip(&*keystream) {
+            xor(block, key);
+        }
     }
-    if !data.is_empty() {
+    if !tail.is_empty() {
         let mut keystream = *counter;
         increment(counter);
-        cipher.encrypt_block(&mut keystream)?;
-        xor(data, &keystream);
+        cipher.encrypt_block(&mut keystream);
+        xor(tail, &keystream);
     }
-    Ok(())
 }
 
 /// Adds one to the first four bytes, least significant first.

@@ -38,8 +38,8 @@
 //! # }
 //! ```
 
-use super::{register_from, xor, MAX_BLOCK_SIZE};
-use crate::symmetric::BlockCipher;
+use super::{register_from, xor};
+use crate::symmetric::{Block, BlockCipher};
 use crate::Error;
 
 /// OFB over a block cipher.
@@ -50,14 +50,7 @@ pub struct Ofb<C> {
 
 impl<C: BlockCipher> Ofb<C> {
     /// Wraps `cipher`.
-    ///
-    /// # Panics
-    /// If the cipher's block is larger than the modes support.
     pub fn new(cipher: C) -> Self {
-        assert!(
-            C::BLOCK_SIZE > 0 && C::BLOCK_SIZE <= MAX_BLOCK_SIZE,
-            "block size is outside the range the modes support"
-        );
         Ofb { cipher }
     }
 
@@ -83,8 +76,8 @@ impl<C: BlockCipher> Ofb<C> {
     pub fn stream(&self, iv: &[u8]) -> Result<Stream<'_, C>, Error> {
         Ok(Stream {
             cipher: &self.cipher,
-            register: register_from(iv, C::BLOCK_SIZE)?,
-            used: C::BLOCK_SIZE,
+            register: register_from(iv)?,
+            used: C::Block::SIZE,
         })
     }
 }
@@ -95,11 +88,11 @@ impl<C: BlockCipher> Ofb<C> {
 /// keystream block: the rest of that block is kept for the next one.
 /// There is nothing to finish.
 #[derive(Debug)]
-pub struct Stream<'a, C> {
+pub struct Stream<'a, C: BlockCipher> {
     cipher: &'a C,
     /// Holds the current keystream block, which is also the input for
     /// the next one, since in OFB they are the same value.
-    register: [u8; MAX_BLOCK_SIZE],
+    register: C::Block,
     /// Bytes of the current keystream block already used. Starts full
     /// so that the first byte generates a block.
     used: usize,
@@ -111,15 +104,15 @@ impl<C: BlockCipher> Stream<'_, C> {
     /// Each keystream block is the encryption of the one before it,
     /// so this cannot use the cipher's bulk path.
     pub fn update(&mut self, mut data: &mut [u8]) -> Result<(), Error> {
-        let size = C::BLOCK_SIZE;
+        let size = C::Block::SIZE;
         while !data.is_empty() {
             if self.used == size {
-                self.cipher.encrypt_block(&mut self.register[..size])?;
+                self.cipher.encrypt_block(&mut self.register);
                 self.used = 0;
             }
             let take = data.len().min(size - self.used);
             let (now, rest) = data.split_at_mut(take);
-            xor(now, &self.register[self.used..self.used + take]);
+            xor(now, &self.register.as_ref()[self.used..self.used + take]);
             self.used += take;
             data = rest;
         }

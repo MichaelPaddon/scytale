@@ -16,7 +16,7 @@ const FILE: &str = "ACVP-AES-GCM-1.0/internalProjection.json";
 
 /// Runs the one-shot (AFT) groups against `C`; a no-op without the
 /// vendored vectors.
-pub fn run_aft<C: BlockCipher>() {
+pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
     let Some(groups) = groups("AFT") else { return };
     let mut cases = 0;
     let mut rejections = 0;
@@ -39,7 +39,10 @@ fn groups(test_type: &str) -> Option<Vec<(Value, bool)>> {
 }
 
 /// Returns the cases run and, of those, the ones that had to fail.
-fn aft<C: BlockCipher>(group: &Value, encrypt: bool) -> (usize, usize) {
+fn aft<C: BlockCipher<Block = [u8; 16]>>(
+    group: &Value,
+    encrypt: bool,
+) -> (usize, usize) {
     let tag_len = group["tagLen"].as_u64().expect("tagLen") as usize / 8;
     let mut cases = 0;
     let mut rejections = 0;

@@ -89,18 +89,10 @@ pub struct Ff1<C> {
     radix: u32,
 }
 
-impl<C: BlockCipher> Ff1<C> {
+impl<C: BlockCipher<Block = [u8; BLOCK]>> Ff1<C> {
     /// Wraps `cipher` for messages written in `radix` symbols, which
     /// must be between 2 and 65536.
-    ///
-    /// # Panics
-    /// If the cipher's block is not 128 bits.
     pub fn try_new(cipher: C, radix: u32) -> Result<Self, Error> {
-        assert_eq!(
-            C::BLOCK_SIZE,
-            BLOCK,
-            "FF1 is defined only for a 128-bit block cipher"
-        );
         if !(2..=65536).contains(&radix) {
             return Err(Error::InvalidRadix(radix));
         }
@@ -282,7 +274,7 @@ impl<C: BlockCipher> Ff1<C> {
             for (byte, mask) in block.iter_mut().zip(counter.to_be_bytes()) {
                 *byte ^= mask;
             }
-            self.cipher.encrypt_block(&mut block)?;
+            self.cipher.encrypt_block(&mut block);
             drawn_bytes[filled..filled + BLOCK].copy_from_slice(&block);
             filled += BLOCK;
             counter += 1;
@@ -337,7 +329,7 @@ struct Chain<'a, C> {
     used: usize,
 }
 
-impl<'a, C: BlockCipher> Chain<'a, C> {
+impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Chain<'a, C> {
     fn new(cipher: &'a C) -> Self {
         Chain {
             cipher,
@@ -358,7 +350,7 @@ impl<'a, C: BlockCipher> Chain<'a, C> {
                 for (s, b) in self.state.iter_mut().zip(&self.block) {
                     *s ^= b;
                 }
-                self.cipher.encrypt_block(&mut self.state)?;
+                self.cipher.encrypt_block(&mut self.state);
                 self.used = 0;
             }
         }

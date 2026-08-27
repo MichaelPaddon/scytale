@@ -1,7 +1,7 @@
 //! ACVP-AES-ECB 1.0, run through the [`BlockCipher`] trait.
 
 use super::{groups as suite_groups, hex};
-use scytale::symmetric::BlockCipher;
+use scytale::symmetric::{Block, BlockCipher};
 use serde_json::Value;
 
 const FILE: &str = "ACVP-AES-ECB-1.0/internalProjection.json";
@@ -38,10 +38,12 @@ fn groups(test_type: &str) -> Option<Vec<(Value, bool)>> {
 }
 
 fn apply<C: BlockCipher>(cipher: &C, encrypt: bool, data: &mut [u8]) {
+    let (blocks, rest) = C::Block::split_mut(data);
+    assert!(rest.is_empty(), "whole blocks");
     if encrypt {
-        cipher.encrypt_blocks(data).expect("whole blocks");
+        cipher.encrypt_blocks(blocks);
     } else {
-        cipher.decrypt_blocks(data).expect("whole blocks");
+        cipher.decrypt_blocks(blocks);
     }
 }
 

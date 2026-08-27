@@ -53,6 +53,7 @@
 //! ```
 
 use super::gcm::Gcm;
+use super::ghash::BLOCK;
 use crate::symmetric::BlockCipher;
 use crate::Error;
 
@@ -65,11 +66,8 @@ pub struct Xpn<C> {
     gcm: Gcm<C>,
 }
 
-impl<C: BlockCipher> Xpn<C> {
+impl<C: BlockCipher<Block = [u8; BLOCK]>> Xpn<C> {
     /// Wraps `cipher`.
-    ///
-    /// # Panics
-    /// If the cipher's block is not 128 bits.
     pub fn try_new(cipher: C) -> Result<Self, Error> {
         Ok(Xpn {
             gcm: Gcm::try_new(cipher)?,

@@ -6,6 +6,7 @@
 //!
 //! [`BlockCipher`]: crate::symmetric::BlockCipher
 
+use crate::symmetric::Block;
 use crate::Error;
 
 pub mod cbc;
@@ -41,13 +42,6 @@ pub use nonce::Nonces;
 pub use ofb::Ofb;
 pub use xpn::Xpn;
 pub use xts::Xts;
-
-/// Largest block size the modes support.
-///
-/// A mode keeps a chaining block or counter on the stack, which needs
-/// a fixed upper bound. Sixteen bytes covers AES and every other
-/// block cipher in current use.
-pub(crate) const MAX_BLOCK_SIZE: usize = 16;
 
 /// Blocks handed to the cipher in one bulk call.
 ///
@@ -113,15 +107,12 @@ pub(crate) fn set_bit(data: &mut [u8], i: usize, value: u8) {
     }
 }
 
-/// Copies `iv` into a fixed-size register, checking its length.
-pub(crate) fn register_from(
-    iv: &[u8],
-    size: usize,
-) -> Result<[u8; MAX_BLOCK_SIZE], Error> {
-    if iv.len() != size {
+/// Copies `iv` into a block, checking its length.
+pub(crate) fn register_from<B: Block>(iv: &[u8]) -> Result<B, Error> {
+    if iv.len() != B::SIZE {
         return Err(Error::InvalidNonceLength(iv.len()));
     }
-    let mut register = [0u8; MAX_BLOCK_SIZE];
-    register[..size].copy_from_slice(iv);
+    let mut register = B::ZERO;
+    register.as_mut().copy_from_slice(iv);
     Ok(register)
 }

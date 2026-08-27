@@ -62,7 +62,7 @@
 
 use super::ghash::{Ghash, BLOCK};
 use super::{xor, LANES};
-use crate::symmetric::BlockCipher;
+use crate::symmetric::{Block, BlockCipher};
 use crate::util;
 use crate::Error;
 
@@ -86,20 +86,11 @@ pub struct Gcm<C> {
     h: [u8; BLOCK],
 }
 
-impl<C: BlockCipher> Gcm<C> {
+impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
     /// Wraps `cipher`.
-    ///
-    /// # Panics
-    /// If the cipher's block is not 128 bits. GCM is defined only for
-    /// that size.
     pub fn try_new(cipher: C) -> Result<Self, Error> {
-        assert_eq!(
-            C::BLOCK_SIZE,
-            BLOCK,
-            "GCM is defined only for a 128-bit block cipher"
-        );
         let mut h = [0u8; BLOCK];
-        cipher.encrypt_block(&mut h)?;
+        cipher.encrypt_block(&mut h);
         Ok(Gcm { cipher, h })
     }
 
@@ -203,7 +194,7 @@ struct Core<'a, C> {
     started: bool,
 }
 
-impl<'a, C: BlockCipher> Core<'a, C> {
+impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
     fn new(
         cipher: &'a C,
         h: &[u8; BLOCK],
@@ -211,7 +202,7 @@ impl<'a, C: BlockCipher> Core<'a, C> {
     ) -> Result<Self, Error> {
         let start = counter_start(cipher, h, nonce)?;
         let mut mask = start;
-        cipher.encrypt_block(&mut mask)?;
+        cipher.encrypt_block(&mut mask);
         let mut counter = start;
         increment32(&mut counter);
         Ok(Core {
@@ -269,25 +260,26 @@ impl<'a, C: BlockCipher> Core<'a, C> {
         }
 
         // Whole blocks, in groups: the counters are known in advance.
-        let mut blocks = [0u8; LANES * BLOCK];
-        while data.len() >= BLOCK {
-            let n = (data.len() / BLOCK).min(LANES) * BLOCK;
-            for block in blocks[..n].chunks_exact_mut(BLOCK) {
-                block.copy_from_slice(&self.counter);
+        let (whole, tail) = <[u8; BLOCK]>::split_mut(data);
+        let mut keystream = [[0u8; BLOCK]; LANES];
+        for group in whole.chunks_mut(LANES) {
+            let keystream = &mut keystream[..group.len()];
+            for block in keystream.iter_mut() {
+                *block = self.counter;
                 increment32(&mut self.counter);
             }
-            self.cipher.encrypt_blocks(&mut blocks[..n])?;
-            let (now, rest) = data.split_at_mut(n);
-            xor(now, &blocks[..n]);
-            data = rest;
+            self.cipher.encrypt_blocks(keystream);
+            for (block, key) in group.iter_mut().zip(&*keystream) {
+                xor(block, key);
+            }
         }
 
-        if !data.is_empty() {
+        if !tail.is_empty() {
             self.keystream = self.counter;
             increment32(&mut self.counter);
-            self.cipher.encrypt_block(&mut self.keystream)?;
-            xor(data, &self.keystream);
-            self.used = data.len();
+            self.cipher.encrypt_block(&mut self.keystream);
+            xor(tail, &self.keystream);
+            self.used = tail.len();
         }
         Ok(())
     }
@@ -320,7 +312,7 @@ impl<'a, C: BlockCipher> Core<'a, C> {
 /// A 96-bit nonce becomes the counter directly, with a one in the
 /// counter field. Any other length is hashed down to a block, which
 /// is why that case costs more.
-fn counter_start<C: BlockCipher>(
+fn counter_start<C: BlockCipher<Block = [u8; BLOCK]>>(
     cipher: &C,
     h: &[u8; BLOCK],
     nonce: &[u8],
@@ -354,7 +346,7 @@ pub struct Encryptor<'a, C> {
     core: Core<'a, C>,
 }
 
-impl<C: BlockCipher> Encryptor<'_, C> {
+impl<C: BlockCipher<Block = [u8; BLOCK]>> Encryptor<'_, C> {
     /// Adds data that is authenticated but not encrypted.
     ///
     /// # Panics
@@ -389,7 +381,7 @@ pub struct Decryptor<'a, C> {
     core: Core<'a, C>,
 }
 
-impl<C: BlockCipher> Decryptor<'_, C> {
+impl<C: BlockCipher<Block = [u8; BLOCK]>> Decryptor<'_, C> {
     /// Adds data that is authenticated but not encrypted.
     ///
     /// # Panics

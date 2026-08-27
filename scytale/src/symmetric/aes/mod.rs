@@ -37,7 +37,7 @@ pub mod x86_64;
 use core::fmt;
 use core::sync::atomic::{AtomicU8, Ordering};
 
-use crate::symmetric::{as_block, BlockCipher};
+use crate::symmetric::BlockCipher;
 use crate::Error;
 
 /// AES block size in bytes.
@@ -285,46 +285,38 @@ impl Aes {
         dispatch!(self, aes => aes.decrypt_block(block))
     }
 
-    /// Encrypts every block of `data` in place, independently (ECB).
-    ///
-    /// `data.len()` must be a multiple of 16; nothing is changed
-    /// otherwise.
-    pub fn encrypt_blocks(&self, data: &mut [u8]) -> Result<(), Error> {
-        dispatch!(self, aes => aes.encrypt_blocks(data))
+    /// Encrypts every block in place, independently (ECB).
+    pub fn encrypt_blocks(&self, blocks: &mut [[u8; BLOCK_SIZE]]) {
+        dispatch!(self, aes => aes.encrypt_blocks(blocks))
     }
 
-    /// Decrypts every block of `data` in place, independently (ECB).
-    ///
-    /// `data.len()` must be a multiple of 16; nothing is changed
-    /// otherwise.
-    pub fn decrypt_blocks(&self, data: &mut [u8]) -> Result<(), Error> {
-        dispatch!(self, aes => aes.decrypt_blocks(data))
+    /// Decrypts every block in place, independently (ECB).
+    pub fn decrypt_blocks(&self, blocks: &mut [[u8; BLOCK_SIZE]]) {
+        dispatch!(self, aes => aes.decrypt_blocks(blocks))
     }
 }
 
 impl BlockCipher for Aes {
-    const BLOCK_SIZE: usize = BLOCK_SIZE;
+    type Block = [u8; BLOCK_SIZE];
 
     fn try_new(key: &[u8]) -> Result<Self, Error> {
         Aes::try_new(key)
     }
 
-    fn encrypt_block(&self, block: &mut [u8]) -> Result<(), Error> {
-        Aes::encrypt_block(self, as_block(block)?);
-        Ok(())
+    fn encrypt_block(&self, block: &mut Self::Block) {
+        Aes::encrypt_block(self, block)
     }
 
-    fn decrypt_block(&self, block: &mut [u8]) -> Result<(), Error> {
-        Aes::decrypt_block(self, as_block(block)?);
-        Ok(())
+    fn decrypt_block(&self, block: &mut Self::Block) {
+        Aes::decrypt_block(self, block)
     }
 
-    fn encrypt_blocks(&self, data: &mut [u8]) -> Result<(), Error> {
-        Aes::encrypt_blocks(self, data)
+    fn encrypt_blocks(&self, blocks: &mut [Self::Block]) {
+        Aes::encrypt_blocks(self, blocks)
     }
 
-    fn decrypt_blocks(&self, data: &mut [u8]) -> Result<(), Error> {
-        Aes::decrypt_blocks(self, data)
+    fn decrypt_blocks(&self, blocks: &mut [Self::Block]) {
+        Aes::decrypt_blocks(self, blocks)
     }
 }
 
@@ -413,15 +405,15 @@ mod tests {
             let sw = portable::Aes::try_new(&key[..klen]).unwrap();
             assert_eq!(aes.rounds(), sw.rounds());
 
-            let mut data = [0u8; 17 * BLOCK_SIZE];
-            for (i, x) in data.iter_mut().enumerate() {
+            let mut data = [[0u8; BLOCK_SIZE]; 17];
+            for (i, x) in data.as_flattened_mut().iter_mut().enumerate() {
                 *x = i as u8;
             }
             let mut expected = data;
-            sw.encrypt_blocks(&mut expected).unwrap();
-            aes.encrypt_blocks(&mut data).unwrap();
+            sw.encrypt_blocks(&mut expected);
+            aes.encrypt_blocks(&mut data);
             assert_eq!(data, expected);
-            aes.decrypt_blocks(&mut data).unwrap();
+            aes.decrypt_blocks(&mut data);
 
             let mut block = [7u8; BLOCK_SIZE];
             let mut block2 = block;
@@ -438,11 +430,6 @@ mod tests {
         assert_eq!(
             Aes::try_new(&[0; 20]).unwrap_err(),
             Error::InvalidKeyLength(20)
-        );
-        let aes = Aes::try_new(&[0; 16]).unwrap();
-        assert_eq!(
-            aes.encrypt_blocks(&mut [0; 17]).unwrap_err(),
-            Error::NotBlockAligned(17)
         );
     }
 }

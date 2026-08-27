@@ -36,8 +36,8 @@
 //! # }
 //! ```
 
-use super::{register_from, xor, LANES, MAX_BLOCK_SIZE};
-use crate::symmetric::BlockCipher;
+use super::{register_from, xor, LANES};
+use crate::symmetric::{Block, BlockCipher};
 use crate::Error;
 
 /// CBC over a block cipher.
@@ -48,15 +48,7 @@ pub struct Cbc<C> {
 
 impl<C: BlockCipher> Cbc<C> {
     /// Wraps `cipher`.
-    ///
-    /// # Panics
-    /// If the cipher's block is larger than the modes support, which
-    /// no cipher in this library is.
     pub fn new(cipher: C) -> Self {
-        assert!(
-            C::BLOCK_SIZE > 0 && C::BLOCK_SIZE <= MAX_BLOCK_SIZE,
-            "block size is outside the range the modes support"
-        );
         Cbc { cipher }
     }
 
@@ -78,7 +70,7 @@ impl<C: BlockCipher> Cbc<C> {
     pub fn encryptor(&self, iv: &[u8]) -> Result<Encryptor<'_, C>, Error> {
         Ok(Encryptor {
             cipher: &self.cipher,
-            chain: register_from(iv, C::BLOCK_SIZE)?,
+            chain: register_from(iv)?,
         })
     }
 
@@ -86,7 +78,7 @@ impl<C: BlockCipher> Cbc<C> {
     pub fn decryptor(&self, iv: &[u8]) -> Result<Decryptor<'_, C>, Error> {
         Ok(Decryptor {
             cipher: &self.cipher,
-            chain: register_from(iv, C::BLOCK_SIZE)?,
+            chain: register_from(iv)?,
         })
     }
 }
@@ -97,9 +89,9 @@ impl<C: BlockCipher> Cbc<C> {
 /// be encrypted until all of it has arrived. There is nothing to
 /// finish: the state can simply be dropped when the message ends.
 #[derive(Debug)]
-pub struct Encryptor<'a, C> {
+pub struct Encryptor<'a, C: BlockCipher> {
     cipher: &'a C,
-    chain: [u8; MAX_BLOCK_SIZE],
+    chain: C::Block,
 }
 
 impl<C: BlockCipher> Encryptor<'_, C> {
@@ -108,14 +100,14 @@ impl<C: BlockCipher> Encryptor<'_, C> {
     /// Encryption chains, so this runs one block at a time and cannot
     /// use the cipher's bulk path.
     pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
-        let size = C::BLOCK_SIZE;
-        if !data.len().is_multiple_of(size) {
+        let (blocks, rest) = C::Block::split_mut(data);
+        if !rest.is_empty() {
             return Err(Error::NotBlockAligned(data.len()));
         }
-        for block in data.chunks_exact_mut(size) {
-            xor(block, &self.chain[..size]);
-            self.cipher.encrypt_block(block)?;
-            self.chain[..size].copy_from_slice(block);
+        for block in blocks {
+            xor(block.as_mut(), self.chain.as_ref());
+            self.cipher.encrypt_block(block);
+            self.chain = *block;
         }
         Ok(())
     }
@@ -126,9 +118,9 @@ impl<C: BlockCipher> Encryptor<'_, C> {
 /// Every piece must be a whole number of blocks. There is nothing to
 /// finish.
 #[derive(Debug)]
-pub struct Decryptor<'a, C> {
+pub struct Decryptor<'a, C: BlockCipher> {
     cipher: &'a C,
-    chain: [u8; MAX_BLOCK_SIZE],
+    chain: C::Block,
 }
 
 impl<C: BlockCipher> Decryptor<'_, C> {
@@ -139,22 +131,22 @@ impl<C: BlockCipher> Decryptor<'_, C> {
     /// kept first, because decrypting in place overwrites the very
     /// bytes the next block needs.
     pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
-        let size = C::BLOCK_SIZE;
-        if !data.len().is_multiple_of(size) {
+        let (blocks, rest) = C::Block::split_mut(data);
+        if !rest.is_empty() {
             return Err(Error::NotBlockAligned(data.len()));
         }
-        let mut seen = [0u8; LANES * MAX_BLOCK_SIZE];
-        for group in data.chunks_mut(LANES * size) {
+        let mut seen = [C::Block::ZERO; LANES];
+        for group in blocks.chunks_mut(LANES) {
             let seen = &mut seen[..group.len()];
             seen.copy_from_slice(group);
-            self.cipher.decrypt_blocks(group)?;
+            self.cipher.decrypt_blocks(group);
 
-            let mut previous = &self.chain[..size];
-            for (i, block) in group.chunks_exact_mut(size).enumerate() {
-                xor(block, previous);
-                previous = &seen[i * size..(i + 1) * size];
+            let mut previous = &self.chain;
+            for (block, ciphertext) in group.iter_mut().zip(&*seen) {
+                xor(block.as_mut(), previous.as_ref());
+                previous = ciphertext;
             }
-            self.chain[..size].copy_from_slice(&seen[seen.len() - size..]);
+            self.chain = seen[seen.len() - 1];
         }
         Ok(())
     }

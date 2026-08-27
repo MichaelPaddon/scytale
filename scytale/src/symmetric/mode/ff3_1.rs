@@ -82,20 +82,12 @@ pub struct Ff3_1<C> {
     max_symbols: usize,
 }
 
-impl<C: BlockCipher> Ff3_1<C> {
+impl<C: BlockCipher<Block = [u8; BLOCK]>> Ff3_1<C> {
     /// Takes the key and the radix, which must be between 2 and
     /// 65536.
     ///
     /// The key is held reversed, as the standard specifies.
-    ///
-    /// # Panics
-    /// If the cipher's block is not 128 bits.
     pub fn try_new(key: &[u8], radix: u32) -> Result<Self, Error> {
-        assert_eq!(
-            C::BLOCK_SIZE,
-            BLOCK,
-            "FF3-1 is defined only for a 128-bit block cipher"
-        );
         if !(2..=65536).contains(&radix) {
             return Err(Error::InvalidRadix(radix));
         }
@@ -252,7 +244,7 @@ impl<C: BlockCipher> Ff3_1<C> {
         // The standard runs the cipher over the block reversed, under
         // a reversed key, and reverses the answer.
         block.reverse();
-        self.cipher.encrypt_block(&mut block)?;
+        self.cipher.encrypt_block(&mut block);
         block.reverse();
 
         let mut value = Natural::from_bytes(&block);
