@@ -123,6 +123,33 @@ pub(crate) fn increment<B: Block>(counter: &mut B) {
     }
 }
 
+/// Fills `blocks` with successive counter values and leaves `counter`
+/// on the one after the last.
+///
+/// The counter stays in registers for the whole group. Written the
+/// obvious way, as a store to `counter` and a read of it back for the
+/// next block, the sixteen-byte read overlaps two eight-byte stores
+/// still in the store buffer, which the processor cannot forward and
+/// must wait out: about a dozen cycles for every block, which was
+/// most of what counter mode cost.
+#[inline]
+fn counters<B: Block>(counter: &mut B, blocks: &mut [B]) {
+    let Ok(start) = <[u8; 16]>::try_from(counter.as_ref()) else {
+        // Some other block size, which no cipher here has.
+        for block in blocks.iter_mut() {
+            *block = *counter;
+            increment(counter);
+        }
+        return;
+    };
+    let mut n = u128::from_be_bytes(start);
+    for block in blocks.iter_mut() {
+        block.as_mut().copy_from_slice(&n.to_be_bytes());
+        n = n.wrapping_add(1);
+    }
+    counter.as_mut().copy_from_slice(&n.to_be_bytes());
+}
+
 /// Applies the keystream to one message, a piece at a time.
 ///
 /// Pieces may be any length, and a piece may end part way through a
@@ -159,10 +186,7 @@ impl<C: BlockCipher> Stream<'_, C> {
         let mut keystream = [C::Block::ZERO; LANES];
         for group in whole.chunks_mut(LANES) {
             let keystream = &mut keystream[..group.len()];
-            for block in keystream.iter_mut() {
-                *block = self.counter;
-                increment(&mut self.counter);
-            }
+            counters(&mut self.counter, keystream);
             self.cipher.encrypt_blocks(keystream);
             for (block, key) in group.iter_mut().zip(&*keystream) {
                 xor(block.as_mut(), key.as_ref());

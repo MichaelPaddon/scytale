@@ -163,6 +163,29 @@ fn check_tag_length(n: usize) -> Result<(), Error> {
     }
 }
 
+/// Fills `blocks` with successive counter values and leaves `counter`
+/// on the one after the last.
+///
+/// The counter stays in registers for the whole group. Storing it and
+/// reading it back for the next block puts a sixteen-byte load across
+/// two narrower stores still in the store buffer, which cannot be
+/// forwarded and costs about a dozen cycles a block.
+///
+/// Read big-endian, the field the standard increments is the low
+/// thirty-two bits of the whole block, so masking it off leaves the
+/// rest untouched and the addition wraps where it should.
+#[inline]
+fn counters(counter: &mut [u8; BLOCK], blocks: &mut [[u8; BLOCK]]) {
+    let base = u128::from_be_bytes(*counter);
+    let rest = base & !(u32::MAX as u128);
+    let mut n = base as u32;
+    for block in blocks.iter_mut() {
+        *block = (rest | u128::from(n)).to_be_bytes();
+        n = n.wrapping_add(1);
+    }
+    *counter = (rest | u128::from(n)).to_be_bytes();
+}
+
 /// Adds one to the last four bytes of the counter, wrapping within
 /// them. GCM increments only that field, not the whole block.
 fn increment32(counter: &mut [u8; BLOCK]) {
@@ -264,10 +287,7 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
         let mut keystream = [[0u8; BLOCK]; LANES];
         for group in whole.chunks_mut(LANES) {
             let keystream = &mut keystream[..group.len()];
-            for block in keystream.iter_mut() {
-                *block = self.counter;
-                increment32(&mut self.counter);
-            }
+            counters(&mut self.counter, keystream);
             self.cipher.encrypt_blocks(keystream);
             for (block, key) in group.iter_mut().zip(&*keystream) {
                 xor(block, key);

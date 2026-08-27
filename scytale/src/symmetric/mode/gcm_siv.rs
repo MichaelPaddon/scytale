@@ -221,10 +221,7 @@ fn apply<C: BlockCipher<Block = [u8; BLOCK]>>(
     let mut keystream = [[0u8; BLOCK]; LANES];
     for group in whole.chunks_mut(LANES) {
         let keystream = &mut keystream[..group.len()];
-        for block in keystream.iter_mut() {
-            *block = *counter;
-            increment(counter);
-        }
+        counters(counter, keystream);
         cipher.encrypt_blocks(keystream);
         for (block, key) in group.iter_mut().zip(&*keystream) {
             xor(block, key);
@@ -236,6 +233,24 @@ fn apply<C: BlockCipher<Block = [u8; BLOCK]>>(
         cipher.encrypt_block(&mut keystream);
         xor(tail, &keystream);
     }
+}
+
+/// Fills `blocks` with successive counter values and leaves `counter`
+/// on the one after the last, keeping it in registers throughout; see
+/// the note on the same function in [`gcm`](super::gcm).
+///
+/// Read little-endian, the four bytes this mode counts in are the low
+/// thirty-two bits of the block, so the same masking works.
+#[inline]
+fn counters(counter: &mut [u8; BLOCK], blocks: &mut [[u8; BLOCK]]) {
+    let base = u128::from_le_bytes(*counter);
+    let rest = base & !(u32::MAX as u128);
+    let mut n = base as u32;
+    for block in blocks.iter_mut() {
+        *block = (rest | u128::from(n)).to_le_bytes();
+        n = n.wrapping_add(1);
+    }
+    *counter = (rest | u128::from(n)).to_le_bytes();
 }
 
 /// Adds one to the first four bytes, least significant first.

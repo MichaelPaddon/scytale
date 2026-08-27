@@ -195,10 +195,16 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
         let mut tweaks = [[0u8; BLOCK]; LANES];
         for group in whole.chunks_mut(LANES) {
             let tweaks = &mut tweaks[..group.len()];
+            // The tweak stays in registers across the group. Stored
+            // and read back for the next block, the sixteen-byte read
+            // would cross narrower stores still in the store buffer,
+            // which the processor cannot forward and must wait out.
+            let mut value = u128::from_le_bytes(*t);
             for tweak in tweaks.iter_mut() {
-                *tweak = *t;
-                multiply_by_alpha(t);
+                *tweak = value.to_le_bytes();
+                value = alpha(value);
             }
+            *t = value.to_le_bytes();
             for (block, tweak) in group.iter_mut().zip(&*tweaks) {
                 xor(block, tweak);
             }
@@ -214,18 +220,20 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
     }
 }
 
-/// Advances the tweak: multiplication by the field element the
-/// standard calls alpha, which here is a shift with one feedback
-/// term. Done without a branch, since the tweaks after the first
-/// depend on the key.
+/// Advances the tweak, for a caller holding it as a block.
 fn multiply_by_alpha(tweak: &mut [u8; BLOCK]) {
-    let mut carry = 0u8;
-    for byte in tweak.iter_mut() {
-        let next = *byte >> 7;
-        *byte = (*byte << 1) | carry;
-        carry = next;
-    }
-    tweak[0] ^= 0x87 & 0u8.wrapping_sub(carry);
+    *tweak = alpha(u128::from_le_bytes(*tweak)).to_le_bytes();
+}
+
+/// Multiplication by the field element the standard calls alpha, on
+/// the block read as the little-endian integer it is: a shift by one
+/// with the bit shifted out fed back through the field polynomial.
+/// Done without a branch, since the tweaks after the first depend on
+/// the key.
+#[inline]
+fn alpha(tweak: u128) -> u128 {
+    let carry = tweak >> 127;
+    (tweak << 1) ^ (0u128.wrapping_sub(carry) & 0x87)
 }
 
 #[cfg(test)]
