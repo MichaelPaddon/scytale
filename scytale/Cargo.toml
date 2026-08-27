@@ -14,6 +14,17 @@ zeroize = { version = "1", default-features = false, features = ["derive"] }
 
 [dev-dependencies]
 serde_json = "1"
+# Only the benchmark uses this, for CPU time rather than wall clock:
+# clock_gettime(CLOCK_THREAD_CPUTIME_ID) where there is one, and
+# GetThreadTimes on Windows. A dev-dependency, so nothing that depends
+# on this crate ever builds it.
+cpu-time = "1"
+
+# The measuring loop is its own harness rather than libtest's, which
+# only knows how to time a fixed number of iterations.
+[[bench]]
+name = "speed"
+harness = false
 
 # Only where there is something to ask. A bare metal target has
 # nobody, and takes the processor's own generator instead; the same
