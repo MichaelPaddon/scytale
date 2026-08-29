@@ -744,8 +744,21 @@ mod hmac_sha2_512_256 {
     );
 }
 
-/// HMAC over SHA3-256, which exercises a rate larger than any
-/// SHA-2 block.
+/// HMAC over each SHA-3 digest, whose rates exceed any SHA-2 block.
+/// The automatic type runs; every SHA-3 backend is checked against
+/// the portable one in the unit tests.
+mod hmac_sha3_224 {
+    use super::*;
+    use scytale::hash::sha3;
+
+    hmac_suite!(
+        automatic,
+        sha3::Sha3_224,
+        "ACVP-HMAC-SHA3-224-1.0/internalProjection.json",
+        "HMAC-SHA3-224"
+    );
+}
+
 mod hmac_sha3_256 {
     use super::*;
     use scytale::hash::sha3;
@@ -755,6 +768,30 @@ mod hmac_sha3_256 {
         sha3::Sha3_256,
         "ACVP-HMAC-SHA3-256-1.0/internalProjection.json",
         "HMAC-SHA3-256"
+    );
+}
+
+mod hmac_sha3_384 {
+    use super::*;
+    use scytale::hash::sha3;
+
+    hmac_suite!(
+        automatic,
+        sha3::Sha3_384,
+        "ACVP-HMAC-SHA3-384-1.0/internalProjection.json",
+        "HMAC-SHA3-384"
+    );
+}
+
+mod hmac_sha3_512 {
+    use super::*;
+    use scytale::hash::sha3;
+
+    hmac_suite!(
+        automatic,
+        sha3::Sha3_512,
+        "ACVP-HMAC-SHA3-512-1.0/internalProjection.json",
+        "HMAC-SHA3-512"
     );
 }
 

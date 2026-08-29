@@ -34,6 +34,14 @@
 //!
 //! # Example
 //!
+//! # Bit lengths
+//!
+//! The standard defines a data unit in bits, and the length only
+//! matters where the last two blocks steal from each other, so
+//! [`encrypt_bits`](Xts::encrypt_bits) and
+//! [`decrypt_bits`](Xts::decrypt_bits) take a unit that is not a
+//! whole number of bytes while the byte methods run as before.
+//!
 //! ```
 //! use scytale::symmetric::aes::Aes;
 //! use scytale::symmetric::mode::Xts;
@@ -109,33 +117,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
         tweak: &C::Block,
         data: &mut [u8],
     ) -> Result<(), Error> {
-        let mut t = self.start(tweak, data.len())?;
-        let (whole, stolen) = self.split(data);
-        self.bulk(whole, &mut t, true);
-        if let Some((last, short)) = stolen {
-            let last: &mut [u8; BLOCK] =
-                last.try_into().expect("one whole block");
-            // The last whole block is encrypted first, then its head
-            // becomes the short ciphertext and its tail completes the
-            // short plaintext into a block, which is encrypted in the
-            // last block's place.
-            xor(last, &t);
-            self.data.encrypt_block(last);
-            xor(last, &t);
-            multiply_by_alpha(&mut t);
-
-            let mut carried = [0u8; BLOCK];
-            let n = short.len();
-            carried[..n].copy_from_slice(short);
-            carried[n..].copy_from_slice(&last[n..]);
-            short.copy_from_slice(&last[..n]);
-
-            xor(&mut carried, &t);
-            self.data.encrypt_block(&mut carried);
-            xor(&mut carried, &t);
-            last.copy_from_slice(&carried);
-        }
-        Ok(())
+        self.run(tweak, data, data.len() * 8, true)
     }
 
     /// Decrypts one data unit in place under `tweak`.
@@ -144,34 +126,126 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
         tweak: &C::Block,
         data: &mut [u8],
     ) -> Result<(), Error> {
-        let mut t = self.start(tweak, data.len())?;
-        let (whole, stolen) = self.split(data);
-        self.bulk(whole, &mut t, false);
-        if let Some((last, short)) = stolen {
-            let last: &mut [u8; BLOCK] =
-                last.try_into().expect("one whole block");
-            // The mirror of encryption: the last whole block is
-            // decrypted under the *later* tweak, because that is the
-            // one it was encrypted with.
-            let mut later = t;
-            multiply_by_alpha(&mut later);
+        self.run(tweak, data, data.len() * 8, false)
+    }
 
-            xor(last, &later);
-            self.data.decrypt_block(last);
-            xor(last, &later);
+    /// Encrypts a data unit of `bits` bits in place under `tweak`.
+    ///
+    /// `data` holds the unit in `bits.div_ceil(8)` bytes, the last
+    /// byte's bits at its top; its low bits are ignored on input and
+    /// zero on output. Returns [`Error::InvalidLength`] if the unit
+    /// is shorter than one block or `data` is not that many bytes.
+    pub fn encrypt_bits(
+        &self,
+        tweak: &C::Block,
+        data: &mut [u8],
+        bits: usize,
+    ) -> Result<(), Error> {
+        Self::check_bits(data, bits)?;
+        self.run(tweak, data, bits, true)
+    }
 
-            let mut carried = [0u8; BLOCK];
-            let n = short.len();
-            carried[..n].copy_from_slice(short);
-            carried[n..].copy_from_slice(&last[n..]);
-            short.copy_from_slice(&last[..n]);
+    /// Decrypts a data unit of `bits` bits in place under `tweak`;
+    /// see [`encrypt_bits`](Self::encrypt_bits) for the layout.
+    pub fn decrypt_bits(
+        &self,
+        tweak: &C::Block,
+        data: &mut [u8],
+        bits: usize,
+    ) -> Result<(), Error> {
+        Self::check_bits(data, bits)?;
+        self.run(tweak, data, bits, false)
+    }
 
-            xor(&mut carried, &t);
-            self.data.decrypt_block(&mut carried);
-            xor(&mut carried, &t);
-            last.copy_from_slice(&carried);
+    fn check_bits(data: &[u8], bits: usize) -> Result<(), Error> {
+        if bits < BLOCK * 8 || data.len() != bits.div_ceil(8) {
+            return Err(Error::InvalidLength(bits));
         }
         Ok(())
+    }
+
+    /// Both directions: the bulk, then the last two blocks, which
+    /// steal from each other when the unit is not whole blocks.
+    ///
+    /// Only the steal knows the unit's length in bits, and only
+    /// through the mask on the byte the partial block ends in. For a
+    /// whole number of bytes that mask is all ones.
+    fn run(
+        &self,
+        tweak: &C::Block,
+        data: &mut [u8],
+        bits: usize,
+        encrypt: bool,
+    ) -> Result<(), Error> {
+        let mut t = self.start(tweak, data.len())?;
+        // Bytes of the partial block, if there is one.
+        let short = (bits % (BLOCK * 8)).div_ceil(8);
+        let (whole, stolen) = Self::split(data, short);
+        self.bulk(whole, &mut t, encrypt);
+        if let Some((last, short)) = stolen {
+            let mask = match bits % 8 {
+                0 => 0xff,
+                b => 0xffu8 << (8 - b),
+            };
+            self.steal(last, short, mask, &mut t, encrypt);
+        }
+        Ok(())
+    }
+
+    /// Ciphertext stealing over the last whole block and the short
+    /// one after it. `mask` selects the bits of the short block's
+    /// last byte that belong to it.
+    ///
+    /// Encrypting, the last whole block goes first, then its head
+    /// becomes the short ciphertext and its tail completes the short
+    /// plaintext into a block, which is encrypted in the last
+    /// block's place under the next tweak. Decrypting is the mirror:
+    /// the last whole block is decrypted under the *later* tweak,
+    /// because that is the one it was encrypted with.
+    fn steal(
+        &self,
+        last: &mut [u8],
+        short: &mut [u8],
+        mask: u8,
+        t: &mut [u8; BLOCK],
+        encrypt: bool,
+    ) {
+        let last: &mut [u8; BLOCK] = last.try_into().expect("one whole block");
+        let mut first = *t;
+        let mut second = *t;
+        if encrypt {
+            multiply_by_alpha(&mut second);
+        } else {
+            multiply_by_alpha(&mut first);
+        }
+
+        xor(last, &first);
+        if encrypt {
+            self.data.encrypt_block(last);
+        } else {
+            self.data.decrypt_block(last);
+        }
+        xor(last, &first);
+
+        let mut carried = [0u8; BLOCK];
+        let n = short.len();
+        carried[..n].copy_from_slice(short);
+        // The split byte: the short block's own bits, and the stolen
+        // block's below them.
+        carried[n - 1] = (short[n - 1] & mask) | (last[n - 1] & !mask);
+        carried[n..].copy_from_slice(&last[n..]);
+        short.copy_from_slice(&last[..n]);
+        short[n - 1] &= mask;
+
+        xor(&mut carried, &second);
+        if encrypt {
+            self.data.encrypt_block(&mut carried);
+        } else {
+            self.data.decrypt_block(&mut carried);
+        }
+        xor(&mut carried, &second);
+        last.copy_from_slice(&carried);
+        *t = second;
     }
 
     /// The first tweak: the tweak value encrypted under the second
@@ -191,13 +265,12 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
 
     /// Splits a data unit into the blocks handled normally and, if
     /// the unit does not divide evenly, the last whole block and the
-    /// short one that steals from it.
+    /// `short` bytes that steal from it.
     #[allow(clippy::type_complexity)]
-    fn split<'d>(
-        &self,
-        data: &'d mut [u8],
-    ) -> (&'d mut [u8], Option<(&'d mut [u8], &'d mut [u8])>) {
-        let short = data.len() % BLOCK;
+    fn split(
+        data: &mut [u8],
+        short: usize,
+    ) -> (&mut [u8], Option<(&mut [u8], &mut [u8])>) {
         if short == 0 {
             return (data, None);
         }
@@ -391,6 +464,53 @@ mod tests {
     }
 
     /// Formatting the state must not print the key.
+    /// A whole number of bytes through the bit methods is the byte
+    /// methods; and units of odd bit lengths round trip, differ from
+    /// their byte-length neighbours, and leave the spare bits zero.
+    #[test]
+    fn bit_lengths() {
+        let xts = xts();
+        let tweak = [0x11u8; 16];
+        let data: [u8; 40] = core::array::from_fn(|i| (i * 37 + 5) as u8);
+
+        let mut bytes = data;
+        let mut bits = data;
+        xts.encrypt(&tweak, &mut bytes[..33]).unwrap();
+        xts.encrypt_bits(&tweak, &mut bits[..33], 264).unwrap();
+        assert_eq!(bytes, bits);
+
+        for n in [129usize, 135, 200, 255, 257, 319] {
+            let len = n.div_ceil(8);
+            let mut unit = data;
+            xts.encrypt_bits(&tweak, &mut unit[..len], n).unwrap();
+            assert_ne!(unit[..len], data[..len], "{n} bits");
+            let spare = 8 * len - n;
+            assert_eq!(unit[len - 1] & ((1u8 << spare) - 1), 0, "{n} bits");
+            xts.decrypt_bits(&tweak, &mut unit[..len], n).unwrap();
+            let mask = 0xffu8 << spare;
+            assert_eq!(unit[..len - 1], data[..len - 1], "{n} bits");
+            assert_eq!(unit[len - 1] & mask, data[len - 1] & mask, "{n}");
+        }
+    }
+
+    #[test]
+    fn rejects_bad_bit_lengths() {
+        let xts = xts();
+        let tweak = [0u8; 16];
+        let mut data = [0u8; 32];
+        for (len, bits) in [(16, 127), (15, 120), (18, 129), (31, 250)] {
+            assert_eq!(
+                xts.encrypt_bits(&tweak, &mut data[..len], bits),
+                Err(Error::InvalidLength(bits)),
+                "{len} bytes, {bits} bits"
+            );
+            assert_eq!(
+                xts.decrypt_bits(&tweak, &mut data[..len], bits),
+                Err(Error::InvalidLength(bits))
+            );
+        }
+    }
+
     #[test]
     fn debug_omits_the_key() {
         struct Buffer([u8; 256], usize);
