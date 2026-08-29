@@ -183,6 +183,13 @@ aarch64 by reading the ID registers, on RISC-V through the kernel's
 `riscv_hwprobe` call. A processor without the instructions falls back
 to the portable code.
 
+## Documentation
+
+The API documentation for the main branch, one copy per architecture
+so that each processor's own modules can be read, is at
+<https://michaelpaddon.github.io/scytale/>. Released versions are on
+[docs.rs](https://docs.rs/scytale). Locally, `cargo doc --open`.
+
 ## Using it
 
 ```rust

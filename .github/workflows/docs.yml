@@ -1,0 +1,92 @@
+# Publishes the API documentation for the main branch to GitHub
+# Pages, one tree per architecture that has its own implementations,
+# since the modules for each only exist when building for it. This
+# is the browsable copy between releases; docs.rs builds the released
+# ones.
+#
+# Pages must be enabled in the repository settings with "GitHub
+# Actions" as the source before the deploy step can succeed.
+
+name: docs
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  RUSTDOCFLAGS: -D warnings
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          rustup update --no-self-update stable
+          rustup default stable
+          rustup target add aarch64-unknown-linux-gnu \
+                            riscv64gc-unknown-linux-gnu
+
+      - name: Build for each architecture
+        run: |
+          set -eu
+          mkdir -p site
+          for target in x86_64-unknown-linux-gnu \
+                        aarch64-unknown-linux-gnu \
+                        riscv64gc-unknown-linux-gnu; do
+              cargo doc --workspace --no-deps --target "$target"
+              name=${target%%-*}
+              cp -r "target/$target/doc" "site/$name"
+          done
+
+      - name: Write the index
+        run: |
+          cat > site/index.html <<'HTML'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+          <meta charset="utf-8">
+          <title>scytale documentation</title>
+          <meta http-equiv="refresh" content="3; url=x86_64/scytale/">
+          </head>
+          <body>
+          <h1>scytale</h1>
+          <p>API documentation for the main branch, by architecture.
+          The modules holding each processor's own implementations
+          appear only in that architecture's copy.</p>
+          <ul>
+          <li><a href="x86_64/scytale/">x86-64</a> (default in a moment)</li>
+          <li><a href="aarch64/scytale/">AArch64</a></li>
+          <li><a href="riscv64gc/scytale/">RISC-V (RV64GC)</a></li>
+          </ul>
+          <p>Released versions are on
+          <a href="https://docs.rs/scytale">docs.rs</a>.</p>
+          </body>
+          </html>
+          HTML
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
