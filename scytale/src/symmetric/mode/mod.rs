@@ -1,14 +1,19 @@
-//! Modes of operation, generic over any [`BlockCipher`].
+//! Modes of operation, generic over any [`BlockCipher`], and one
+//! that wraps a stream cipher instead.
 //!
 //! A block cipher on its own only transforms one block. A mode says
 //! how to carry that over a message: how blocks chain, how a nonce
 //! enters, and, for the authenticated modes, how a tag is computed.
+//! [`ChaCha20Poly1305`] is the exception: a stream cipher and a MAC
+//! that were designed to be used together, with no block cipher
+//! underneath.
 //!
 //! # Which mode
 //!
 //! | Need | Mode |
 //! | --- | --- |
 //! | Encrypt and authenticate a message | [`Gcm`], with [`Nonces`] |
+//! | The same, without AES instructions | [`ChaCha20Poly1305`] |
 //! | The same, when a nonce might repeat | [`GcmSiv`] |
 //! | MACsec frames | [`Xpn`] |
 //! | A disk or other sector-addressed store | [`Xts`] |
@@ -20,7 +25,10 @@
 //! [`Gcm`] is the default. It is fast, standard, and refuses to hand
 //! back a message that does not authenticate. Its one hazard is a
 //! repeated nonce, which [`Nonces`] rules out; where uniqueness cannot
-//! be promised, [`GcmSiv`] survives a repeat.
+//! be promised, [`GcmSiv`] survives a repeat. [`ChaCha20Poly1305`]
+//! is as strong as [`Gcm`] and, on a processor without AES
+//! instructions, several times faster while leaking nothing through
+//! the cache; with them, [`Gcm`] is the faster.
 //!
 //! [`Xts`] authenticates nothing: it is for storage, where there is
 //! no room for a tag and the threat is a stolen disk. [`Kw`] and
@@ -41,6 +49,7 @@ pub mod cbc;
 pub mod cfb1;
 pub mod cfb128;
 pub mod cfb8;
+pub mod chacha20_poly1305;
 pub mod ctr;
 pub mod ff1;
 pub mod ff3_1;
@@ -59,6 +68,7 @@ pub use cbc::Cbc;
 pub use cfb1::Cfb1;
 pub use cfb128::Cfb128;
 pub use cfb8::Cfb8;
+pub use chacha20_poly1305::ChaCha20Poly1305;
 pub use ctr::Ctr;
 pub use ff1::Ff1;
 pub use ff3_1::Ff3_1;

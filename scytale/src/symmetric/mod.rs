@@ -1,9 +1,11 @@
 //! Symmetric (shared key) primitives.
 //!
 //! A block cipher, [`aes`], and the modes of operation that turn it
-//! into something a message can be encrypted with, under [`mode`].
-//! Everything here is written against the [`BlockCipher`] trait, so
-//! a mode works with any cipher and any of its implementations.
+//! into something a message can be encrypted with, under [`mode`];
+//! and a stream cipher, [`chacha20`], with the authenticated mode
+//! built on it there too. The block cipher modes are written against
+//! the [`BlockCipher`] trait, so each works with any cipher and any
+//! of its implementations.
 //!
 //! # Example
 //!
@@ -35,6 +37,7 @@
 //! one: see [`mode`] for which.
 
 pub mod aes;
+pub mod chacha20;
 pub mod mode;
 
 use crate::Error;

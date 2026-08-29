@@ -8,9 +8,9 @@
 //!
 //! | Module | What is in it |
 //! | --- | --- |
-//! | [`symmetric`] | AES and the modes built on any block cipher |
+//! | [`symmetric`] | AES, ChaCha20, and the modes built on them |
 //! | [`hash`] | the SHA-2 and SHA-3 families, and SHAKE |
-//! | [`mac`] | HMAC over any hash |
+//! | [`mac`] | HMAC over any hash, and Poly1305 |
 //! | [`kdf`] | HKDF and PBKDF2 |
 //! | [`random`] | a CTR_DRBG generator and the entropy that seeds it |
 //! | [`Error`] | the one type every fallible call returns |

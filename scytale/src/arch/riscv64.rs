@@ -48,6 +48,7 @@ pub(crate) const IMA_V: u64 = 1 << 2;
 pub(crate) const EXT_ZKND: u64 = 1 << 11;
 pub(crate) const EXT_ZKNE: u64 = 1 << 12;
 pub(crate) const EXT_ZKNH: u64 = 1 << 13;
+pub(crate) const EXT_ZVBB: u64 = 1 << 17;
 pub(crate) const EXT_ZVKG: u64 = 1 << 20;
 pub(crate) const EXT_ZVKNED: u64 = 1 << 21;
 

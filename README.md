@@ -43,6 +43,7 @@ a whole architecture.
 | Algorithm | Key sizes | Notes |
 | --- | --- | --- |
 | AES (FIPS 197) | 128, 192, 256 | the block cipher itself |
+| ChaCha20 (RFC 8439) | 256 | a stream cipher; no tables, no AES needed |
 
 | Hash | Digest | Notes |
 | --- | --- | --- |
@@ -58,6 +59,7 @@ define them. Built on any of them:
 | Construction | Kind | Notes |
 | --- | --- | --- |
 | HMAC (FIPS 198-1) | message authentication | constant-time verify |
+| Poly1305 (RFC 8439) | message authentication | one-time key; for the AEAD |
 | HKDF (RFC 5869) | key derivation | from a secret that is already random |
 | PBKDF2 (SP 800-132) | key derivation | from a password |
 
@@ -76,6 +78,12 @@ simply the one there is so far.
 | XTS | disk sectors | ciphertext stealing for a partial block |
 | FF1, FF3-1 | format preserving | see their documentation first |
 | KW, KWP | key wrapping | deterministic; for keys, not messages |
+
+And one that wraps no block cipher:
+
+| Mode | Kind | Notes |
+| --- | --- | --- |
+| ChaCha20-Poly1305 (RFC 8439) | authenticated | GCM's equal; faster without AES hardware |
 
 ## Random numbers
 
@@ -173,6 +181,9 @@ too.
 | aarch64 | ARMv8 SHA512 extension | SHA-512 | under emulation |
 | riscv64 | scalar cryptography (Zknh) | SHA-256, SHA-512 | under emulation |
 | aarch64 | ARMv8 SHA3 extension | SHA-3, SHAKE | under emulation |
+| x86-64 | AVX2 | ChaCha20 | on hardware |
+| aarch64 | NEON | ChaCha20 | under emulation |
+| riscv64 | vector extension with Zvbb | ChaCha20 | under emulation |
 | any | none needed; portable Rust | all | on hardware |
 
 GHASH is the hash inside GCM, GCM-SIV and XPN. Without a carry-less
@@ -181,7 +192,10 @@ SHA-384 and the SHA-512/t pair use the SHA-256 and SHA-512 code, so
 whatever accelerates those accelerates them. x86-64 has no SHA-512
 instruction in common use, so SHA-512 is portable there. Every SHA-3
 and SHAKE function is the one Keccak permutation, which only AArch64
-has instructions for; elsewhere it is portable.
+has instructions for; elsewhere it is portable. ChaCha20 needs no
+special instructions, only a vector unit: several blocks are computed
+at once, eight with AVX2, four with NEON, and as many as a register
+holds on RISC-V. Poly1305 is portable everywhere.
 
 Support is detected while the program runs: on x86-64 with CPUID, on
 aarch64 by reading the ID registers, on RISC-V through the kernel's
@@ -316,6 +330,10 @@ The hashes, on the same processor with 16 KB buffers:
 | SHA3-256 | `portable` | 450 MB/s |
 | SHA3-512 | `portable` | 240 MB/s |
 | SHAKE128 | `portable` | 550 MB/s |
+| ChaCha20 | `avx2` | 1.2 GB/s |
+| ChaCha20 | `portable` | 400 MB/s |
+| Poly1305 | `portable` | 1.3 GB/s |
+| ChaCha20-Poly1305 | `avx2` | 620 MB/s |
 
 SHA-224, SHA-384 and the SHA-512/t pair run at the speed of the
 function whose code they share.

@@ -9,3 +9,4 @@
 
 pub mod acvp;
 pub mod vectors;
+pub mod wycheproof;

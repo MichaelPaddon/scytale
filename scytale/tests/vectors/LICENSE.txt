@@ -34,3 +34,8 @@ interruption of operation. This software is not intended to be used in
 any situation where a failure could cause risk of injury or damage to
 property. The software developed by NIST employees is not subject to
 copyright protection within the United States.
+
+The vectors in the wycheproof directory are from Project Wycheproof,
+https://github.com/C2SP/wycheproof, directory testvectors_v1. They
+are unmodified and are licensed under the Apache License, Version
+2.0; a copy is at http://www.apache.org/licenses/LICENSE-2.0.

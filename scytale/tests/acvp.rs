@@ -1,4 +1,5 @@
-//! NIST ACVP vector suites.
+//! NIST ACVP vector suites, and the Wycheproof suites for what ACVP
+//! does not cover.
 //!
 //! One test binary covers every primitive and every implementation of
 //! it, so `cargo test -- --list` shows the whole inventory in one
@@ -765,5 +766,18 @@ mod pbkdf2 {
     #[test]
     fn acvp_aft() {
         pbkdf_vectors::run_aft::<scytale::hash::sha2::Sha224>("SHA2-224");
+    }
+}
+
+/// ChaCha20-Poly1305 (RFC 8439), through Project Wycheproof's cases:
+/// there is no ACVP suite for it. The automatic type is what runs;
+/// every ChaCha20 backend is checked against the portable one in
+/// the unit tests.
+mod chacha20_poly1305 {
+    use super::*;
+
+    #[test]
+    fn wycheproof() {
+        support::wycheproof::chacha20_poly1305::run();
     }
 }

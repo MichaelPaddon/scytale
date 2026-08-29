@@ -46,8 +46,11 @@ use cpu_time::ThreadTime;
 use scytale::hash::{sha2, sha3};
 use scytale::hash::{Hash, Xof, XofReader};
 use scytale::mac::hmac::Hmac;
+use scytale::mac::poly1305::Poly1305;
 use scytale::mac::Mac;
 use scytale::symmetric::aes::portable;
+use scytale::symmetric::chacha20;
+use scytale::symmetric::mode::ChaCha20Poly1305;
 use scytale::symmetric::mode::{Cbc, Ctr, Gcm, GcmSiv, Xts};
 use scytale::symmetric::{aes, Block, BlockCipher};
 use scytale::Error;
@@ -244,6 +247,31 @@ fn report(options: &Options) -> ExitCode {
 
     // SHA-3: one permutation under every function, so one hardware
     // section, and only AArch64 has the instructions.
+    // ChaCha20 and what is built on it. Poly1305 and the AEAD have
+    // one implementation each, so they appear under `auto` only.
+    ran |= chacha_section::<chacha20::ChaCha20>("auto", options, true);
+    #[cfg(target_arch = "x86_64")]
+    {
+        ran |= chacha_section::<chacha20::x86_64::ChaCha20>(
+            "avx2", options, false,
+        );
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        ran |= chacha_section::<chacha20::aarch64::ChaCha20>(
+            "neon", options, false,
+        );
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        ran |= chacha_section::<chacha20::riscv64::ChaCha20>(
+            "zvbb", options, false,
+        );
+    }
+    ran |= chacha_section::<chacha20::portable::ChaCha20>(
+        "portable", options, false,
+    );
+
     ran |= sha3_section::<sha3::Sha3_256, sha3::Sha3_512, sha3::Shake128>(
         "auto", options,
     );
@@ -386,6 +414,131 @@ where
 
 /// The SHA-3 rows: two digests and one extendable-output function,
 /// the last squeezing 32 bytes.
+/// The ChaCha20 rows; the last three exist only once.
+const CHACHA: [&str; 4] = [
+    "chacha20",
+    "poly1305",
+    "chacha20-poly1305-enc",
+    "chacha20-poly1305-dec",
+];
+
+/// What the ChaCha20 rows need of an implementation: the automatic
+/// type and the per-backend types have the same methods but no
+/// shared trait, since only the bench wants one.
+trait StreamCipher: Sized {
+    fn try_new(key: &[u8]) -> Result<Self, Error>;
+    fn encrypt(
+        &self,
+        nonce: &[u8; 12],
+        counter: u32,
+        data: &mut [u8],
+    ) -> Result<(), Error>;
+}
+
+impl StreamCipher for chacha20::ChaCha20 {
+    fn try_new(key: &[u8]) -> Result<Self, Error> {
+        chacha20::ChaCha20::try_new(key)
+    }
+    fn encrypt(
+        &self,
+        nonce: &[u8; 12],
+        counter: u32,
+        data: &mut [u8],
+    ) -> Result<(), Error> {
+        chacha20::ChaCha20::encrypt(self, nonce, counter, data)
+    }
+}
+
+impl<B: chacha20::Backend> StreamCipher for chacha20::Cipher<B> {
+    fn try_new(key: &[u8]) -> Result<Self, Error> {
+        chacha20::Cipher::try_new(key)
+    }
+    fn encrypt(
+        &self,
+        nonce: &[u8; 12],
+        counter: u32,
+        data: &mut [u8],
+    ) -> Result<(), Error> {
+        chacha20::Cipher::encrypt(self, nonce, counter, data)
+    }
+}
+
+/// Measures one ChaCha20 implementation, with Poly1305 and the AEAD
+/// rows when `whole` says so; an implementation the processor cannot
+/// run is left out.
+fn chacha_section<C: StreamCipher>(
+    implementation: &str,
+    options: &Options,
+    whole: bool,
+) -> bool {
+    let rows = if whole { &CHACHA[..] } else { &CHACHA[..1] };
+    let wanted: Vec<&'static str> = rows
+        .iter()
+        .copied()
+        .filter(|name| options.wants(implementation, name))
+        .collect();
+    if wanted.is_empty() {
+        return false;
+    }
+    let cipher = match C::try_new(&KEY256) {
+        Ok(cipher) => cipher,
+        Err(Error::NotSupported) => return false,
+        Err(e) => {
+            eprintln!("speed: {implementation}: {e}");
+            return false;
+        }
+    };
+    // Poly1305 and the AEAD cannot fail to build: the key is right
+    // and the automatic ChaCha20 always exists.
+    let mut mac = Poly1305::try_new(&KEY256).expect("poly1305");
+    let aead = ChaCha20Poly1305::try_new(&KEY256).expect("aead");
+    let mut tags = [[0u8; 16]; 2];
+    let (enc_tag, dec_tag) = tags.split_at_mut(1);
+    let mut tasks: Vec<Task<'_>> = vec![
+        (
+            "chacha20",
+            Box::new(|d: &mut [u8]| {
+                let _ = cipher.encrypt(&NONCE, 1, d);
+            }) as Operation<'_>,
+        ),
+        (
+            "poly1305",
+            Box::new(|d: &mut [u8]| {
+                mac.reset();
+                mac.update(d);
+                black_box(mac.clone().finalize());
+            }),
+        ),
+        (
+            "chacha20-poly1305-enc",
+            Box::new(|d: &mut [u8]| {
+                let _ = aead.encrypt(&NONCE, &[], d, &mut enc_tag[0]);
+            }),
+        ),
+        // The tag never matches after the first round, which costs a
+        // comparison and changes nothing else; the streaming form
+        // keeps the wipe on a bad tag out of the measurement.
+        (
+            "chacha20-poly1305-dec",
+            Box::new(|d: &mut [u8]| {
+                let Ok(mut state) = aead.decryptor(&NONCE) else {
+                    return;
+                };
+                let _ = state.update(d);
+                let _ = state.verify(&dec_tag[0]);
+            }),
+        ),
+    ];
+    tasks.retain(|(name, _)| wanted.contains(name));
+
+    println!("\n{implementation}");
+    println!("{}", heading());
+    for (name, operation) in &mut tasks {
+        println!("{}", row(name, operation, options.budget));
+    }
+    true
+}
+
 const SHA3: [&str; 3] = ["sha3-256", "sha3-512", "shake128"];
 
 /// Measures one implementation of SHA-3, returning whether it ran

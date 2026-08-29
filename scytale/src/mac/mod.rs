@@ -7,10 +7,11 @@
 //! that stops at the first difference tells an attacker, through
 //! timing, how much of a guess was right.
 //!
-//! [`hmac`] builds a MAC from any hash. Hashing the key in front of
-//! the message does not: for the SHA-2 family anyone holding a
-//! message's digest can extend the message and compute the digest of
-//! the extension, key unseen.
+//! [`hmac`] builds a MAC from any hash, and [`poly1305`] is the
+//! one-time authenticator that ChaCha20-Poly1305 is built on. Hashing
+//! the key in front of the message does not make a MAC: for the SHA-2
+//! family anyone holding a message's digest can extend the message
+//! and compute the digest of the extension, key unseen.
 //!
 //! ```
 //! use scytale::mac::hmac::HmacSha256;
@@ -40,6 +41,7 @@
 //! its first byte or its last, and says only that it was wrong.
 
 pub mod hmac;
+pub mod poly1305;
 
 use crate::symmetric::Block;
 use crate::Error;
