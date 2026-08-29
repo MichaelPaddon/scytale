@@ -212,6 +212,8 @@ compress!(compress512, Functions64, u64, 128, 80, K512);
 /// The bitwise functions in plain shifts and rotates.
 pub struct Compress;
 
+impl super::engine::Sealed for Compress {}
+
 impl Functions32 for Compress {
     #[inline(always)]
     fn ch(x: u32, y: u32, z: u32) -> u32 {

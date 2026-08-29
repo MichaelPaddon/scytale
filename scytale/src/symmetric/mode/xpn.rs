@@ -22,7 +22,9 @@
 //!   breaks GCM completely, as described in [`Gcm`].
 //! - A shorter tag is a weaker one, and link protocols often choose
 //!   eight bytes for the sake of overhead. That is a deliberate
-//!   trade, not a free saving.
+//!   trade, not a free saving, which is why it has a method of its
+//!   own, [`Xpn::decrypt_truncated`], rather than being selected by a
+//!   buffer's length.
 //!
 //! There is no incremental form: this exists for network frames,
 //! which are small and arrive whole.
@@ -52,18 +54,27 @@
 //! # }
 //! ```
 
-use super::gcm::Gcm;
+use core::fmt;
+
+use super::gcm::{Gcm, SHORT_NONCE, TAG};
 use super::ghash::BLOCK;
 use crate::symmetric::BlockCipher;
 use crate::Error;
 
 /// The length of both the salt and the frame identifier.
-const HALF: usize = 12;
+const HALF: usize = SHORT_NONCE;
 
 /// GCM with extended packet numbering, over a block cipher.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Xpn<C> {
     gcm: Gcm<C>,
+}
+
+impl<C> fmt::Debug for Xpn<C> {
+    /// Deliberately omits everything: it is all derived from the key.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Xpn").finish_non_exhaustive()
+    }
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Xpn<C> {
@@ -76,20 +87,21 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xpn<C> {
 
     /// Encrypts `data` in place and writes its tag.
     ///
-    /// `salt` and `frame` are each 12 bytes; together they make the
-    /// nonce. `aad` is authenticated but not encrypted, which for a
-    /// link protocol is the part of the header that must stay
-    /// readable.
+    /// The session `salt` comes first and the `frame` identifier
+    /// second; together they make the nonce. They are the same size,
+    /// so the order is all that tells them apart, and swapping them
+    /// gives a nonce that is valid and wrong. `aad` is authenticated
+    /// but not encrypted, which for a link protocol is the part of
+    /// the header that must stay readable.
     pub fn encrypt(
         &self,
-        salt: &[u8],
-        frame: &[u8],
+        salt: &[u8; HALF],
+        frame: &[u8; HALF],
         aad: &[u8],
         data: &mut [u8],
-        tag: &mut [u8],
+        tag: &mut [u8; TAG],
     ) -> Result<(), Error> {
-        let nonce = nonce(salt, frame)?;
-        self.gcm.encrypt(&nonce, aad, data, tag)
+        self.gcm.encrypt(&nonce(salt, frame)[..], aad, data, tag)
     }
 
     /// Checks `tag` and, if it is right, decrypts `data` in place.
@@ -98,30 +110,49 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xpn<C> {
     /// [`Error::AuthenticationFailed`] returned.
     pub fn decrypt(
         &self,
-        salt: &[u8],
-        frame: &[u8],
+        salt: &[u8; HALF],
+        frame: &[u8; HALF],
+        aad: &[u8],
+        data: &mut [u8],
+        tag: &[u8; TAG],
+    ) -> Result<(), Error> {
+        self.gcm.decrypt(&nonce(salt, frame)[..], aad, data, tag)
+    }
+
+    /// As [`decrypt`](Self::decrypt), for a protocol that carries a
+    /// tag cut to between four and sixteen bytes; see
+    /// [`gcm::Decryptor::verify_truncated`] for what that costs.
+    ///
+    /// [`gcm::Decryptor::verify_truncated`]:
+    ///     super::gcm::Decryptor::verify_truncated
+    pub fn decrypt_truncated(
+        &self,
+        salt: &[u8; HALF],
+        frame: &[u8; HALF],
         aad: &[u8],
         data: &mut [u8],
         tag: &[u8],
     ) -> Result<(), Error> {
-        let nonce = nonce(salt, frame)?;
-        self.gcm.decrypt(&nonce, aad, data, tag)
+        let mut state = self.gcm.decryptor(&nonce(salt, frame)[..])?;
+        state.aad(aad)?;
+        state.update(data)?;
+        match state.verify_truncated(tag) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                data.fill(0);
+                Err(e)
+            }
+        }
     }
 }
 
 /// Combines the session salt with the frame identifier.
-fn nonce(salt: &[u8], frame: &[u8]) -> Result<[u8; HALF], Error> {
-    if salt.len() != HALF {
-        return Err(Error::InvalidNonceLength(salt.len()));
-    }
-    if frame.len() != HALF {
-        return Err(Error::InvalidNonceLength(frame.len()));
-    }
+fn nonce(salt: &[u8; HALF], frame: &[u8; HALF]) -> [u8; HALF] {
     let mut nonce = [0u8; HALF];
     for ((slot, a), b) in nonce.iter_mut().zip(salt).zip(frame) {
         *slot = a ^ b;
     }
-    Ok(nonce)
+    nonce
 }
 
 #[cfg(test)]
@@ -209,21 +240,48 @@ mod tests {
         );
     }
 
+    /// The eight-byte tag MACsec commonly uses is a prefix of the
+    /// full one, checked by the method named for it.
     #[test]
-    fn rejects_bad_lengths() {
+    fn truncated_tags() {
         let xpn = xpn();
-        let source = [0u8; 16];
-        for n in [0, 11, 13, 16] {
-            assert_eq!(
-                xpn.encrypt(&source[..n], &[0; 12], b"", &mut [], &mut [0; 16])
-                    .unwrap_err(),
-                Error::InvalidNonceLength(n)
-            );
-            assert_eq!(
-                xpn.encrypt(&[0; 12], &source[..n], b"", &mut [], &mut [0; 16])
-                    .unwrap_err(),
-                Error::InvalidNonceLength(n)
-            );
-        }
+        let plain = [3u8; 20];
+        let mut sealed = plain;
+        let mut tag = [0u8; 16];
+        xpn.encrypt(&[1; 12], &[2; 12], b"h", &mut sealed, &mut tag)
+            .unwrap();
+
+        let mut data = sealed;
+        xpn.decrypt_truncated(&[1; 12], &[2; 12], b"h", &mut data, &tag[..8])
+            .unwrap();
+        assert_eq!(data, plain);
+
+        let mut data = sealed;
+        assert_eq!(
+            xpn.decrypt_truncated(
+                &[1; 12],
+                &[2; 12],
+                b"h",
+                &mut data,
+                &tag[..3]
+            )
+            .unwrap_err(),
+            Error::InvalidTagLength(3)
+        );
+        let mut wrong = tag;
+        wrong[7] ^= 1;
+        let mut data = sealed;
+        assert_eq!(
+            xpn.decrypt_truncated(
+                &[1; 12],
+                &[2; 12],
+                b"h",
+                &mut data,
+                &wrong[..8]
+            )
+            .unwrap_err(),
+            Error::AuthenticationFailed
+        );
+        assert_eq!(data, [0u8; 20], "buffer wiped");
     }
 }

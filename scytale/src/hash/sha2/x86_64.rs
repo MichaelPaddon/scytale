@@ -33,6 +33,8 @@ pub(crate) fn has_sha() -> bool {
 /// The compression function via SHA-NI.
 pub struct ShaNi;
 
+impl super::engine::Sealed for ShaNi {}
+
 impl Compress32 for ShaNi {
     fn supported() -> bool {
         has_sha()

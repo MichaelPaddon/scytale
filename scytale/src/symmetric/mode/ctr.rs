@@ -52,12 +52,14 @@
 //! # }
 //! ```
 
-use super::{register_from, xor, LANES};
+use core::fmt;
+
+use super::{xor, LANES};
 use crate::symmetric::{Block, BlockCipher};
 use crate::Error;
 
 /// Counter mode over a block cipher.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Ctr<C> {
     cipher: C,
 }
@@ -68,14 +70,14 @@ impl<C: BlockCipher> Ctr<C> {
         Ctr { cipher }
     }
 
-    /// Encrypts `data` in place, starting from `counter`, which must
-    /// be one block. Any length of message is allowed.
+    /// Encrypts `data` in place, starting from `counter`. Any length
+    /// of message is allowed.
     pub fn encrypt(
         &self,
-        counter: &[u8],
+        counter: &C::Block,
         data: &mut [u8],
     ) -> Result<(), Error> {
-        self.stream(counter)?.update(data)
+        self.stream(counter).update(data)
     }
 
     /// Decrypts `data` in place, starting from `counter`.
@@ -85,20 +87,20 @@ impl<C: BlockCipher> Ctr<C> {
     /// that calling code reads the way it means.
     pub fn decrypt(
         &self,
-        counter: &[u8],
+        counter: &C::Block,
         data: &mut [u8],
     ) -> Result<(), Error> {
-        self.stream(counter)?.update(data)
+        self.stream(counter).update(data)
     }
 
     /// Starts a message that arrives in pieces.
-    pub fn stream(&self, counter: &[u8]) -> Result<Stream<'_, C>, Error> {
-        Ok(Stream {
+    pub fn stream(&self, counter: &C::Block) -> Stream<'_, C> {
+        Stream {
             cipher: &self.cipher,
-            counter: register_from(counter)?,
+            counter: *counter,
             keystream: C::Block::ZERO,
             used: C::Block::SIZE,
-        })
+        }
     }
 }
 
@@ -155,7 +157,6 @@ fn counters<B: Block>(counter: &mut B, blocks: &mut [B]) {
 /// Pieces may be any length, and a piece may end part way through a
 /// keystream block: the rest of that block is kept for the next one.
 /// There is nothing to finish.
-#[derive(Debug)]
 pub struct Stream<'a, C: BlockCipher> {
     cipher: &'a C,
     counter: C::Block,
@@ -202,6 +203,19 @@ impl<C: BlockCipher> Stream<'_, C> {
             self.used = tail.len();
         }
         Ok(())
+    }
+}
+
+// Debug output omits the state: it is all derived from the key.
+impl<C> fmt::Debug for Ctr<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Ctr").finish_non_exhaustive()
+    }
+}
+
+impl<C: BlockCipher> fmt::Debug for Stream<'_, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Stream").finish_non_exhaustive()
     }
 }
 
@@ -333,7 +347,7 @@ mod tests {
 
         for split in [1, 15, 16, 17, 128, 129] {
             let mut pieces = plain;
-            let mut s = ctr.stream(&counter).unwrap();
+            let mut s = ctr.stream(&counter);
             let (a, b) = pieces.split_at_mut(split);
             s.update(a).unwrap();
             s.update(b).unwrap();
@@ -342,22 +356,34 @@ mod tests {
 
         // One byte at a time crosses every block boundary.
         let mut pieces = plain;
-        let mut s = ctr.stream(&counter).unwrap();
+        let mut s = ctr.stream(&counter);
         for byte in pieces.iter_mut() {
             s.update(core::slice::from_mut(byte)).unwrap();
         }
         assert_eq!(pieces, whole, "one byte at a time");
     }
 
+    /// The state derives from the key, so its debug output must not
+    /// show it.
     #[test]
-    fn rejects_wrong_counter_length() {
-        let ctr = ctr(&[0; 16]);
-        let source = [0u8; 32];
-        for n in [0, 1, 15, 17, 32] {
-            assert_eq!(
-                ctr.encrypt(&source[..n], &mut [0; 4]).unwrap_err(),
-                Error::InvalidNonceLength(n)
-            );
+    fn debug_omits_the_state() {
+        struct Buffer([u8; 256], usize);
+        impl core::fmt::Write for Buffer {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                let end = self.1 + s.len();
+                self.0[self.1..end].copy_from_slice(s.as_bytes());
+                self.1 = end;
+                Ok(())
+            }
         }
+        let mode = ctr(&[0x5a; 16]);
+        let iv = [0x5a; 16];
+        let state = mode.stream(&iv);
+        let mut buffer = Buffer([0; 256], 0);
+        core::fmt::write(&mut buffer, format_args!("{mode:?} {state:?}"))
+            .unwrap();
+        let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();
+        // 0x5a prints as 90 in decimal.
+        assert!(!text.contains("90"), "{text}");
     }
 }

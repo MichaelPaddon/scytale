@@ -59,6 +59,8 @@
 //! # }
 //! ```
 
+use core::fmt;
+
 use crate::symmetric::{BlockCipher, Error};
 
 /// The cipher block this is defined for.
@@ -71,11 +73,20 @@ pub(super) const SEMIBLOCK: usize = 8;
 const ICV1: [u8; SEMIBLOCK] = [0xa6; SEMIBLOCK];
 
 /// Key wrapping over a block cipher.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Kw<C> {
     cipher: C,
     /// Whether wrapping uses the cipher's forward direction.
     forward: bool,
+}
+
+impl<C> fmt::Debug for Kw<C> {
+    /// Deliberately omits the cipher, which holds the key.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Kw")
+            .field("forward", &self.forward)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Kw<C> {
@@ -98,15 +109,16 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Kw<C> {
     /// Wraps `plain` into `out`, and says how much of `out` was used.
     ///
     /// `plain` must be a whole number of eight-byte units and at
-    /// least two of them. `out` must have room for eight bytes more
-    /// than `plain`.
+    /// least two of them, or [`Error::InvalidLength`] is returned.
+    /// `out` must have room for eight bytes more than `plain`, or
+    /// [`Error::OutputTooSmall`] says how much it needs.
     pub fn wrap(&self, plain: &[u8], out: &mut [u8]) -> Result<usize, Error> {
         if plain.len() < 2 * SEMIBLOCK || !plain.len().is_multiple_of(SEMIBLOCK)
         {
             return Err(Error::InvalidLength(plain.len()));
         }
         let total = plain.len() + SEMIBLOCK;
-        let out = out.get_mut(..total).ok_or(Error::InvalidLength(total))?;
+        let out = out.get_mut(..total).ok_or(Error::OutputTooSmall(total))?;
         out[SEMIBLOCK..].copy_from_slice(plain);
         let (check, body) = out.split_at_mut(SEMIBLOCK);
         let mut a = ICV1;
@@ -117,6 +129,11 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Kw<C> {
 
     /// Unwraps `wrapped` into `out`, and says how much of `out` was
     /// used.
+    ///
+    /// `wrapped` must be at least three units and a whole number of
+    /// them, or [`Error::InvalidLength`] is returned; `out` must have
+    /// room for eight bytes fewer, or [`Error::OutputTooSmall`] says
+    /// how much it needs.
     ///
     /// Returns [`Error::AuthenticationFailed`] if the check value is
     /// wrong, having first wiped `out`, so nothing that failed the
@@ -132,7 +149,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Kw<C> {
             return Err(Error::InvalidLength(wrapped.len()));
         }
         let total = wrapped.len() - SEMIBLOCK;
-        let out = out.get_mut(..total).ok_or(Error::InvalidLength(total))?;
+        let out = out.get_mut(..total).ok_or(Error::OutputTooSmall(total))?;
         out.copy_from_slice(&wrapped[SEMIBLOCK..]);
         let mut a = [0u8; SEMIBLOCK];
         a.copy_from_slice(&wrapped[..SEMIBLOCK]);
@@ -351,12 +368,16 @@ mod tests {
                 "wrapping {len}"
             );
         }
-        // Output too small by one byte.
+        // Output too small by one byte; the error says what it needs.
         let plain = [0u8; 16];
-        assert!(matches!(
-            kw.wrap(&plain, &mut out[..23]),
-            Err(Error::InvalidLength(_))
-        ));
+        assert_eq!(
+            kw.wrap(&plain, &mut out[..23]).unwrap_err(),
+            Error::OutputTooSmall(24)
+        );
+        assert_eq!(
+            kw.unwrap(&[0u8; 24], &mut out[..15]).unwrap_err(),
+            Error::OutputTooSmall(16)
+        );
         // A wrapped form must hold at least three units.
         for len in [0usize, 8, 16, 20] {
             let wrapped = [0u8; 20];
@@ -368,5 +389,28 @@ mod tests {
                 "unwrapping {len}"
             );
         }
+    }
+
+    /// Formatting the state must not print the key.
+    #[test]
+    fn debug_omits_the_key() {
+        struct Buffer([u8; 256], usize);
+        impl core::fmt::Write for Buffer {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                let end = self.1 + s.len();
+                self.0[self.1..end].copy_from_slice(s.as_bytes());
+                self.1 = end;
+                Ok(())
+            }
+        }
+        let mut buffer = Buffer([0; 256], 0);
+        core::fmt::write(
+            &mut buffer,
+            format_args!("{:?}", Kw::new(Aes::try_new(&[3u8; 16]).unwrap())),
+        )
+        .unwrap();
+        let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();
+        assert!(!text.contains("3, 3"), "{text}");
+        assert!(text.starts_with("Kw"));
     }
 }

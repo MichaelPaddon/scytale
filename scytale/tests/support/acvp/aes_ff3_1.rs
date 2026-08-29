@@ -56,7 +56,7 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
     for t in group["tests"].as_array().expect("tests") {
         let label = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
         let ff3 = Ff3_1::<C>::try_new(&hex(&t["key"]), radix).expect("key");
-        let tweak = hex(&t["tweak"]);
+        let tweak: [u8; 7] = hex(&t["tweak"]).try_into().expect("tweak");
 
         let (input, expected) = if encrypt {
             (t["pt"].as_str().unwrap(), t["ct"].as_str().unwrap())

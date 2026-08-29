@@ -15,6 +15,10 @@
 //! that is not a whole number of bytes can only end that way, so the
 //! last few bits are taken by [`BitHash::finalize_bits`] and the
 //! byte-oriented path pays nothing for them.
+//!
+//! This module is public only so that the backend type aliases,
+//! `portable::Sha256` and the like, can be named; its traits are
+//! sealed and implemented by nothing outside the crate.
 
 #![allow(unsafe_code)]
 
@@ -27,8 +31,14 @@ use crate::hash::{BitHash, Hash};
 use crate::symmetric::Block;
 use crate::Error;
 
-/// A SHA-256 family compression function.
-pub trait Compress32 {
+/// Keeps the traits here to this crate's own implementations.
+mod sealed {
+    pub trait Sealed {}
+}
+pub(crate) use sealed::Sealed;
+
+/// A SHA-256 family compression function. Sealed.
+pub trait Compress32: Sealed {
     /// Whether this processor can run it.
     fn supported() -> bool;
 
@@ -40,8 +50,8 @@ pub trait Compress32 {
     unsafe fn compress(state: &mut [u32; 8], blocks: &[[u8; 64]]);
 }
 
-/// A SHA-512 family compression function.
-pub trait Compress64 {
+/// A SHA-512 family compression function. Sealed.
+pub trait Compress64: Sealed {
     /// Whether this processor can run it.
     fn supported() -> bool;
 
@@ -53,16 +63,16 @@ pub trait Compress64 {
     unsafe fn compress(state: &mut [u64; 8], blocks: &[[u8; 128]]);
 }
 
-/// A member of the SHA-256 family: SHA-224 or SHA-256.
-pub trait Variant32: Clone {
+/// A member of the SHA-256 family: SHA-224 or SHA-256. Sealed.
+pub trait Variant32: Clone + Sealed {
     /// The initial hash value.
     const IV: [u32; 8];
     /// The digest, a prefix of the final state.
     type Output: Block;
 }
 
-/// A member of the SHA-512 family: SHA-384 or SHA-512.
-pub trait Variant64: Clone {
+/// A member of the SHA-512 family: SHA-384 or SHA-512. Sealed.
+pub trait Variant64: Clone + Sealed {
     /// The initial hash value.
     const IV: [u64; 8];
     /// The digest, a prefix of the final state.
@@ -73,7 +83,7 @@ pub trait Variant64: Clone {
 /// byte that carries those bits and the padding's leading one.
 fn trailer(last: u8, bits: u32) -> Result<u8, Error> {
     if !(1..=7).contains(&bits) {
-        return Err(Error::InvalidLength(bits as usize));
+        return Err(Error::InvalidBitCount(bits));
     }
     let keep = 0xffu8 << (8 - bits);
     Ok((last & keep) | (0x80 >> bits))
@@ -297,7 +307,7 @@ mod tests {
 
     #[test]
     fn trailer_rejects_whole_bytes() {
-        assert_eq!(trailer(0, 0), Err(Error::InvalidLength(0)));
-        assert_eq!(trailer(0, 8), Err(Error::InvalidLength(8)));
+        assert_eq!(trailer(0, 0), Err(Error::InvalidBitCount(0)));
+        assert_eq!(trailer(0, 8), Err(Error::InvalidBitCount(8)));
     }
 }

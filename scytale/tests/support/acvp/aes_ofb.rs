@@ -7,8 +7,15 @@
 
 use super::{groups as suite_groups, hex};
 use scytale::symmetric::mode::Ofb;
-use scytale::symmetric::BlockCipher;
+use scytale::symmetric::{Block, BlockCipher};
 use serde_json::Value;
+
+/// The IV as the cipher's block type.
+fn block<C: BlockCipher>(bytes: &[u8]) -> C::Block {
+    let mut block = C::Block::ZERO;
+    block.as_mut().copy_from_slice(bytes);
+    block
+}
 
 const FILE: &str = "ACVP-AES-OFB-1.0/internalProjection.json";
 
@@ -56,9 +63,11 @@ fn aft<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
         };
         let mut data = input;
         if encrypt {
-            ofb.encrypt(&iv, &mut data).expect("whole blocks");
+            ofb.encrypt(&block::<C>(&iv), &mut data)
+                .expect("whole blocks");
         } else {
-            ofb.decrypt(&iv, &mut data).expect("whole blocks");
+            ofb.decrypt(&block::<C>(&iv), &mut data)
+                .expect("whole blocks");
         }
         assert_eq!(data, expected, "tgId {} tcId {}", group["tgId"], t["tcId"]);
         count += 1;
@@ -92,7 +101,7 @@ fn mct<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
             // One state serves both directions: the keystream does
             // not depend on the message.
             let mut segment = input.clone();
-            let mut state = ofb.stream(&iv).expect("iv");
+            let mut state = ofb.stream(&block::<C>(&iv));
             for j in 0..MCT_SEGMENTS {
                 state.update(&mut segment).expect("one block");
                 outputs.push(segment.clone());

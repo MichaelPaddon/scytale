@@ -49,6 +49,8 @@
 //! # }
 //! ```
 
+use core::fmt;
+
 use super::ghash::BLOCK;
 use super::polyval::Polyval;
 use super::{xor, LANES};
@@ -67,12 +69,20 @@ const MAX_FIELD: u64 = 1 << 36;
 
 /// AES-GCM-SIV over a block cipher.
 ///
-/// Unlike the other modes this holds a key rather than a cipher,
-/// because it derives a fresh pair of keys for every nonce.
-#[derive(Clone, Debug)]
+/// Unlike most modes this is built from a key rather than a cipher:
+/// every nonce gets its own pair of keys derived from it, so a
+/// single expanded cipher would be no use.
+#[derive(Clone)]
 pub struct GcmSiv<C> {
     cipher: C,
     key_len: usize,
+}
+
+impl<C> fmt::Debug for GcmSiv<C> {
+    /// Deliberately omits the cipher, which holds the key.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GcmSiv").finish_non_exhaustive()
+    }
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> GcmSiv<C> {
@@ -91,12 +101,12 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> GcmSiv<C> {
     /// Encrypts `data` in place and writes its 16-byte tag.
     pub fn encrypt(
         &self,
-        nonce: &[u8],
+        nonce: &[u8; NONCE],
         aad: &[u8],
         data: &mut [u8],
-        tag: &mut [u8],
+        tag: &mut [u8; TAG],
     ) -> Result<(), Error> {
-        check(nonce, aad, data.len(), tag.len())?;
+        check(aad, data.len())?;
         let (hash_key, cipher) = self.derive(nonce)?;
 
         // The tag covers the plaintext, so it is computed first.
@@ -115,19 +125,18 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> GcmSiv<C> {
     /// [`Error::AuthenticationFailed`] returned.
     pub fn decrypt(
         &self,
-        nonce: &[u8],
+        nonce: &[u8; NONCE],
         aad: &[u8],
         data: &mut [u8],
-        tag: &[u8],
+        tag: &[u8; TAG],
     ) -> Result<(), Error> {
-        check(nonce, aad, data.len(), tag.len())?;
+        check(aad, data.len())?;
         let (hash_key, cipher) = self.derive(nonce)?;
 
         // The counter comes from the tag, so the message can be
         // decrypted before the tag is known to be right; then the tag
         // is recomputed over the plaintext and compared.
-        let mut counter = [0u8; BLOCK];
-        counter.copy_from_slice(tag);
+        let mut counter = *tag;
         counter[BLOCK - 1] |= 0x80;
         apply(&cipher, &mut counter, data);
 
@@ -143,7 +152,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> GcmSiv<C> {
     /// Derives the hashing key and the encrypting cipher for one
     /// nonce, as RFC 8452 section 4 does: successive counters with
     /// the nonce, keeping the first half of each result.
-    fn derive(&self, nonce: &[u8]) -> Result<([u8; BLOCK], C), Error> {
+    fn derive(&self, nonce: &[u8; NONCE]) -> Result<([u8; BLOCK], C), Error> {
         let mut material = [0u8; 48];
         let blocks = 2 + self.key_len / 8;
         for i in 0..blocks {
@@ -160,19 +169,8 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> GcmSiv<C> {
     }
 }
 
-/// Checks the fixed lengths and the size limits.
-fn check(
-    nonce: &[u8],
-    aad: &[u8],
-    message: usize,
-    tag: usize,
-) -> Result<(), Error> {
-    if nonce.len() != NONCE {
-        return Err(Error::InvalidNonceLength(nonce.len()));
-    }
-    if tag != TAG {
-        return Err(Error::InvalidTagLength(tag));
-    }
+/// Checks the size limits.
+fn check(aad: &[u8], message: usize) -> Result<(), Error> {
     if aad.len() as u64 > MAX_FIELD || message as u64 > MAX_FIELD {
         return Err(Error::MessageTooLong);
     }
@@ -184,7 +182,7 @@ fn check(
 fn authenticate<C: BlockCipher<Block = [u8; BLOCK]>>(
     hash_key: &[u8; BLOCK],
     cipher: &C,
-    nonce: &[u8],
+    nonce: &[u8; NONCE],
     aad: &[u8],
     plaintext: &[u8],
 ) -> Result<[u8; BLOCK], Error> {
@@ -343,11 +341,13 @@ mod tests {
             let (mut ab, mut pb) = ([0u8; MAX], [0u8; MAX]);
             let (mut cb, mut tb) = ([0u8; MAX], [0u8; 16]);
             let key = unhex(case[0], &mut kb);
-            let nonce = unhex(case[1], &mut nb);
+            unhex(case[1], &mut nb);
+            let nonce = &nb;
             let aad = unhex(case[2], &mut ab);
             let plain = unhex(case[3], &mut pb);
             let cipher = unhex(case[4], &mut cb);
-            let want = unhex(case[5], &mut tb);
+            unhex(case[5], &mut tb);
+            let want = &tb;
 
             let siv = GcmSiv::<Aes>::try_new(key).unwrap();
             let mut data = [0u8; MAX];
@@ -357,7 +357,7 @@ mod tests {
 
             siv.encrypt(nonce, aad, data, &mut tag).unwrap();
             assert_eq!(data, cipher, "case {i} ciphertext");
-            assert_eq!(tag, want, "case {i} tag");
+            assert_eq!(&tag, want, "case {i} tag");
 
             siv.decrypt(nonce, aad, data, want).unwrap();
             assert_eq!(data, plain, "case {i} plaintext");
@@ -428,7 +428,8 @@ mod tests {
     }
 
     /// RFC 8452 defines no 192-bit variant, so one must be refused
-    /// rather than quietly treated as something else.
+    /// rather than quietly treated as something else. Nonce and tag
+    /// lengths are fixed by their types.
     #[test]
     fn rejects_bad_lengths() {
         let source = [0u8; 32];
@@ -436,22 +437,6 @@ mod tests {
             assert_eq!(
                 GcmSiv::<Aes>::try_new(&source[..n]).unwrap_err(),
                 Error::InvalidKeyLength(n)
-            );
-        }
-        let siv = siv();
-        for n in [0, 11, 13, 16] {
-            assert_eq!(
-                siv.encrypt(&source[..n], b"", &mut [], &mut [0; 16])
-                    .unwrap_err(),
-                Error::InvalidNonceLength(n)
-            );
-        }
-        for n in [0, 8, 12, 15, 17] {
-            let mut tag = [0u8; 17];
-            assert_eq!(
-                siv.encrypt(&[0; 12], b"", &mut [], &mut tag[..n])
-                    .unwrap_err(),
-                Error::InvalidTagLength(n)
             );
         }
     }
@@ -474,5 +459,28 @@ mod tests {
                 .unwrap();
             assert_eq!(data[..n], plain[..n], "{n} bytes");
         }
+    }
+
+    /// Formatting the state must not print the key.
+    #[test]
+    fn debug_omits_the_key() {
+        struct Buffer([u8; 256], usize);
+        impl core::fmt::Write for Buffer {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                let end = self.1 + s.len();
+                self.0[self.1..end].copy_from_slice(s.as_bytes());
+                self.1 = end;
+                Ok(())
+            }
+        }
+        let mut buffer = Buffer([0; 256], 0);
+        core::fmt::write(
+            &mut buffer,
+            format_args!("{:?}", GcmSiv::<Aes>::try_new(&[0x5a; 32]).unwrap()),
+        )
+        .unwrap();
+        let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();
+        assert!(!text.contains("5a, 5a"), "{text}");
+        assert!(text.starts_with("GcmSiv"));
     }
 }

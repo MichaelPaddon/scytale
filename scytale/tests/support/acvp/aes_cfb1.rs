@@ -5,8 +5,15 @@
 
 use super::{groups as suite_groups, hex};
 use scytale::symmetric::mode::Cfb1;
-use scytale::symmetric::BlockCipher;
+use scytale::symmetric::{Block, BlockCipher};
 use serde_json::Value;
+
+/// The IV as the cipher's block type.
+fn block<C: BlockCipher>(bytes: &[u8]) -> C::Block {
+    let mut block = C::Block::ZERO;
+    block.as_mut().copy_from_slice(bytes);
+    block
+}
 
 const FILE: &str = "ACVP-AES-CFB1-1.0/internalProjection.json";
 
@@ -55,9 +62,11 @@ fn aft<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
         };
         let mut data = input;
         if encrypt {
-            cfb.encrypt(&iv, &mut data, bits).expect("bits fit");
+            cfb.encrypt(&block::<C>(&iv), &mut data, bits)
+                .expect("bits fit");
         } else {
-            cfb.decrypt(&iv, &mut data, bits).expect("bits fit");
+            cfb.decrypt(&block::<C>(&iv), &mut data, bits)
+                .expect("bits fit");
         }
         assert_eq!(data, expected, "tgId {} tcId {}", group["tgId"], t["tcId"]);
         count += 1;
@@ -87,14 +96,14 @@ fn mct<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
             let mut outputs = [0u8; MCT_SEGMENTS];
             let mut segment = [input << 7];
             if encrypt {
-                let mut state = cfb.encryptor(&iv).expect("iv");
+                let mut state = cfb.encryptor(&block::<C>(&iv));
                 for j in 0..MCT_SEGMENTS {
                     state.update(&mut segment, 1).expect("one bit");
                     outputs[j] = segment[0] >> 7;
                     segment = [next_input(&iv, &outputs, j) << 7];
                 }
             } else {
-                let mut state = cfb.decryptor(&iv).expect("iv");
+                let mut state = cfb.decryptor(&block::<C>(&iv));
                 for j in 0..MCT_SEGMENTS {
                     state.update(&mut segment, 1).expect("one bit");
                     outputs[j] = segment[0] >> 7;

@@ -58,6 +58,8 @@
 //! # }
 //! ```
 
+use core::fmt;
+
 use super::ghash::BLOCK;
 use crate::math::natural::Natural;
 use crate::symmetric::BlockCipher;
@@ -83,10 +85,19 @@ const MAX_NUMBER: usize = MAX_HALF * 2;
 const MAX_DRAWN: usize = 4 * MAX_NUMBER.div_ceil(4) + 4 + BLOCK;
 
 /// FF1 over a block cipher, for one radix.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Ff1<C> {
     cipher: C,
     radix: u32,
+}
+
+impl<C> fmt::Debug for Ff1<C> {
+    /// Deliberately omits the cipher, which holds the key.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Ff1")
+            .field("radix", &self.radix)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Ff1<C> {

@@ -52,6 +52,8 @@
 //! # }
 //! ```
 
+use core::fmt;
+
 use super::ghash::BLOCK;
 use crate::math::natural::Natural;
 use crate::symmetric::BlockCipher;
@@ -63,7 +65,8 @@ const ROUNDS: usize = 8;
 /// The smallest number of possible messages the standard allows.
 const MIN_DOMAIN: u64 = 1_000_000;
 
-/// The tweak length, fixed by the standard.
+/// The tweak length, fixed by the standard, unlike FF1's. The
+/// original FF3 allowed eight bytes, and that was the flaw.
 const TWEAK: usize = 7;
 
 /// Bits one half of the message must fit in.
@@ -73,13 +76,26 @@ const HALF_BITS: u32 = 96;
 pub const MAX_SYMBOLS: usize = 2 * HALF_BITS as usize;
 
 /// FF3-1 over a block cipher, for one radix.
-#[derive(Clone, Debug)]
+///
+/// Built from a key rather than a cipher because the standard runs
+/// the cipher under the key reversed, which only the constructor can
+/// arrange.
+#[derive(Clone)]
 pub struct Ff3_1<C> {
     cipher: C,
     radix: u32,
     /// The longest message this radix allows, from the 96-bit cap on
     /// each half.
     max_symbols: usize,
+}
+
+impl<C> fmt::Debug for Ff3_1<C> {
+    /// Deliberately omits the cipher, which holds the key.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Ff3_1")
+            .field("radix", &self.radix)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Ff3_1<C> {
@@ -123,7 +139,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ff3_1<C> {
     /// the same radix.
     pub fn encrypt(
         &self,
-        tweak: &[u8],
+        tweak: &[u8; TWEAK],
         message: &mut [u16],
     ) -> Result<(), Error> {
         self.run(tweak, message, true)
@@ -132,7 +148,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ff3_1<C> {
     /// Decrypts `message` in place.
     pub fn decrypt(
         &self,
-        tweak: &[u8],
+        tweak: &[u8; TWEAK],
         message: &mut [u16],
     ) -> Result<(), Error> {
         self.run(tweak, message, false)
@@ -140,7 +156,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ff3_1<C> {
 
     fn run(
         &self,
-        tweak: &[u8],
+        tweak: &[u8; TWEAK],
         message: &mut [u16],
         encrypt: bool,
     ) -> Result<(), Error> {
@@ -163,10 +179,6 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ff3_1<C> {
         if domain < MIN_DOMAIN {
             return Err(Error::DomainTooSmall);
         }
-        if tweak.len() != TWEAK {
-            return Err(Error::InvalidNonceLength(tweak.len()));
-        }
-
         // The tweak splits into two halves, with its middle nibble
         // shared between them.
         let left_tweak = [tweak[0], tweak[1], tweak[2], tweak[3] & 0xf0];
@@ -348,21 +360,6 @@ mod tests {
         }
     }
 
-    /// The tweak is exactly seven bytes, unlike FF1 which takes any
-    /// length. The original FF3 allowed eight, and that was the flaw.
-    #[test]
-    fn the_tweak_must_be_seven_bytes() {
-        let ff3 = ff3(10);
-        let source = [0u8; 16];
-        for n in [0, 6, 8, 16] {
-            assert_eq!(
-                ff3.encrypt(&source[..n], &mut [0; 10]).unwrap_err(),
-                Error::InvalidNonceLength(n)
-            );
-        }
-        assert!(ff3.encrypt(&source[..7], &mut [0; 10]).is_ok());
-    }
-
     /// Each half must fit in 96 bits, so the longest message depends
     /// on the radix: 56 decimal digits, fewer as the radix grows.
     #[test]
@@ -408,5 +405,24 @@ mod tests {
             ff3(10).encrypt(&[0; 7], &mut bad).unwrap_err(),
             Error::InvalidSymbol(10)
         );
+    }
+
+    /// Formatting the state must not print the key.
+    #[test]
+    fn debug_omits_the_key() {
+        struct Buffer([u8; 256], usize);
+        impl core::fmt::Write for Buffer {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                let end = self.1 + s.len();
+                self.0[self.1..end].copy_from_slice(s.as_bytes());
+                self.1 = end;
+                Ok(())
+            }
+        }
+        let mut buffer = Buffer([0; 256], 0);
+        core::fmt::write(&mut buffer, format_args!("{:?}", ff3(10))).unwrap();
+        let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();
+        assert!(!text.contains("["), "{text}");
+        assert!(text.starts_with("Ff3_1"));
     }
 }

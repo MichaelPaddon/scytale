@@ -46,6 +46,10 @@ pub trait Mac: Clone + Sized {
     /// Returns [`Error::AuthenticationFailed`] if `tag` is not the
     /// message's tag, including when it is the wrong length. Never
     /// says more than that.
+    ///
+    /// Implementors should leave this alone: the provided body is the
+    /// constant-time comparison, and a byte-by-byte one in its place
+    /// would leak the tag through timing.
     fn verify(self, tag: &[u8]) -> Result<(), Error> {
         let expected = self.finalize();
         if crate::util::equal(expected.as_ref(), tag) {

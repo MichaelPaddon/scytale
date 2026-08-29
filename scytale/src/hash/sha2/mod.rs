@@ -12,10 +12,13 @@
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::hash::Hash;
 //!
+//! # fn main() -> Result<(), scytale::Error> {
 //! let mut hash = Sha256::new();
 //! hash.update(b"ab");
 //! hash.update(b"c");
-//! assert_eq!(hash.finalize(), Sha256::digest(b"abc"));
+//! assert_eq!(hash.finalize(), Sha256::digest(b"abc")?);
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! SHA-512/224 and SHA-512/256 (FIPS 180-4 section 5.3.6) are
@@ -72,7 +75,15 @@ use crate::Error;
 /// over. Each says only where the hash starts and how much of the
 /// final state is the digest.
 pub mod variant {
+    use super::engine::Sealed;
     use super::{Variant32, Variant64};
+
+    impl Sealed for Sha224 {}
+    impl Sealed for Sha256 {}
+    impl Sealed for Sha384 {}
+    impl Sealed for Sha512 {}
+    impl Sealed for Sha512_224 {}
+    impl Sealed for Sha512_256 {}
 
     /// SHA-224.
     #[derive(Clone, Copy, Debug)]
@@ -306,13 +317,6 @@ macro_rules! automatic {
                     }
                 };
                 $name(inner)
-            }
-
-            /// The digest of `data`, in one call.
-            pub fn digest(data: &[u8]) -> V::Output {
-                let mut hash = Self::new();
-                hash.update(data);
-                hash.finalize()
             }
         }
 
@@ -584,24 +588,24 @@ pub(crate) mod tests {
     #[test]
     fn sha512_t_known_answers() {
         assert_eq!(
-            Sha512_224::digest(b"abc"),
+            Sha512_224::digest(b"abc").unwrap(),
             hex("4634270f707b6a54daae7530460842e20e37ed265ceee9a43e8924aa")
                 [..28]
         );
         assert_eq!(
-            Sha512_256::digest(b"abc"),
+            Sha512_256::digest(b"abc").unwrap(),
             hex(
                 "53048e2681941ef99b2e29b76b4c7dabe4c2d0c634fc6d46e0e2f13107e7\
                  af23"
             )[..32]
         );
         assert_eq!(
-            Sha512_224::digest(b""),
+            Sha512_224::digest(b"").unwrap(),
             hex("6ed0dd02806fa89e25de060c19d3ac86cabb87d6a0ddd05c333b84f4")
                 [..28]
         );
         assert_eq!(
-            Sha512_256::digest(b""),
+            Sha512_256::digest(b"").unwrap(),
             hex(
                 "c672b8d1ef56ed28ab87c3622c5114069bdd3ad7b8f9737498d0c01ecef0\
                  967a"
@@ -622,7 +626,7 @@ pub(crate) mod tests {
     #[test]
     fn splitting_does_not_matter() {
         let data: [u8; 517] = core::array::from_fn(|i| (i * 31) as u8);
-        let expected = Sha256::digest(&data);
+        let expected = Sha256::digest(&data).unwrap();
         for chunk in [1, 3, 7, 63, 64, 65, 128, 200] {
             let mut hash = Sha256::new();
             for piece in data.chunks(chunk) {
@@ -638,7 +642,7 @@ pub(crate) mod tests {
         hash.update(b"not this");
         hash.reset();
         hash.update(b"abc");
-        assert_eq!(hash.finalize(), Sha512::digest(b"abc"));
+        assert_eq!(hash.finalize(), Sha512::digest(b"abc").unwrap());
     }
 
     #[test]
@@ -647,8 +651,8 @@ pub(crate) mod tests {
         hash.update(b"ab");
         let fork = hash.clone();
         hash.update(b"c");
-        assert_eq!(hash.finalize(), Sha256::digest(b"abc"));
-        assert_eq!(fork.finalize(), Sha256::digest(b"ab"));
+        assert_eq!(hash.finalize(), Sha256::digest(b"abc").unwrap());
+        assert_eq!(fork.finalize(), Sha256::digest(b"ab").unwrap());
     }
 
     /// The SHAVS bit-oriented vectors: the one-bit message 0, and the
@@ -675,7 +679,7 @@ pub(crate) mod tests {
         for bits in [0, 8, 9, 100] {
             assert_eq!(
                 Sha256::new().finalize_bits(0, bits),
-                Err(Error::InvalidLength(bits as usize))
+                Err(Error::InvalidBitCount(bits))
             );
         }
     }
@@ -705,10 +709,10 @@ pub(crate) mod tests {
     fn digest_is_the_same_as_update_then_finalize() {
         let mut hash = Sha224::new();
         hash.update(b"abc");
-        assert_eq!(hash.finalize(), Sha224::digest(b"abc"));
+        assert_eq!(hash.finalize(), Sha224::digest(b"abc").unwrap());
         assert_eq!(
             <Sha224 as Hash>::digest(b"abc").unwrap(),
-            Sha224::digest(b"abc")
+            Sha224::digest(b"abc").unwrap()
         );
     }
 

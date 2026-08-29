@@ -2,8 +2,15 @@
 
 use super::{groups as suite_groups, hex};
 use scytale::symmetric::mode::Cbc;
-use scytale::symmetric::BlockCipher;
+use scytale::symmetric::{Block, BlockCipher};
 use serde_json::Value;
+
+/// The IV as the cipher's block type.
+fn block<C: BlockCipher>(bytes: &[u8]) -> C::Block {
+    let mut block = C::Block::ZERO;
+    block.as_mut().copy_from_slice(bytes);
+    block
+}
 
 const FILE: &str = "ACVP-AES-CBC-1.0/internalProjection.json";
 
@@ -55,9 +62,11 @@ fn aft<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
         };
         let mut data = input;
         if encrypt {
-            cbc.encrypt(&iv, &mut data).expect("whole blocks");
+            cbc.encrypt(&block::<C>(&iv), &mut data)
+                .expect("whole blocks");
         } else {
-            cbc.decrypt(&iv, &mut data).expect("whole blocks");
+            cbc.decrypt(&block::<C>(&iv), &mut data)
+                .expect("whole blocks");
         }
         assert_eq!(data, expected, "tgId {} tcId {}", group["tgId"], t["tcId"]);
         count += 1;
@@ -124,7 +133,8 @@ fn step_encrypt<C: BlockCipher>(
     for _ in 0..MCT_ITERATIONS {
         previous.copy_from_slice(&output);
         output.copy_from_slice(&input);
-        cbc.encrypt(&chain, &mut output).expect("one block");
+        cbc.encrypt(&block::<C>(&chain), &mut output)
+            .expect("one block");
         input.copy_from_slice(&chain);
         chain.copy_from_slice(&output);
     }
@@ -147,7 +157,8 @@ fn step_decrypt<C: BlockCipher>(
     for j in 0..MCT_ITERATIONS {
         previous.copy_from_slice(&output);
         output.copy_from_slice(&input);
-        cbc.decrypt(&chain, &mut output).expect("one block");
+        cbc.decrypt(&block::<C>(&chain), &mut output)
+            .expect("one block");
         let next = if j == 0 {
             iv.to_vec()
         } else {

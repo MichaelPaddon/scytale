@@ -48,7 +48,7 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
     for t in group["tests"].as_array().expect("tests") {
         let label = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
         let siv = GcmSiv::<C>::try_new(&hex(&t["key"])).expect("key");
-        let nonce = hex(&t["iv"]);
+        let nonce: [u8; 12] = hex(&t["iv"]).try_into().expect("nonce");
         let aad = hex(&t["aad"]);
         let sealed = hex(&t["ct"]);
 
@@ -64,6 +64,7 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
         } else {
             let should_pass = t["testPassed"].as_bool().unwrap_or(true);
             let (cipher, tag) = sealed.split_at(sealed.len() - TAG);
+            let tag: &[u8; TAG] = tag.try_into().expect("tag");
             let mut data = cipher.to_vec();
             match siv.decrypt(&nonce, &aad, &mut data, tag) {
                 Ok(()) => {

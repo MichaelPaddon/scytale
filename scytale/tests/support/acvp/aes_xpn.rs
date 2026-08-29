@@ -47,22 +47,28 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
         let label = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
         let cipher = C::try_new(&hex(&t["key"])).expect("key");
         let xpn = Xpn::try_new(cipher).expect("xpn");
-        let salt = hex(&t["salt"]);
-        let frame = hex(&t["iv"]);
+        let salt: [u8; 12] = hex(&t["salt"]).try_into().expect("salt");
+        let frame: [u8; 12] = hex(&t["iv"]).try_into().expect("iv");
         let aad = hex(&t["aad"]);
 
         if encrypt {
             let mut data = hex(&t["pt"]);
-            let mut got = vec![0u8; tag_len];
+            let mut got = [0u8; 16];
             xpn.encrypt(&salt, &frame, &aad, &mut data, &mut got)
                 .expect("encrypt");
             assert_eq!(data, hex(&t["ct"]), "{label} ciphertext");
-            assert_eq!(got, hex(&t["tag"]), "{label} tag");
+            assert_eq!(got[..tag_len], hex(&t["tag"]), "{label} tag");
         } else {
             let should_pass = t["testPassed"].as_bool().unwrap_or(true);
             let mut data = hex(&t["ct"]);
             let expected = hex(&t["tag"]);
-            match xpn.decrypt(&salt, &frame, &aad, &mut data, &expected) {
+            let result = if tag_len == 16 {
+                let full: [u8; 16] = expected.try_into().expect("tag");
+                xpn.decrypt(&salt, &frame, &aad, &mut data, &full)
+            } else {
+                xpn.decrypt_truncated(&salt, &frame, &aad, &mut data, &expected)
+            };
+            match result {
                 Ok(()) => {
                     assert!(should_pass, "{label} accepted a bad tag");
                     assert_eq!(data, hex(&t["pt"]), "{label} plaintext");

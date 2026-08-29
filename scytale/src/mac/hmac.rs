@@ -82,6 +82,13 @@ impl<H: Hash> Hmac<H> {
             outer,
         })
     }
+
+    /// The tag of `data` under `key`, in one call.
+    pub fn mac(key: &[u8], data: &[u8]) -> Result<H::Output, Error> {
+        let mut mac = Self::try_new(key)?;
+        mac.update(data);
+        Ok(mac.finalize())
+    }
 }
 
 impl<H: Hash> Mac for Hmac<H> {
@@ -264,6 +271,13 @@ mod tests {
             check::<sha2::Sha384>(case, case.sha384);
             check::<sha2::Sha512>(case, case.sha512);
         }
+    }
+
+    #[test]
+    fn one_shot_matches_streaming() {
+        let mut mac = HmacSha256::try_new(b"key").unwrap();
+        mac.update(b"data");
+        assert_eq!(HmacSha256::mac(b"key", b"data").unwrap(), mac.finalize());
     }
 
     #[test]

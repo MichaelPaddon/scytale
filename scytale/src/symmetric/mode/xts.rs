@@ -56,6 +56,8 @@
 //! # }
 //! ```
 
+use core::fmt;
+
 use super::ghash::BLOCK;
 use super::{xor, LANES};
 use crate::symmetric::{Block, BlockCipher};
@@ -63,10 +65,20 @@ use crate::util;
 use crate::Error;
 
 /// XTS over a block cipher.
-#[derive(Clone, Debug)]
+///
+/// Built from a key rather than a cipher because XTS needs two: one
+/// for the data and one for the tweak, expanded separately.
+#[derive(Clone)]
 pub struct Xts<C> {
     data: C,
     tweak: C,
+}
+
+impl<C> fmt::Debug for Xts<C> {
+    /// Deliberately omits the ciphers, which hold the keys.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Xts").finish_non_exhaustive()
+    }
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
@@ -91,9 +103,12 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
 
     /// Encrypts one data unit in place under `tweak`.
     ///
-    /// `tweak` is one block and `data` at least one block, of any
-    /// length from there.
-    pub fn encrypt(&self, tweak: &[u8], data: &mut [u8]) -> Result<(), Error> {
+    /// `data` is at least one block, of any length from there.
+    pub fn encrypt(
+        &self,
+        tweak: &C::Block,
+        data: &mut [u8],
+    ) -> Result<(), Error> {
         let mut t = self.start(tweak, data.len())?;
         let (whole, stolen) = self.split(data);
         self.bulk(whole, &mut t, true);
@@ -124,7 +139,11 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
     }
 
     /// Decrypts one data unit in place under `tweak`.
-    pub fn decrypt(&self, tweak: &[u8], data: &mut [u8]) -> Result<(), Error> {
+    pub fn decrypt(
+        &self,
+        tweak: &C::Block,
+        data: &mut [u8],
+    ) -> Result<(), Error> {
         let mut t = self.start(tweak, data.len())?;
         let (whole, stolen) = self.split(data);
         self.bulk(whole, &mut t, false);
@@ -156,16 +175,16 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
     }
 
     /// The first tweak: the tweak value encrypted under the second
-    /// key. Also checks the lengths.
-    fn start(&self, tweak: &[u8], len: usize) -> Result<[u8; BLOCK], Error> {
-        if tweak.len() != BLOCK {
-            return Err(Error::InvalidNonceLength(tweak.len()));
-        }
+    /// key. Also checks the length.
+    fn start(
+        &self,
+        tweak: &C::Block,
+        len: usize,
+    ) -> Result<[u8; BLOCK], Error> {
         if len < BLOCK {
             return Err(Error::InvalidLength(len));
         }
-        let mut start = [0u8; BLOCK];
-        start.copy_from_slice(tweak);
+        let mut start = *tweak;
         self.tweak.encrypt_block(&mut start);
         Ok(start)
     }
@@ -267,7 +286,8 @@ mod tests {
     #[test]
     fn whole_blocks() {
         let (mut tb, mut pb, mut cb) = ([0u8; 16], [0u8; MAX], [0u8; MAX]);
-        let tweak = unhex("ff000000000000000000000000000000", &mut tb);
+        unhex("ff000000000000000000000000000000", &mut tb);
+        let tweak = &tb;
         let plain = unhex(
             "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e\
              1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d\
@@ -296,7 +316,8 @@ mod tests {
     #[test]
     fn ciphertext_stealing() {
         let (mut tb, mut pb, mut cb) = ([0u8; 16], [0u8; MAX], [0u8; MAX]);
-        let tweak = unhex("ff000000000000000000000000000000", &mut tb);
+        unhex("ff000000000000000000000000000000", &mut tb);
+        let tweak = &tb;
         let plain = unhex("000102030405060708090a0b0c0d0e0f10111213", &mut pb);
         let cipher = unhex("d561cea5180aebe696267bf5894868ebda5738a3", &mut cb);
 
@@ -359,13 +380,6 @@ mod tests {
         }
 
         let xts = xts();
-        let source = [0u8; 32];
-        for n in [0, 8, 15, 17, 32] {
-            assert_eq!(
-                xts.encrypt(&source[..n], &mut [0; 16]).unwrap_err(),
-                Error::InvalidNonceLength(n)
-            );
-        }
         // A data unit must be at least one block.
         for n in [0, 1, 15] {
             let mut data = [0u8; 15];
@@ -374,5 +388,24 @@ mod tests {
                 Error::InvalidLength(n)
             );
         }
+    }
+
+    /// Formatting the state must not print the key.
+    #[test]
+    fn debug_omits_the_key() {
+        struct Buffer([u8; 256], usize);
+        impl core::fmt::Write for Buffer {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                let end = self.1 + s.len();
+                self.0[self.1..end].copy_from_slice(s.as_bytes());
+                self.1 = end;
+                Ok(())
+            }
+        }
+        let mut buffer = Buffer([0; 256], 0);
+        core::fmt::write(&mut buffer, format_args!("{:?}", xts())).unwrap();
+        let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();
+        assert!(!text.contains("["), "{text}");
+        assert!(text.starts_with("Xts"));
     }
 }

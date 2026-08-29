@@ -11,6 +11,7 @@ use core::fmt;
 /// One type for the whole library, so a caller using more than one
 /// part of it has a single thing to match on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     /// The key length is not one the cipher accepts.
     InvalidKeyLength(usize),
@@ -21,6 +22,18 @@ pub enum Error {
     InvalidNonceLength(usize),
     /// The data length does not match what the call requires.
     InvalidLength(usize),
+    /// The output buffer is too small. The number is the length it
+    /// needs to be.
+    OutputTooSmall(usize),
+    /// The count of trailing bits is not 1 to 7.
+    InvalidBitCount(u32),
+    /// The seed is shorter than the generator requires.
+    InvalidSeedLength(usize),
+    /// More bytes were asked for at once than the generator will give.
+    RequestTooLarge(usize),
+    /// A call came in an order the mode does not allow, such as
+    /// additional data after the message has begun.
+    OutOfOrder,
     /// The authentication tag is not a length the mode allows.
     InvalidTagLength(usize),
     /// The message did not authenticate: it is not what was
@@ -70,6 +83,19 @@ impl fmt::Display for Error {
             Error::InvalidLength(n) => {
                 write!(f, "invalid data length: {n}")
             }
+            Error::OutputTooSmall(n) => {
+                write!(f, "output buffer too small: {n} bytes needed")
+            }
+            Error::InvalidBitCount(n) => {
+                write!(f, "invalid trailing bit count: {n}")
+            }
+            Error::InvalidSeedLength(n) => {
+                write!(f, "seed too short: {n} bytes")
+            }
+            Error::RequestTooLarge(n) => {
+                write!(f, "request too large: {n} bytes")
+            }
+            Error::OutOfOrder => write!(f, "call out of order"),
             Error::InvalidTagLength(n) => {
                 write!(f, "invalid authentication tag length: {n} bytes")
             }

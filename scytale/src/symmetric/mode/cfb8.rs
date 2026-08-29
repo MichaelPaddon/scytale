@@ -34,12 +34,14 @@
 //! # }
 //! ```
 
-use super::{register_from, shift_in_byte};
+use core::fmt;
+
+use super::shift_in_byte;
 use crate::symmetric::BlockCipher;
 use crate::Error;
 
 /// CFB with 8-bit segments over a block cipher.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Cfb8<C> {
     cipher: C,
 }
@@ -50,37 +52,36 @@ impl<C: BlockCipher> Cfb8<C> {
         Cfb8 { cipher }
     }
 
-    /// Encrypts `data` in place under `iv`, which must be one block.
-    /// Any length of message is allowed.
-    pub fn encrypt(&self, iv: &[u8], data: &mut [u8]) -> Result<(), Error> {
-        self.encryptor(iv)?.update(data)
+    /// Encrypts `data` in place under `iv`. Any length of message is
+    /// allowed.
+    pub fn encrypt(&self, iv: &C::Block, data: &mut [u8]) -> Result<(), Error> {
+        self.encryptor(iv).update(data)
     }
 
     /// Decrypts `data` in place under `iv`, which must be one block.
-    pub fn decrypt(&self, iv: &[u8], data: &mut [u8]) -> Result<(), Error> {
-        self.decryptor(iv)?.update(data)
+    pub fn decrypt(&self, iv: &C::Block, data: &mut [u8]) -> Result<(), Error> {
+        self.decryptor(iv).update(data)
     }
 
     /// Starts encrypting a message that arrives in pieces.
-    pub fn encryptor(&self, iv: &[u8]) -> Result<Encryptor<'_, C>, Error> {
-        Ok(Encryptor {
+    pub fn encryptor(&self, iv: &C::Block) -> Encryptor<'_, C> {
+        Encryptor {
             cipher: &self.cipher,
-            register: register_from(iv)?,
-        })
+            register: *iv,
+        }
     }
 
     /// Starts decrypting a message that arrives in pieces.
-    pub fn decryptor(&self, iv: &[u8]) -> Result<Decryptor<'_, C>, Error> {
-        Ok(Decryptor {
+    pub fn decryptor(&self, iv: &C::Block) -> Decryptor<'_, C> {
+        Decryptor {
             cipher: &self.cipher,
-            register: register_from(iv)?,
-        })
+            register: *iv,
+        }
     }
 }
 
 /// Encrypts one message, a piece at a time. Pieces may be any
 /// length; there is nothing to finish.
-#[derive(Debug)]
 pub struct Encryptor<'a, C: BlockCipher> {
     cipher: &'a C,
     register: C::Block,
@@ -101,7 +102,6 @@ impl<C: BlockCipher> Encryptor<'_, C> {
 
 /// Decrypts one message, a piece at a time. Pieces may be any
 /// length; there is nothing to finish.
-#[derive(Debug)]
 pub struct Decryptor<'a, C: BlockCipher> {
     cipher: &'a C,
     register: C::Block,
@@ -120,6 +120,25 @@ impl<C: BlockCipher> Decryptor<'_, C> {
             shift_in_byte(self.register.as_mut(), ciphertext);
         }
         Ok(())
+    }
+}
+
+// Debug output omits the state: it is all derived from the key.
+impl<C> fmt::Debug for Cfb8<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Cfb8").finish_non_exhaustive()
+    }
+}
+
+impl<C: BlockCipher> fmt::Debug for Encryptor<'_, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Encryptor").finish_non_exhaustive()
+    }
+}
+
+impl<C: BlockCipher> fmt::Debug for Decryptor<'_, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Decryptor").finish_non_exhaustive()
     }
 }
 
@@ -193,13 +212,13 @@ mod tests {
             cfb.encrypt(&iv, &mut whole).unwrap();
 
             let mut pieces = plain;
-            let mut e = cfb.encryptor(&iv).unwrap();
+            let mut e = cfb.encryptor(&iv);
             let (a, b) = pieces.split_at_mut(split);
             e.update(a).unwrap();
             e.update(b).unwrap();
             assert_eq!(pieces, whole, "encrypt split at {split}");
 
-            let mut d = cfb.decryptor(&iv).unwrap();
+            let mut d = cfb.decryptor(&iv);
             let (a, b) = pieces.split_at_mut(split);
             d.update(a).unwrap();
             d.update(b).unwrap();
@@ -207,15 +226,27 @@ mod tests {
         }
     }
 
+    /// The state derives from the key, so its debug output must not
+    /// show it.
     #[test]
-    fn rejects_wrong_iv_length() {
-        let cfb = cfb(&[0; 16]);
-        let source = [0u8; 32];
-        for n in [0, 1, 15, 17, 32] {
-            assert_eq!(
-                cfb.encrypt(&source[..n], &mut [0; 4]).unwrap_err(),
-                Error::InvalidNonceLength(n)
-            );
+    fn debug_omits_the_state() {
+        struct Buffer([u8; 256], usize);
+        impl core::fmt::Write for Buffer {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                let end = self.1 + s.len();
+                self.0[self.1..end].copy_from_slice(s.as_bytes());
+                self.1 = end;
+                Ok(())
+            }
         }
+        let mode = cfb(&[0x5a; 16]);
+        let iv = [0x5a; 16];
+        let state = mode.encryptor(&iv);
+        let mut buffer = Buffer([0; 256], 0);
+        core::fmt::write(&mut buffer, format_args!("{mode:?} {state:?}"))
+            .unwrap();
+        let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();
+        // 0x5a prints as 90 in decimal.
+        assert!(!text.contains("90"), "{text}");
     }
 }

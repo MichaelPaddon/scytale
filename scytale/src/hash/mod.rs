@@ -65,7 +65,7 @@ pub trait BitHash: Hash {
     /// `bits` is 1 to 7, and returns its digest. The remaining low
     /// bits of `last` are ignored.
     ///
-    /// Returns [`Error::InvalidLength`] for a `bits` outside that
+    /// Returns [`Error::InvalidBitCount`] for a `bits` outside that
     /// range: zero extra bits is [`finalize`](Hash::finalize), and
     /// eight is a whole byte for [`update`](Hash::update).
     fn finalize_bits(self, last: u8, bits: u32) -> Result<Self::Output, Error>;

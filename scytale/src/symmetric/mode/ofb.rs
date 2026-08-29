@@ -38,12 +38,14 @@
 //! # }
 //! ```
 
-use super::{register_from, xor};
+use core::fmt;
+
+use super::xor;
 use crate::symmetric::{Block, BlockCipher};
 use crate::Error;
 
 /// OFB over a block cipher.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Ofb<C> {
     cipher: C,
 }
@@ -54,10 +56,10 @@ impl<C: BlockCipher> Ofb<C> {
         Ofb { cipher }
     }
 
-    /// Encrypts `data` in place under `iv`, which must be one block.
-    /// Any length of message is allowed.
-    pub fn encrypt(&self, iv: &[u8], data: &mut [u8]) -> Result<(), Error> {
-        self.stream(iv)?.update(data)
+    /// Encrypts `data` in place under `iv`. Any length of message is
+    /// allowed.
+    pub fn encrypt(&self, iv: &C::Block, data: &mut [u8]) -> Result<(), Error> {
+        self.stream(iv).update(data)
     }
 
     /// Decrypts `data` in place under `iv`.
@@ -65,20 +67,20 @@ impl<C: BlockCipher> Ofb<C> {
     /// This is the same operation as [`encrypt`](Self::encrypt): the
     /// keystream does not depend on the message. Both names exist so
     /// that calling code reads the way it means.
-    pub fn decrypt(&self, iv: &[u8], data: &mut [u8]) -> Result<(), Error> {
-        self.stream(iv)?.update(data)
+    pub fn decrypt(&self, iv: &C::Block, data: &mut [u8]) -> Result<(), Error> {
+        self.stream(iv).update(data)
     }
 
     /// Starts a message that arrives in pieces.
     ///
     /// One state serves both directions, again because the keystream
     /// does not depend on the message.
-    pub fn stream(&self, iv: &[u8]) -> Result<Stream<'_, C>, Error> {
-        Ok(Stream {
+    pub fn stream(&self, iv: &C::Block) -> Stream<'_, C> {
+        Stream {
             cipher: &self.cipher,
-            register: register_from(iv)?,
+            register: *iv,
             used: C::Block::SIZE,
-        })
+        }
     }
 }
 
@@ -87,7 +89,6 @@ impl<C: BlockCipher> Ofb<C> {
 /// Pieces may be any length, and a piece may end part way through a
 /// keystream block: the rest of that block is kept for the next one.
 /// There is nothing to finish.
-#[derive(Debug)]
 pub struct Stream<'a, C: BlockCipher> {
     cipher: &'a C,
     /// Holds the current keystream block, which is also the input for
@@ -117,6 +118,19 @@ impl<C: BlockCipher> Stream<'_, C> {
             data = rest;
         }
         Ok(())
+    }
+}
+
+// Debug output omits the state: it is all derived from the key.
+impl<C> fmt::Debug for Ofb<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Ofb").finish_non_exhaustive()
+    }
+}
+
+impl<C: BlockCipher> fmt::Debug for Stream<'_, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Stream").finish_non_exhaustive()
     }
 }
 
@@ -217,7 +231,7 @@ mod tests {
 
         for split in [1, 5, 15, 16, 17, 31] {
             let mut pieces = plain;
-            let mut s = ofb.stream(&iv).unwrap();
+            let mut s = ofb.stream(&iv);
             let (a, b) = pieces.split_at_mut(split);
             s.update(a).unwrap();
             s.update(b).unwrap();
@@ -226,22 +240,34 @@ mod tests {
 
         // Also one byte at a time, which crosses every boundary.
         let mut pieces = plain;
-        let mut s = ofb.stream(&iv).unwrap();
+        let mut s = ofb.stream(&iv);
         for byte in pieces.iter_mut() {
             s.update(core::slice::from_mut(byte)).unwrap();
         }
         assert_eq!(pieces, whole, "one byte at a time");
     }
 
+    /// The state derives from the key, so its debug output must not
+    /// show it.
     #[test]
-    fn rejects_wrong_iv_length() {
-        let ofb = ofb(&[0; 16]);
-        let source = [0u8; 32];
-        for n in [0, 1, 15, 17, 32] {
-            assert_eq!(
-                ofb.encrypt(&source[..n], &mut [0; 4]).unwrap_err(),
-                Error::InvalidNonceLength(n)
-            );
+    fn debug_omits_the_state() {
+        struct Buffer([u8; 256], usize);
+        impl core::fmt::Write for Buffer {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                let end = self.1 + s.len();
+                self.0[self.1..end].copy_from_slice(s.as_bytes());
+                self.1 = end;
+                Ok(())
+            }
         }
+        let mode = ofb(&[0x5a; 16]);
+        let iv = [0x5a; 16];
+        let state = mode.stream(&iv);
+        let mut buffer = Buffer([0; 256], 0);
+        core::fmt::write(&mut buffer, format_args!("{mode:?} {state:?}"))
+            .unwrap();
+        let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();
+        // 0x5a prints as 90 in decimal.
+        assert!(!text.contains("90"), "{text}");
     }
 }

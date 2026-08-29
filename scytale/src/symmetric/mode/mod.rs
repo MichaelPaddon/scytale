@@ -6,9 +6,6 @@
 //!
 //! [`BlockCipher`]: crate::symmetric::BlockCipher
 
-use crate::symmetric::Block;
-use crate::Error;
-
 pub mod cbc;
 pub mod cfb1;
 pub mod cfb128;
@@ -105,14 +102,4 @@ pub(crate) fn set_bit(data: &mut [u8], i: usize, value: u8) {
     } else {
         data[i / 8] &= !mask;
     }
-}
-
-/// Copies `iv` into a block, checking its length.
-pub(crate) fn register_from<B: Block>(iv: &[u8]) -> Result<B, Error> {
-    if iv.len() != B::SIZE {
-        return Err(Error::InvalidNonceLength(iv.len()));
-    }
-    let mut register = B::ZERO;
-    register.as_mut().copy_from_slice(iv);
-    Ok(register)
 }

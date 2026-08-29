@@ -65,6 +65,8 @@ fn id_register_sha2() -> u64 {
 /// The compression functions via the ARMv8 instructions.
 pub struct Armv8;
 
+impl super::engine::Sealed for Armv8 {}
+
 impl Compress32 for Armv8 {
     fn supported() -> bool {
         has_sha256()

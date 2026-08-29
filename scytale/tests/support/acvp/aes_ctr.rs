@@ -13,8 +13,15 @@
 
 use super::{groups as suite_groups, hex};
 use scytale::symmetric::mode::Ctr;
-use scytale::symmetric::BlockCipher;
+use scytale::symmetric::{Block, BlockCipher};
 use serde_json::Value;
+
+/// The IV as the cipher's block type.
+fn block<C: BlockCipher>(bytes: &[u8]) -> C::Block {
+    let mut block = C::Block::ZERO;
+    block.as_mut().copy_from_slice(bytes);
+    block
+}
 
 const FILE: &str = "ACVP-AES-CTR-1.0/internalProjection.json";
 
@@ -56,9 +63,11 @@ fn aft<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
 
         let mut data = input;
         if encrypt {
-            ctr.encrypt(&counter, &mut data).expect("any length");
+            ctr.encrypt(&block::<C>(&counter), &mut data)
+                .expect("any length");
         } else {
-            ctr.decrypt(&counter, &mut data).expect("any length");
+            ctr.decrypt(&block::<C>(&counter), &mut data)
+                .expect("any length");
         }
 
         let mut expected = expected;

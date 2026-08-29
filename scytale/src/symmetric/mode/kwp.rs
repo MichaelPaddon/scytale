@@ -37,6 +37,8 @@
 //! # }
 //! ```
 
+use core::fmt;
+
 use super::kw::{apply, unwrap_body, wrap_body, SEMIBLOCK};
 use crate::symmetric::{BlockCipher, Error};
 use crate::util;
@@ -49,11 +51,20 @@ const BLOCK: usize = 16;
 const ICV2: [u8; 4] = [0xa6, 0x59, 0x59, 0xa6];
 
 /// Key wrapping with padding, over a block cipher.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Kwp<C> {
     cipher: C,
     /// Whether wrapping uses the cipher's forward direction.
     forward: bool,
+}
+
+impl<C> fmt::Debug for Kwp<C> {
+    /// Deliberately omits the cipher, which holds the key.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Kwp")
+            .field("forward", &self.forward)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Kwp<C> {
@@ -75,8 +86,10 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Kwp<C> {
 
     /// Wraps `plain` into `out`, and says how much of `out` was used.
     ///
-    /// `plain` may be any length from one byte up. `out` needs room
-    /// for `plain` rounded up to a multiple of eight, and eight more.
+    /// `plain` may be any length from one byte up, or
+    /// [`Error::InvalidLength`] is returned. `out` needs room for
+    /// `plain` rounded up to a multiple of eight, and eight more, or
+    /// [`Error::OutputTooSmall`] says how much it needs.
     pub fn wrap(&self, plain: &[u8], out: &mut [u8]) -> Result<usize, Error> {
         // The length has to fit the four bytes that record it.
         if plain.is_empty() || u32::try_from(plain.len()).is_err() {
@@ -84,7 +97,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Kwp<C> {
         }
         let padded = plain.len().next_multiple_of(SEMIBLOCK);
         let total = padded + SEMIBLOCK;
-        let out = out.get_mut(..total).ok_or(Error::InvalidLength(total))?;
+        let out = out.get_mut(..total).ok_or(Error::OutputTooSmall(total))?;
 
         let mut a = [0u8; SEMIBLOCK];
         a[..4].copy_from_slice(&ICV2);
@@ -114,6 +127,11 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Kwp<C> {
     /// Unwraps `wrapped` into `out`, and says how much of `out` was
     /// used, which is the original length rather than the padded one.
     ///
+    /// `wrapped` must be at least two units and a whole number of
+    /// them, or [`Error::InvalidLength`] is returned; `out` must have
+    /// room for eight bytes fewer, or [`Error::OutputTooSmall`] says
+    /// how much it needs.
+    ///
     /// Returns [`Error::AuthenticationFailed`] if the check value,
     /// the recorded length or the padding is wrong, having first
     /// wiped `out`. It does not say which of them it was: that would
@@ -129,7 +147,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Kwp<C> {
             return Err(Error::InvalidLength(wrapped.len()));
         }
         let padded = wrapped.len() - SEMIBLOCK;
-        let out = out.get_mut(..padded).ok_or(Error::InvalidLength(padded))?;
+        let out = out.get_mut(..padded).ok_or(Error::OutputTooSmall(padded))?;
         let mut a = [0u8; SEMIBLOCK];
 
         if wrapped.len() == BLOCK {
@@ -313,11 +331,16 @@ mod tests {
             kwp.wrap(&[], &mut out),
             Err(Error::InvalidLength(0))
         ));
-        // Sixteen bytes of output are needed for one byte of message.
-        assert!(matches!(
-            kwp.wrap(&[1], &mut out[..15]),
-            Err(Error::InvalidLength(_))
-        ));
+        // Sixteen bytes of output are needed for one byte of message,
+        // and the error says so.
+        assert_eq!(
+            kwp.wrap(&[1], &mut out[..15]).unwrap_err(),
+            Error::OutputTooSmall(16)
+        );
+        assert_eq!(
+            kwp.unwrap(&[0u8; 16], &mut out[..7]).unwrap_err(),
+            Error::OutputTooSmall(8)
+        );
         // A wrapped form is at least two units, and a whole number
         // of them.
         for len in [0usize, 8, 12, 20] {
@@ -330,5 +353,28 @@ mod tests {
                 "unwrapping {len}"
             );
         }
+    }
+
+    /// Formatting the state must not print the key.
+    #[test]
+    fn debug_omits_the_key() {
+        struct Buffer([u8; 256], usize);
+        impl core::fmt::Write for Buffer {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                let end = self.1 + s.len();
+                self.0[self.1..end].copy_from_slice(s.as_bytes());
+                self.1 = end;
+                Ok(())
+            }
+        }
+        let mut buffer = Buffer([0; 256], 0);
+        core::fmt::write(
+            &mut buffer,
+            format_args!("{:?}", Kwp::new(Aes::try_new(&[3u8; 16]).unwrap())),
+        )
+        .unwrap();
+        let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();
+        assert!(!text.contains("3, 3"), "{text}");
+        assert!(text.starts_with("Kwp"));
     }
 }

@@ -30,14 +30,17 @@
 //!   the standard caps one key at 2^32 messages, and counting those
 //!   messages is the caller's job.
 //! - A 96-bit nonce is the usual choice and the one the standard
-//!   treats specially. Other lengths are allowed and supported, but
-//!   they are hashed first, which costs a little and gains nothing.
+//!   treats specially. Any other length is allowed and supported, but
+//!   is hashed down to a counter block first, which costs a little
+//!   and gains nothing.
 //! - Do not use a decrypted message before the tag has been checked.
 //!   The one-shot [`decrypt`](Gcm::decrypt) checks first and wipes the
 //!   buffer on failure. The incremental form cannot: see
 //!   [`Decryptor`].
-//! - A shorter tag is a weaker one. Sixteen bytes is the default for
-//!   good reason.
+//! - A shorter tag is a weaker one. Every method here takes the full
+//!   sixteen bytes; a protocol that has decided to carry fewer keeps a
+//!   prefix and checks it with [`Decryptor::verify_truncated`], so
+//!   that the decision is visible where it is made.
 //!
 //! # Example
 //!
@@ -60,6 +63,8 @@
 //! # }
 //! ```
 
+use core::fmt;
+
 use super::ghash::{Ghash, BLOCK};
 use super::{xor, LANES};
 use crate::symmetric::{Block, BlockCipher};
@@ -70,20 +75,30 @@ use crate::Error;
 /// 2^39 - 256 bits, the limit at which counter mode would repeat.
 const MAX_MESSAGE: u64 = (1 << 36) - 32;
 
-/// Tag lengths SP 800-38D allows, in bytes. The first five are for
-/// general use; four and eight are for applications the standard
-/// names, and are weaker.
-const TAG_LENGTHS: [usize; 7] = [16, 15, 14, 13, 12, 8, 4];
+/// The shortest tag SP 800-38D allows, in bytes. Four and eight are
+/// for applications the standard names, and are weaker than the rest.
+const MIN_TAG: usize = 4;
 
 /// The nonce length the standard singles out, in bytes.
-const SHORT_NONCE: usize = 12;
+pub(crate) const SHORT_NONCE: usize = 12;
+
+/// The tag length, in bytes.
+pub(crate) const TAG: usize = BLOCK;
 
 /// GCM over a block cipher.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Gcm<C> {
     cipher: C,
     /// The hash subkey, the cipher applied to a block of zeros.
     h: [u8; BLOCK],
+}
+
+impl<C> fmt::Debug for Gcm<C> {
+    /// Deliberately omits the hash subkey, which is enough to forge
+    /// tags, and the cipher.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Gcm").finish_non_exhaustive()
+    }
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
@@ -96,21 +111,18 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
 
     /// Encrypts `data` in place and writes its tag.
     ///
-    /// `aad` is authenticated but not encrypted. The tag's length
-    /// selects the tag size and must be one the standard allows.
+    /// `aad` is authenticated but not encrypted.
     pub fn encrypt(
         &self,
         nonce: &[u8],
         aad: &[u8],
         data: &mut [u8],
-        tag: &mut [u8],
+        tag: &mut [u8; TAG],
     ) -> Result<(), Error> {
-        check_tag_length(tag.len())?;
         let mut state = self.encryptor(nonce)?;
         state.aad(aad)?;
         state.update(data)?;
-        let full = state.finish()?;
-        tag.copy_from_slice(&full[..tag.len()]);
+        *tag = state.finalize()?;
         Ok(())
     }
 
@@ -124,13 +136,12 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
         nonce: &[u8],
         aad: &[u8],
         data: &mut [u8],
-        tag: &[u8],
+        tag: &[u8; TAG],
     ) -> Result<(), Error> {
-        check_tag_length(tag.len())?;
         let mut state = self.decryptor(nonce)?;
         state.aad(aad)?;
         state.update(data)?;
-        match state.finish(tag) {
+        match state.verify(tag) {
             Ok(()) => Ok(()),
             Err(e) => {
                 data.fill(0);
@@ -154,13 +165,32 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
     }
 }
 
-/// Whether `n` is a tag length the standard allows.
-fn check_tag_length(n: usize) -> Result<(), Error> {
-    if TAG_LENGTHS.contains(&n) {
-        Ok(())
-    } else {
-        Err(Error::InvalidTagLength(n))
+/// The first counter block, from which everything else follows.
+///
+/// A 96-bit nonce becomes the counter directly, with a one in the
+/// counter field. Any other length is hashed down to a block, which
+/// is why that case costs more. An empty nonce is refused: the
+/// standard allows it, and it makes every message share a counter.
+fn counter_start(h: &[u8; BLOCK], nonce: &[u8]) -> Result<[u8; BLOCK], Error> {
+    if nonce.is_empty() {
+        return Err(Error::InvalidNonceLength(0));
     }
+    if nonce.len() == SHORT_NONCE {
+        let mut start = [0u8; BLOCK];
+        start[..SHORT_NONCE].copy_from_slice(nonce);
+        start[BLOCK - 1] = 1;
+        return Ok(start);
+    }
+    let mut hash = Ghash::new(h);
+    hash.update(nonce);
+    hash.pad();
+    let bits = (nonce.len() as u64)
+        .checked_mul(8)
+        .ok_or(Error::MessageTooLong)?;
+    let mut lengths = [0u8; BLOCK];
+    lengths[8..].copy_from_slice(&bits.to_be_bytes());
+    hash.update(&lengths);
+    Ok(hash.finish())
 }
 
 /// Fills `blocks` with successive counter values and leaves `counter`
@@ -217,13 +247,24 @@ struct Core<'a, C> {
     started: bool,
 }
 
+impl<C> Core<'_, C> {
+    /// Debug for whichever direction owns this core: the counts, and
+    /// nothing derived from the key.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, name: &str) -> fmt::Result {
+        f.debug_struct(name)
+            .field("aad_bits", &self.aad_bits)
+            .field("message_bytes", &self.message_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
     fn new(
         cipher: &'a C,
         h: &[u8; BLOCK],
         nonce: &[u8],
     ) -> Result<Self, Error> {
-        let start = counter_start(cipher, h, nonce)?;
+        let start = counter_start(h, nonce)?;
         let mut mask = start;
         cipher.encrypt_block(&mut mask);
         let mut counter = start;
@@ -242,10 +283,10 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
     }
 
     fn aad(&mut self, data: &[u8]) -> Result<(), Error> {
-        assert!(
-            !self.started,
-            "all additional data must be given before any of the message"
-        );
+        // All additional data must come before any of the message.
+        if self.started {
+            return Err(Error::OutOfOrder);
+        }
         let bits = (data.len() as u64)
             .checked_mul(8)
             .and_then(|b| self.aad_bits.checked_add(b))
@@ -327,38 +368,6 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
     }
 }
 
-/// The first counter block, from which everything else follows.
-///
-/// A 96-bit nonce becomes the counter directly, with a one in the
-/// counter field. Any other length is hashed down to a block, which
-/// is why that case costs more.
-fn counter_start<C: BlockCipher<Block = [u8; BLOCK]>>(
-    cipher: &C,
-    h: &[u8; BLOCK],
-    nonce: &[u8],
-) -> Result<[u8; BLOCK], Error> {
-    let _ = cipher;
-    if nonce.is_empty() {
-        return Err(Error::InvalidNonceLength(0));
-    }
-    if nonce.len() == SHORT_NONCE {
-        let mut start = [0u8; BLOCK];
-        start[..SHORT_NONCE].copy_from_slice(nonce);
-        start[BLOCK - 1] = 1;
-        return Ok(start);
-    }
-    let mut hash = Ghash::new(h);
-    hash.update(nonce);
-    hash.pad();
-    let bits = (nonce.len() as u64)
-        .checked_mul(8)
-        .ok_or(Error::MessageTooLong)?;
-    let mut lengths = [0u8; BLOCK];
-    lengths[8..].copy_from_slice(&bits.to_be_bytes());
-    hash.update(&lengths);
-    Ok(hash.finish())
-}
-
 /// Encrypts one message, a piece at a time.
 ///
 /// All additional data must be given before any of the message.
@@ -366,11 +375,18 @@ pub struct Encryptor<'a, C> {
     core: Core<'a, C>,
 }
 
+impl<C> fmt::Debug for Encryptor<'_, C> {
+    /// Says how far along it is and nothing else.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.core.fmt(f, "Encryptor")
+    }
+}
+
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Encryptor<'_, C> {
     /// Adds data that is authenticated but not encrypted.
     ///
-    /// # Panics
-    /// If called after [`update`](Self::update).
+    /// Returns [`Error::OutOfOrder`] if called after
+    /// [`update`](Self::update): all of it must come first.
     pub fn aad(&mut self, data: &[u8]) -> Result<(), Error> {
         self.core.aad(data)
     }
@@ -383,9 +399,10 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Encryptor<'_, C> {
         Ok(())
     }
 
-    /// Finishes, returning the full-length tag. A caller wanting a
-    /// shorter tag keeps the first bytes of this one.
-    pub fn finish(mut self) -> Result<[u8; BLOCK], Error> {
+    /// Finishes, returning the tag. A protocol that carries a shorter
+    /// tag keeps the first bytes of this one; the receiver then checks
+    /// it with [`Decryptor::verify_truncated`].
+    pub fn finalize(mut self) -> Result<[u8; TAG], Error> {
         self.core.tag()
     }
 }
@@ -393,7 +410,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Encryptor<'_, C> {
 /// Decrypts one message, a piece at a time.
 ///
 /// **The pieces this hands back are not yet authenticated.** Nothing
-/// can vouch for any of the message until [`finish`](Self::finish)
+/// can vouch for any of the message until [`verify`](Self::verify)
 /// has checked the tag, so a caller must not act on the plaintext, or
 /// let anyone else see it, before that succeeds. Where the whole
 /// message fits in memory, use [`Gcm::decrypt`], which checks first.
@@ -401,11 +418,18 @@ pub struct Decryptor<'a, C> {
     core: Core<'a, C>,
 }
 
+impl<C> fmt::Debug for Decryptor<'_, C> {
+    /// Says how far along it is and nothing else.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.core.fmt(f, "Decryptor")
+    }
+}
+
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Decryptor<'_, C> {
     /// Adds data that is authenticated but not encrypted.
     ///
-    /// # Panics
-    /// If called after [`update`](Self::update).
+    /// Returns [`Error::OutOfOrder`] if called after
+    /// [`update`](Self::update): all of it must come first.
     pub fn aad(&mut self, data: &[u8]) -> Result<(), Error> {
         self.core.aad(data)
     }
@@ -419,9 +443,30 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Decryptor<'_, C> {
         self.core.apply(data)
     }
 
-    /// Checks `tag`, which may be any length the standard allows.
-    pub fn finish(mut self, tag: &[u8]) -> Result<(), Error> {
-        check_tag_length(tag.len())?;
+    /// Checks `tag`, in time that depends on nothing secret.
+    ///
+    /// Returns [`Error::AuthenticationFailed`] if it is not the tag
+    /// of what was given, and never says more than that.
+    pub fn verify(self, tag: &[u8; TAG]) -> Result<(), Error> {
+        self.verify_truncated(tag)
+    }
+
+    /// Checks a tag that a protocol has cut to between four and
+    /// sixteen bytes, the range SP 800-38D allows.
+    ///
+    /// A shorter tag is a weaker one: an attacker's chance of forging
+    /// a message is one in 2^(8n), and the standard limits how many
+    /// messages a key may protect under the short ones. That is a
+    /// decision for a protocol to make, which is why this method is
+    /// named for it rather than reached by handing
+    /// [`verify`](Decryptor::verify) a shorter slice. Returns
+    /// [`Error::InvalidTagLength`]
+    /// outside the range and [`Error::AuthenticationFailed`] for a
+    /// wrong tag.
+    pub fn verify_truncated(mut self, tag: &[u8]) -> Result<(), Error> {
+        if !(MIN_TAG..=TAG).contains(&tag.len()) {
+            return Err(Error::InvalidTagLength(tag.len()));
+        }
         let full = self.core.tag()?;
         if util::equal(&full[..tag.len()], tag) {
             Ok(())
@@ -451,6 +496,17 @@ mod tests {
     /// The published GCM test cases: key, nonce, additional data,
     /// plaintext, ciphertext, tag.
     const CASES: [[&str; 6]; 7] = [
+        // A nonce that is not 96 bits, so it is hashed first.
+        [
+            "feffe9928665731c6d6a8f9467308308",
+            "cafebabefacedbad",
+            "feedfacedeadbeeffeedfacedeadbeefabaddad2",
+            "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a\
+             721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39",
+            "61353b4c2806934a777ff51fa22a4755699b2a714fcdc6f83766e5f97b6c74\
+             2373806900e49f24b22b097544d4896b424989b5e1ebac0f07c23f4598",
+            "3612d2e79e3b0785561be14aaca2fccb",
+        ],
         // Empty message and no additional data.
         [
             "00000000000000000000000000000000",
@@ -493,17 +549,6 @@ mod tests {
              2e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091",
             "5bc94fbc3221a5db94fae95ae7121a47",
         ],
-        // A nonce that is not 96 bits, so it is hashed first.
-        [
-            "feffe9928665731c6d6a8f9467308308",
-            "cafebabefacedbad",
-            "feedfacedeadbeeffeedfacedeadbeefabaddad2",
-            "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a\
-             721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39",
-            "61353b4c2806934a777ff51fa22a4755699b2a714fcdc6f83766e5f97b6c74\
-             2373806900e49f24b22b097544d4896b424989b5e1ebac0f07c23f4598",
-            "3612d2e79e3b0785561be14aaca2fccb",
-        ],
         // AES-192.
         [
             "feffe9928665731c6d6a8f9467308308feffe9928665731c",
@@ -540,7 +585,8 @@ mod tests {
             let aad = unhex(case[2], &mut ab);
             let plain = unhex(case[3], &mut pb);
             let cipher = unhex(case[4], &mut cb);
-            let tag = unhex(case[5], &mut tb);
+            unhex(case[5], &mut tb);
+            let tag = &tb;
 
             let gcm = Gcm::try_new(Aes::try_new(key).unwrap()).unwrap();
             let mut data = [0u8; MAX];
@@ -550,7 +596,7 @@ mod tests {
 
             gcm.encrypt(nonce, aad, data, &mut got).unwrap();
             assert_eq!(data, cipher, "case {i} ciphertext");
-            assert_eq!(got, tag, "case {i} tag");
+            assert_eq!(&got, tag, "case {i} tag");
 
             gcm.decrypt(nonce, aad, data, tag).unwrap();
             assert_eq!(data, plain, "case {i} plaintext");
@@ -563,6 +609,15 @@ mod tests {
 
     /// Anything altered must be rejected, and the buffer wiped rather
     /// than left holding plaintext that was never authenticated.
+    #[test]
+    fn rejects_an_empty_nonce() {
+        let gcm = gcm();
+        assert_eq!(
+            gcm.encryptor(&[]).err(),
+            Some(Error::InvalidNonceLength(0))
+        );
+    }
+
     #[test]
     fn rejects_and_wipes() {
         let gcm = gcm();
@@ -608,36 +663,59 @@ mod tests {
         );
     }
 
+    /// A truncated tag is a prefix of the full one, and only the
+    /// lengths the standard allows are accepted.
     #[test]
-    fn shorter_tags_are_prefixes() {
+    fn truncated_tags() {
         let gcm = gcm();
         let nonce = [3u8; 12];
         let mut full = [0u8; 16];
         gcm.encrypt(&nonce, b"", &mut [], &mut full).unwrap();
 
         for n in [4, 8, 12, 13, 14, 15, 16] {
-            let mut tag = [0u8; 16];
-            gcm.encrypt(&nonce, b"", &mut [], &mut tag[..n]).unwrap();
-            assert_eq!(tag[..n], full[..n], "{n}-byte tag");
-            gcm.decrypt(&nonce, b"", &mut [], &tag[..n]).unwrap();
+            let d = gcm.decryptor(&nonce).unwrap();
+            d.verify_truncated(&full[..n]).unwrap();
+            let mut wrong = full;
+            wrong[n - 1] ^= 1;
+            let d = gcm.decryptor(&nonce).unwrap();
+            assert_eq!(
+                d.verify_truncated(&wrong[..n]).unwrap_err(),
+                Error::AuthenticationFailed,
+                "{n}-byte tag"
+            );
+        }
+        let long = [0u8; 32];
+        for n in [0, 1, 2, 3, 17, 32] {
+            let d = gcm.decryptor(&nonce).unwrap();
+            assert_eq!(
+                d.verify_truncated(&long[..n]).unwrap_err(),
+                Error::InvalidTagLength(n)
+            );
         }
     }
 
     #[test]
-    fn rejects_bad_lengths() {
-        let gcm = gcm();
-        for n in [0, 1, 2, 3, 5, 9, 11, 17, 32] {
-            let mut tag = [0u8; 32];
-            assert_eq!(
-                gcm.encrypt(&[0; 12], b"", &mut [], &mut tag[..n])
-                    .unwrap_err(),
-                Error::InvalidTagLength(n)
-            );
+    fn debug_shows_no_secrets() {
+        struct Buffer([u8; 128], usize);
+        impl core::fmt::Write for Buffer {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                let end = self.1 + s.len();
+                self.0[self.1..end].copy_from_slice(s.as_bytes());
+                self.1 = end;
+                Ok(())
+            }
         }
-        assert_eq!(
-            gcm.encrypt(&[], b"", &mut [], &mut [0; 16]).unwrap_err(),
-            Error::InvalidNonceLength(0)
-        );
+        let gcm = gcm();
+        let mut buffer = Buffer([0; 128], 0);
+        core::fmt::write(&mut buffer, format_args!("{gcm:?}")).unwrap();
+        let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();
+        assert_eq!(text, "Gcm { .. }");
+        let e = gcm.encryptor(&[0; 12]).unwrap();
+        let mut buffer = Buffer([0; 128], 0);
+        core::fmt::write(&mut buffer, format_args!("{e:?}")).unwrap();
+        let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();
+        assert!(text.starts_with("Encryptor {"));
+        assert!(!text.contains("42"), "{text}");
     }
 
     /// Pieces must match one call, including additional data given in
@@ -664,7 +742,11 @@ mod tests {
             let (a, b) = pieces.split_at_mut(split);
             e.update(a).unwrap();
             e.update(b).unwrap();
-            assert_eq!(e.finish().unwrap(), tag, "encrypt tag, split {split}");
+            assert_eq!(
+                e.finalize().unwrap(),
+                tag,
+                "encrypt tag, split {split}"
+            );
             assert_eq!(pieces, whole, "encrypt, split {split}");
 
             let mut d = gcm.decryptor(&nonce).unwrap();
@@ -672,7 +754,7 @@ mod tests {
             let (a, b) = pieces.split_at_mut(split);
             d.update(a).unwrap();
             d.update(b).unwrap();
-            d.finish(&tag).unwrap();
+            d.verify(&tag).unwrap();
             assert_eq!(pieces, plain, "decrypt, split {split}");
         }
 
@@ -686,16 +768,18 @@ mod tests {
         for byte in pieces.iter_mut() {
             e.update(core::slice::from_mut(byte)).unwrap();
         }
-        assert_eq!(e.finish().unwrap(), tag, "encrypt tag, byte at a time");
+        assert_eq!(e.finalize().unwrap(), tag, "encrypt tag, byte at a time");
         assert_eq!(pieces, whole, "encrypt, byte at a time");
     }
 
     #[test]
-    #[should_panic(expected = "before any of the message")]
-    fn additional_data_after_the_message_is_a_mistake() {
+    fn additional_data_after_the_message_is_refused() {
         let gcm = gcm();
         let mut e = gcm.encryptor(&[0; 12]).unwrap();
         e.update(&mut [0; 4]).unwrap();
-        let _ = e.aad(b"too late");
+        assert_eq!(e.aad(b"too late").unwrap_err(), Error::OutOfOrder);
+        let mut d = gcm.decryptor(&[0; 12]).unwrap();
+        d.update(&mut [0; 4]).unwrap();
+        assert_eq!(d.aad(b"too late").unwrap_err(), Error::OutOfOrder);
     }
 }

@@ -241,11 +241,11 @@ impl<S: Entropy> Rng<S> {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidLength`] if `entropy` is shorter than
+    /// [`Error::InvalidSeedLength`] if `entropy` is shorter than
     /// [`MIN_SEED`]. The generator is left exactly as it was.
     pub fn reseed_from(&mut self, entropy: &[u8]) -> Result<(), Error> {
         if entropy.len() < MIN_SEED {
-            return Err(Error::InvalidLength(entropy.len()));
+            return Err(Error::InvalidSeedLength(entropy.len()));
         }
         let mut seed = [0u8; SEED];
         let derived = derive(entropy, &mut seed);
@@ -307,11 +307,11 @@ impl Rng<External> {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidLength`] if `seed` is shorter than
+    /// [`Error::InvalidSeedLength`] if `seed` is shorter than
     /// [`MIN_SEED`]. It must be full entropy over its whole length.
     pub fn from_seed(seed: &[u8]) -> Result<Self, Error> {
         if seed.len() < MIN_SEED {
-            return Err(Error::InvalidLength(seed.len()));
+            return Err(Error::InvalidSeedLength(seed.len()));
         }
         Self::instantiate(seed, External)
     }
@@ -320,7 +320,7 @@ impl Rng<External> {
 impl<S: Entropy> Random for Rng<S> {
     fn fill(&mut self, out: &mut [u8]) -> Result<(), Error> {
         if out.len() > MAX_REQUEST {
-            return Err(Error::InvalidLength(out.len()));
+            return Err(Error::RequestTooLarge(out.len()));
         }
         if self.counter > RESEED_INTERVAL {
             self.reseed()?;
@@ -550,12 +550,12 @@ mod tests {
         let short = [0x5au8; MIN_SEED - 1];
         assert_eq!(
             Rng::from_seed(&short).err(),
-            Some(Error::InvalidLength(MIN_SEED - 1))
+            Some(Error::InvalidSeedLength(MIN_SEED - 1))
         );
         let mut rng = Rng::from_seed(&seed()).expect("seed");
         assert_eq!(
             rng.reseed_from(&short).err(),
-            Some(Error::InvalidLength(MIN_SEED - 1))
+            Some(Error::InvalidSeedLength(MIN_SEED - 1))
         );
     }
 
@@ -596,7 +596,7 @@ mod tests {
         let mut buf = [0u8; MAX_REQUEST + 1];
         assert_eq!(
             rng.fill(&mut buf).err(),
-            Some(Error::InvalidLength(MAX_REQUEST + 1))
+            Some(Error::RequestTooLarge(MAX_REQUEST + 1))
         );
         rng.fill(&mut buf[..MAX_REQUEST]).expect("largest allowed");
     }

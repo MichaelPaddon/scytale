@@ -515,7 +515,7 @@ impl<C: BlockCipher<Block = [u8; 16]>> Keys<C> {
                         return;
                     };
                     let _ = state.update(d);
-                    let _ = state.finish(&CHECKED_TAG);
+                    let _ = state.verify(&CHECKED_TAG);
                 }),
             ),
             (

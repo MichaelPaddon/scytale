@@ -37,6 +37,8 @@ pub(crate) fn has_zknh() -> bool {
 /// The sigma functions as Zknh instructions.
 pub struct Zknh;
 
+impl super::engine::Sealed for Zknh {}
+
 /// Defines a one-instruction function.
 macro_rules! sigma {
     ($name:ident, $instruction:literal, $word:ty) => {
