@@ -17,6 +17,8 @@ pub mod aes_ofb;
 pub mod aes_xpn;
 pub mod aes_xts;
 pub mod ctr_drbg;
+pub mod hmac;
+pub mod pbkdf;
 pub mod sha2;
 
 use serde_json::Value;

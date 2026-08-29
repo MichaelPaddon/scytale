@@ -13,7 +13,7 @@ use support::acvp::{
     aes_ctr as ctr, aes_ecb as ecb, aes_ff1 as ff1, aes_ff3_1 as ff3_1,
     aes_gcm as gcm, aes_gcm_siv as gcm_siv, aes_kw as kw, aes_kwp as kwp,
     aes_ofb as ofb, aes_xpn as xpn, aes_xts as xts, ctr_drbg as drbg,
-    sha2 as sha2_vectors,
+    hmac as hmac_vectors, pbkdf as pbkdf_vectors, sha2 as sha2_vectors,
 };
 
 /// Defines the suites for an implementation that is always
@@ -405,4 +405,141 @@ mod sha2_512_256 {
         "ACVP-SHA2-512-256-1.0/internalProjection.json",
         "SHA2-512/256"
     );
+}
+
+/// Defines the HMAC suite for one hash implementation. The hardware
+/// ones skip, saying so, when the processor cannot.
+macro_rules! hmac_suite {
+    ($name:ident, $hash:ty, $file:literal, $algorithm:literal) => {
+        hmac_suite!($name, $hash, $file, $algorithm, "portable code");
+    };
+    ($name:ident, $hash:ty, $file:literal, $algorithm:literal,
+     $what:literal) => {
+        mod $name {
+            use super::*;
+            use scytale::mac::hmac::Hmac;
+            use scytale::Error;
+
+            #[test]
+            fn acvp_aft() {
+                match Hmac::<$hash>::try_new(&[0u8; 16]) {
+                    Ok(_) => {}
+                    Err(Error::NotSupported) => {
+                        eprintln!(concat!($what, " not available; skipping"));
+                        return;
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+                hmac_vectors::run_aft::<Hmac<$hash>>($file, $algorithm);
+            }
+        }
+    };
+}
+
+/// Runs one variant's HMAC suite against every implementation this
+/// architecture has.
+macro_rules! every_hmac {
+    ($variant:ident, $file:literal, $algorithm:literal) => {
+        use super::*;
+        use scytale::hash::sha2;
+
+        hmac_suite!(automatic, sha2::$variant, $file, $algorithm);
+        hmac_suite!(portable, sha2::portable::$variant, $file, $algorithm);
+
+        #[cfg(target_arch = "aarch64")]
+        hmac_suite!(
+            armv8,
+            sha2::aarch64::$variant,
+            $file,
+            $algorithm,
+            "ARMv8 SHA2"
+        );
+
+        #[cfg(target_arch = "riscv64")]
+        hmac_suite!(
+            zknh,
+            sha2::riscv64::$variant,
+            $file,
+            $algorithm,
+            "RISC-V Zknh"
+        );
+    };
+}
+
+/// HMAC (FIPS 198-1) over each SHA-2 variant.
+mod hmac_sha2_224 {
+    every_hmac!(
+        Sha224,
+        "ACVP-HMAC-SHA2-224-1.0/internalProjection.json",
+        "HMAC-SHA2-224"
+    );
+
+    #[cfg(target_arch = "x86_64")]
+    hmac_suite!(
+        shani,
+        sha2::x86_64::Sha224,
+        "ACVP-HMAC-SHA2-224-1.0/internalProjection.json",
+        "HMAC-SHA2-224",
+        "SHA-NI"
+    );
+}
+
+mod hmac_sha2_256 {
+    every_hmac!(
+        Sha256,
+        "ACVP-HMAC-SHA2-256-1.0/internalProjection.json",
+        "HMAC-SHA2-256"
+    );
+
+    #[cfg(target_arch = "x86_64")]
+    hmac_suite!(
+        shani,
+        sha2::x86_64::Sha256,
+        "ACVP-HMAC-SHA2-256-1.0/internalProjection.json",
+        "HMAC-SHA2-256",
+        "SHA-NI"
+    );
+}
+
+mod hmac_sha2_384 {
+    every_hmac!(
+        Sha384,
+        "ACVP-HMAC-SHA2-384-1.0/internalProjection.json",
+        "HMAC-SHA2-384"
+    );
+}
+
+mod hmac_sha2_512 {
+    every_hmac!(
+        Sha512,
+        "ACVP-HMAC-SHA2-512-1.0/internalProjection.json",
+        "HMAC-SHA2-512"
+    );
+}
+
+mod hmac_sha2_512_224 {
+    every_hmac!(
+        Sha512_224,
+        "ACVP-HMAC-SHA2-512-224-1.0/internalProjection.json",
+        "HMAC-SHA2-512/224"
+    );
+}
+
+mod hmac_sha2_512_256 {
+    every_hmac!(
+        Sha512_256,
+        "ACVP-HMAC-SHA2-512-256-1.0/internalProjection.json",
+        "HMAC-SHA2-512/256"
+    );
+}
+
+/// PBKDF2 (SP 800-132). The vendored file covers HMAC-SHA-224 only,
+/// and the function is generic over the hash, so one run suffices.
+mod pbkdf2 {
+    use super::*;
+
+    #[test]
+    fn acvp_aft() {
+        pbkdf_vectors::run_aft::<scytale::hash::sha2::Sha224>("SHA2-224");
+    }
 }

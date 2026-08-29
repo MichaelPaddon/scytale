@@ -38,6 +38,8 @@ pub enum Error {
     /// The set of possible messages is too small to encrypt safely.
     /// A short string in a small alphabet can simply be searched.
     DomainTooSmall,
+    /// The iteration count is zero, which would derive nothing.
+    InvalidIterations,
     /// The processor lacks the instructions this implementation needs.
     NotSupported,
     /// The system would not supply random bytes. The number is the
@@ -82,6 +84,7 @@ impl fmt::Display for Error {
             Error::DomainTooSmall => {
                 write!(f, "too few possible messages to encrypt safely")
             }
+            Error::InvalidIterations => write!(f, "zero iterations"),
             Error::NotSupported => {
                 write!(f, "not supported by this processor")
             }

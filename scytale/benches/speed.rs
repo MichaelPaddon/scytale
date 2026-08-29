@@ -45,6 +45,8 @@ use cpu_time::ThreadTime;
 
 use scytale::hash::sha2;
 use scytale::hash::Hash;
+use scytale::mac::hmac::Hmac;
+use scytale::mac::Mac;
 use scytale::symmetric::aes::portable;
 use scytale::symmetric::mode::{Cbc, Ctr, Gcm, GcmSiv, Xts};
 use scytale::symmetric::{aes, Block, BlockCipher};
@@ -284,8 +286,9 @@ fn section<C: BlockCipher<Block = [u8; 16]>>(
     true
 }
 
-/// The hash rows, one per family.
-const HASHES: [&str; 2] = ["sha-256", "sha-512"];
+/// The hash rows: each family, and HMAC over it.
+const HASHES: [&str; 4] =
+    ["sha-256", "sha-512", "hmac-sha-256", "hmac-sha-512"];
 
 /// Measures one pair of hash implementations, one per family,
 /// returning whether it ran anything. A family the processor cannot
@@ -315,6 +318,9 @@ where
             return false;
         }
     };
+    // The hashes exist, so keying cannot fail.
+    let mut hmac256 = Hmac::<S256>::try_new(&KEY128).expect("hmac");
+    let mut hmac512 = Hmac::<S512>::try_new(&KEY128).expect("hmac");
     let mut tasks: Vec<Task<'_>> = vec![
         (
             "sha-256",
@@ -330,6 +336,22 @@ where
                 sha512.reset();
                 sha512.update(d);
                 black_box(sha512.clone().finalize());
+            }),
+        ),
+        (
+            "hmac-sha-256",
+            Box::new(|d: &mut [u8]| {
+                hmac256.reset();
+                hmac256.update(d);
+                black_box(hmac256.clone().finalize());
+            }),
+        ),
+        (
+            "hmac-sha-512",
+            Box::new(|d: &mut [u8]| {
+                hmac512.reset();
+                hmac512.update(d);
+                black_box(hmac512.clone().finalize());
             }),
         ),
     ];

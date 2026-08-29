@@ -11,6 +11,8 @@
 mod arch;
 mod error;
 pub mod hash;
+pub mod kdf;
+pub mod mac;
 mod math;
 pub mod random;
 pub mod symmetric;
