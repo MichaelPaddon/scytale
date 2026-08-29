@@ -49,9 +49,11 @@ a whole architecture.
 | SHA-224, SHA-256 (FIPS 180-4) | 28, 32 bytes | the 32-bit family |
 | SHA-384, SHA-512 | 48, 64 bytes | the 64-bit family |
 | SHA-512/224, SHA-512/256 | 28, 32 bytes | truncated; no length extension |
+| SHA3-224 to SHA3-512 (FIPS 202) | 28 to 64 bytes | no length extension |
+| SHAKE128, SHAKE256 | any length | extendable output |
 
-All six take bit strings as well as bytes, as the standard defines
-them. Built on any of them:
+All of them take bit strings as well as bytes, as the standards
+define them. Built on any of them:
 
 | Construction | Kind | Notes |
 | --- | --- | --- |
@@ -170,13 +172,16 @@ too.
 | aarch64 | ARMv8 SHA2 extension | SHA-256 | under emulation |
 | aarch64 | ARMv8 SHA512 extension | SHA-512 | under emulation |
 | riscv64 | scalar cryptography (Zknh) | SHA-256, SHA-512 | under emulation |
+| aarch64 | ARMv8 SHA3 extension | SHA-3, SHAKE | under emulation |
 | any | none needed; portable Rust | all | on hardware |
 
 GHASH is the hash inside GCM, GCM-SIV and XPN. Without a carry-less
 multiply instruction it costs more than the cipher does. SHA-224 and
 SHA-384 and the SHA-512/t pair use the SHA-256 and SHA-512 code, so
 whatever accelerates those accelerates them. x86-64 has no SHA-512
-instruction in common use, so SHA-512 is portable there.
+instruction in common use, so SHA-512 is portable there. Every SHA-3
+and SHAKE function is the one Keccak permutation, which only AArch64
+has instructions for; elsewhere it is portable.
 
 Support is detected while the program runs: on x86-64 with CPUID, on
 aarch64 by reading the ID registers, on RISC-V through the kernel's

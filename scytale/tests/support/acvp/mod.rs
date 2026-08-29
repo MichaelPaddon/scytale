@@ -19,7 +19,8 @@ pub mod aes_xts;
 pub mod ctr_drbg;
 pub mod hmac;
 pub mod pbkdf;
-pub mod sha2;
+pub mod sha;
+pub mod shake;
 
 use serde_json::Value;
 

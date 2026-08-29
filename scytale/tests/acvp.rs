@@ -13,7 +13,8 @@ use support::acvp::{
     aes_ctr as ctr, aes_ecb as ecb, aes_ff1 as ff1, aes_ff3_1 as ff3_1,
     aes_gcm as gcm, aes_gcm_siv as gcm_siv, aes_kw as kw, aes_kwp as kwp,
     aes_ofb as ofb, aes_xpn as xpn, aes_xts as xts, ctr_drbg as drbg,
-    hmac as hmac_vectors, pbkdf as pbkdf_vectors, sha2 as sha2_vectors,
+    hmac as hmac_vectors, pbkdf as pbkdf_vectors, sha as sha_vectors,
+    shake as shake_vectors,
 };
 
 /// Defines the suites for an implementation that is always
@@ -254,11 +255,12 @@ mod ctr_drbg {
 /// Defines the SHA-2 suites for one implementation of one variant.
 /// The hardware ones skip, saying so, when the processor cannot.
 macro_rules! sha2_suites {
-    ($name:ident, $ty:ty, $file:literal, $algorithm:literal) => {
-        sha2_suites!($name, $ty, $file, $algorithm, "portable code");
+    ($name:ident, $ty:ty, $file:literal, $algorithm:literal,
+     $family:expr) => {
+        sha2_suites!($name, $ty, $file, $algorithm, $family, "portable code");
     };
     ($name:ident, $ty:ty, $file:literal, $algorithm:literal,
-     $what:literal) => {
+     $family:expr, $what:literal) => {
         mod $name {
             use super::*;
             use scytale::hash::Hash;
@@ -280,7 +282,7 @@ macro_rules! sha2_suites {
             #[test]
             fn acvp_aft() {
                 if supported() {
-                    sha2_vectors::run_aft::<$ty>($file, $algorithm);
+                    sha_vectors::run_aft::<$ty>($file, $algorithm, $family);
                 }
             }
 
@@ -289,22 +291,35 @@ macro_rules! sha2_suites {
             #[ignore]
             fn acvp_mct() {
                 if supported() {
-                    sha2_vectors::run_mct::<$ty>($file, $algorithm);
+                    sha_vectors::run_mct::<$ty>($file, $algorithm, $family);
                 }
             }
         }
     };
 }
 
-/// Runs one variant's suites against every implementation this
-/// architecture has.
+/// Runs one SHA-2 variant's suites against every implementation
+/// this architecture has.
 macro_rules! every_sha2 {
     ($variant:ident, $file:literal, $algorithm:literal) => {
         use super::*;
         use scytale::hash::sha2;
+        use support::acvp::sha::Family;
 
-        sha2_suites!(automatic, sha2::$variant, $file, $algorithm);
-        sha2_suites!(portable, sha2::portable::$variant, $file, $algorithm);
+        sha2_suites!(
+            automatic,
+            sha2::$variant,
+            $file,
+            $algorithm,
+            Family::Sha2
+        );
+        sha2_suites!(
+            portable,
+            sha2::portable::$variant,
+            $file,
+            $algorithm,
+            Family::Sha2
+        );
 
         #[cfg(target_arch = "aarch64")]
         sha2_suites!(
@@ -312,6 +327,7 @@ macro_rules! every_sha2 {
             sha2::aarch64::$variant,
             $file,
             $algorithm,
+            Family::Sha2,
             "ARMv8 SHA2"
         );
 
@@ -321,7 +337,43 @@ macro_rules! every_sha2 {
             sha2::riscv64::$variant,
             $file,
             $algorithm,
+            Family::Sha2,
             "RISC-V Zknh"
+        );
+    };
+}
+
+/// Runs one SHA-3 digest's suites against every implementation
+/// this architecture has.
+macro_rules! every_sha3 {
+    ($variant:ident, $file:literal, $algorithm:literal) => {
+        use super::*;
+        use scytale::hash::sha3;
+        use support::acvp::sha::Family;
+
+        sha2_suites!(
+            automatic,
+            sha3::$variant,
+            $file,
+            $algorithm,
+            Family::Sha3
+        );
+        sha2_suites!(
+            portable,
+            sha3::portable::$variant,
+            $file,
+            $algorithm,
+            Family::Sha3
+        );
+
+        #[cfg(target_arch = "aarch64")]
+        sha2_suites!(
+            armv8,
+            sha3::aarch64::$variant,
+            $file,
+            $algorithm,
+            Family::Sha3,
+            "ARMv8 SHA3"
         );
     };
 }
@@ -340,6 +392,7 @@ mod sha2_224 {
         sha2::x86_64::Sha224,
         "ACVP-SHA2-224-1.0/internalProjection.json",
         "SHA2-224",
+        Family::Sha2,
         "SHA-NI"
     );
 }
@@ -358,6 +411,7 @@ mod sha2_256 {
         sha2::x86_64::Sha256,
         "ACVP-SHA2-256-1.0/internalProjection.json",
         "SHA2-256",
+        Family::Sha2,
         "SHA-NI"
     );
 }
@@ -380,40 +434,6 @@ mod sha2_512 {
     );
 }
 
-/// The SHA-2 large data tests: messages of 1 to 8 GiB, which take
-/// the length field past 2^32 bits. That field belongs to the shared
-/// engine, one per word size, not to any variant or backend: the
-/// variants differ only in starting value and truncation, and the
-/// backends only in the compression function, and AFT and MCT cover
-/// both of those for each. So one whole group per engine, on the
-/// best implementation the machine has, is the whole check, where
-/// one per implementation and variant was twelve times the hashing
-/// for the same answer.
-mod sha2_ldt {
-    use super::*;
-    use scytale::hash::sha2;
-
-    /// Gigabytes of hashing; run with `cargo test-extended`.
-    #[test]
-    #[ignore]
-    fn sha256() {
-        sha2_vectors::run_ldt::<sha2::Sha256>(
-            "ACVP-SHA2-256-1.0/internalProjection.json",
-            "SHA2-256",
-        );
-    }
-
-    /// Gigabytes of hashing; run with `cargo test-extended`.
-    #[test]
-    #[ignore]
-    fn sha512() {
-        sha2_vectors::run_ldt::<sha2::Sha512>(
-            "ACVP-SHA2-512-1.0/internalProjection.json",
-            "SHA2-512",
-        );
-    }
-}
-
 /// SHA-512/224 (FIPS 180-4 section 5.3.6).
 mod sha2_512_224 {
     every_sha2!(
@@ -430,6 +450,171 @@ mod sha2_512_256 {
         "ACVP-SHA2-512-256-1.0/internalProjection.json",
         "SHA2-512/256"
     );
+}
+
+/// SHA3-224 (FIPS 202).
+mod sha3_224 {
+    every_sha3!(
+        Sha3_224,
+        "ACVP-SHA3-224-2.0/internalProjection.json",
+        "SHA3-224"
+    );
+}
+
+/// SHA3-256 (FIPS 202).
+mod sha3_256 {
+    every_sha3!(
+        Sha3_256,
+        "ACVP-SHA3-256-2.0/internalProjection.json",
+        "SHA3-256"
+    );
+}
+
+/// SHA3-384 (FIPS 202).
+mod sha3_384 {
+    every_sha3!(
+        Sha3_384,
+        "ACVP-SHA3-384-2.0/internalProjection.json",
+        "SHA3-384"
+    );
+}
+
+/// SHA3-512 (FIPS 202).
+mod sha3_512 {
+    every_sha3!(
+        Sha3_512,
+        "ACVP-SHA3-512-2.0/internalProjection.json",
+        "SHA3-512"
+    );
+}
+
+/// Defines the SHAKE suites for one implementation.
+macro_rules! shake_suites {
+    ($name:ident, $ty:ty, $file:literal, $algorithm:literal) => {
+        shake_suites!($name, $ty, $file, $algorithm, "portable code");
+    };
+    ($name:ident, $ty:ty, $file:literal, $algorithm:literal,
+     $what:literal) => {
+        mod $name {
+            use super::*;
+            use scytale::hash::Xof;
+            use scytale::Error;
+
+            fn supported() -> bool {
+                match <$ty>::try_new() {
+                    Ok(_) => true,
+                    Err(Error::NotSupported) => {
+                        eprintln!(concat!($what, " not available; skipping"));
+                        false
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+            }
+
+            #[test]
+            fn acvp_aft() {
+                if supported() {
+                    shake_vectors::run_aft::<$ty>($file, $algorithm);
+                }
+            }
+
+            /// Slow; run with `cargo test-extended`.
+            #[test]
+            #[ignore]
+            fn acvp_mct() {
+                if supported() {
+                    shake_vectors::run_mct::<$ty>($file, $algorithm);
+                }
+            }
+        }
+    };
+}
+
+/// Runs one SHAKE function's suites against every implementation
+/// this architecture has.
+macro_rules! every_shake {
+    ($variant:ident, $file:literal, $algorithm:literal) => {
+        use super::*;
+        use scytale::hash::sha3;
+
+        shake_suites!(automatic, sha3::$variant, $file, $algorithm);
+        shake_suites!(portable, sha3::portable::$variant, $file, $algorithm);
+
+        #[cfg(target_arch = "aarch64")]
+        shake_suites!(
+            armv8,
+            sha3::aarch64::$variant,
+            $file,
+            $algorithm,
+            "ARMv8 SHA3"
+        );
+    };
+}
+
+/// SHAKE128 (FIPS 202).
+mod shake_128 {
+    every_shake!(
+        Shake128,
+        "ACVP-SHAKE-128-1.0/internalProjection.json",
+        "SHAKE-128"
+    );
+}
+
+/// SHAKE256 (FIPS 202).
+mod shake_256 {
+    every_shake!(
+        Shake256,
+        "ACVP-SHAKE-256-1.0/internalProjection.json",
+        "SHAKE-256"
+    );
+}
+
+/// The large data tests: messages of 1 to 8 GiB, which take the
+/// length field past 2^32 bits. That field belongs to the shared
+/// engine, one per SHA-2 word size, not to any variant or backend:
+/// the variants differ only in starting value and truncation, and
+/// the backends only in the compression function, and AFT and MCT
+/// cover both of those for each. SHA-3 keeps no length at all, so
+/// its one run checks only that nothing else breaks over 8 GiB. One
+/// whole group each, on the best implementation the machine has.
+mod sha_ldt {
+    use super::*;
+    use scytale::hash::{sha2, sha3};
+    use support::acvp::sha::Family;
+
+    /// Gigabytes of hashing; run with `cargo test-extended`.
+    #[test]
+    #[ignore]
+    fn sha256() {
+        sha_vectors::run_ldt::<sha2::Sha256>(
+            "ACVP-SHA2-256-1.0/internalProjection.json",
+            "SHA2-256",
+            Family::Sha2,
+        );
+    }
+
+    /// Gigabytes of hashing; run with `cargo test-extended`.
+    #[test]
+    #[ignore]
+    fn sha512() {
+        sha_vectors::run_ldt::<sha2::Sha512>(
+            "ACVP-SHA2-512-1.0/internalProjection.json",
+            "SHA2-512",
+            Family::Sha2,
+        );
+    }
+
+    /// Thirty-two gigabytes of hashing; run with `cargo
+    /// test-extended`.
+    #[test]
+    #[ignore]
+    fn sha3_256() {
+        sha_vectors::run_ldt::<sha3::Sha3_256>(
+            "ACVP-SHA3-256-2.0/internalProjection.json",
+            "SHA3-256",
+            Family::Sha3,
+        );
+    }
 }
 
 /// Defines the HMAC suite for one hash implementation. The hardware
@@ -555,6 +740,20 @@ mod hmac_sha2_512_256 {
         Sha512_256,
         "ACVP-HMAC-SHA2-512-256-1.0/internalProjection.json",
         "HMAC-SHA2-512/256"
+    );
+}
+
+/// HMAC over SHA3-256, which exercises a rate larger than any
+/// SHA-2 block.
+mod hmac_sha3_256 {
+    use super::*;
+    use scytale::hash::sha3;
+
+    hmac_suite!(
+        automatic,
+        sha3::Sha3_256,
+        "ACVP-HMAC-SHA3-256-1.0/internalProjection.json",
+        "HMAC-SHA3-256"
     );
 }
 

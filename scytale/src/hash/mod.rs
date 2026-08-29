@@ -46,6 +46,14 @@
 //! for them. SHA-224 and SHA-512/224 exist for protocols that name
 //! them and are not worth choosing otherwise.
 //!
+//! [`sha3`] is a different design, not a successor: choose it when a
+//! protocol names it, or for a digest that cannot be length extended
+//! without settling for a truncated one. Its SHAKE functions give
+//! output of whatever length is asked for, through [`Xof`] and
+//! [`XofReader`] rather than [`Hash`], which is what to reach for
+//! when the length is the caller's to decide. Without hardware for
+//! it (only AArch64 has any) SHA-3 costs more per byte than SHA-2.
+//!
 //! # Not a MAC
 //!
 //! Hashing a secret key followed by a message does not make a message
@@ -54,6 +62,7 @@
 //! compute the digest of the extension, without the key. Use HMAC.
 
 pub mod sha2;
+pub mod sha3;
 
 use crate::symmetric::Block;
 use crate::Error;
@@ -101,12 +110,68 @@ pub trait Hash: Clone + Sized {
 /// hash is defined that way, so this is a separate trait rather than
 /// a method every hash must fake.
 pub trait BitHash: Hash {
-    /// Ends the message with the top `bits` bits of `last`, where
-    /// `bits` is 1 to 7, and returns its digest. The remaining low
-    /// bits of `last` are ignored.
+    /// Ends the message with the first `bits` bits of `last`, where
+    /// `bits` is 1 to 7, and returns its digest. The other bits of
+    /// `last` are ignored.
+    ///
+    /// Which bits are first is the hash's own convention, so that a
+    /// bit string laid out as its standard's test files lay it out
+    /// can be passed straight through: SHA-2 counts from the most
+    /// significant bit of the byte, SHA-3 from the least.
     ///
     /// Returns [`Error::InvalidBitCount`] for a `bits` outside that
     /// range: zero extra bits is [`finalize`](Hash::finalize), and
     /// eight is a whole byte for [`update`](Hash::update).
     fn finalize_bits(self, last: u8, bits: u32) -> Result<Self::Output, Error>;
+}
+
+/// An extendable-output function: a hash whose digest is as long as
+/// the caller asks, squeezed out after the message is complete.
+///
+/// The message goes in through [`update`](Xof::update) as for a
+/// [`Hash`]; [`finalize_xof`](Xof::finalize_xof) then hands back a
+/// reader that yields output in any number of pieces. Two readers
+/// over the same message yield the same stream, so a caller wanting
+/// `n` bytes and later `m` more gets the first `n + m` bytes of one
+/// stream either way.
+pub trait Xof: Clone + Sized {
+    /// Bytes the sponge takes at a time, the rate.
+    const BLOCK_SIZE: usize;
+
+    /// What the output is squeezed from.
+    type Reader: XofReader;
+
+    /// Starts a new function.
+    fn try_new() -> Result<Self, Error>;
+
+    /// Returns to the state of a new function, without asking the
+    /// processor again.
+    fn reset(&mut self);
+
+    /// Appends `data` to the message.
+    fn update(&mut self, data: &[u8]);
+
+    /// Ends the message and returns the output stream.
+    fn finalize_xof(self) -> Self::Reader;
+}
+
+/// The output side of an [`Xof`].
+pub trait XofReader {
+    /// Fills `out` with the next bytes of the stream.
+    fn squeeze(&mut self, out: &mut [u8]);
+}
+
+/// An extendable-output function defined over bit strings; see
+/// [`BitHash`] for the convention.
+pub trait BitXof: Xof {
+    /// Ends the message with the first `bits` bits of `last`, where
+    /// `bits` is 1 to 7, and returns the output stream.
+    ///
+    /// Returns [`Error::InvalidBitCount`] for a `bits` outside that
+    /// range.
+    fn finalize_bits_xof(
+        self,
+        last: u8,
+        bits: u32,
+    ) -> Result<Self::Reader, Error>;
 }

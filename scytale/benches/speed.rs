@@ -43,8 +43,8 @@ use std::time::Duration;
 
 use cpu_time::ThreadTime;
 
-use scytale::hash::sha2;
-use scytale::hash::Hash;
+use scytale::hash::{sha2, sha3};
+use scytale::hash::{Hash, Xof, XofReader};
 use scytale::mac::hmac::Hmac;
 use scytale::mac::Mac;
 use scytale::symmetric::aes::portable;
@@ -242,6 +242,25 @@ fn report(options: &Options) -> ExitCode {
         "portable", options,
     );
 
+    // SHA-3: one permutation under every function, so one hardware
+    // section, and only AArch64 has the instructions.
+    ran |= sha3_section::<sha3::Sha3_256, sha3::Sha3_512, sha3::Shake128>(
+        "auto", options,
+    );
+    #[cfg(target_arch = "aarch64")]
+    {
+        ran |= sha3_section::<
+            sha3::aarch64::Sha3_256,
+            sha3::aarch64::Sha3_512,
+            sha3::aarch64::Shake128,
+        >("armv8", options);
+    }
+    ran |= sha3_section::<
+        sha3::portable::Sha3_256,
+        sha3::portable::Sha3_512,
+        sha3::portable::Shake128,
+    >("portable", options);
+
     if !ran {
         eprintln!("speed: nothing matched");
         return ExitCode::FAILURE;
@@ -352,6 +371,78 @@ where
                 hmac512.reset();
                 hmac512.update(d);
                 black_box(hmac512.clone().finalize());
+            }),
+        ),
+    ];
+    tasks.retain(|(name, _)| wanted.contains(name));
+
+    println!("\n{implementation}");
+    println!("{}", heading());
+    for (name, operation) in &mut tasks {
+        println!("{}", row(name, operation, options.budget));
+    }
+    true
+}
+
+/// The SHA-3 rows: two digests and one extendable-output function,
+/// the last squeezing 32 bytes.
+const SHA3: [&str; 3] = ["sha3-256", "sha3-512", "shake128"];
+
+/// Measures one implementation of SHA-3, returning whether it ran
+/// anything; an implementation the processor cannot run is left out.
+fn sha3_section<D256, D512, X128>(
+    implementation: &str,
+    options: &Options,
+) -> bool
+where
+    D256: Hash<Output = [u8; 32]>,
+    D512: Hash<Output = [u8; 64]>,
+    X128: Xof,
+{
+    let wanted: Vec<&'static str> = SHA3
+        .iter()
+        .copied()
+        .filter(|name| options.wants(implementation, name))
+        .collect();
+    if wanted.is_empty() {
+        return false;
+    }
+    let states = (D256::try_new(), D512::try_new(), X128::try_new());
+    let (mut d256, mut d512, mut x128) = match states {
+        (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+        (Err(Error::NotSupported), _, _)
+        | (_, Err(Error::NotSupported), _)
+        | (_, _, Err(Error::NotSupported)) => return false,
+        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+            eprintln!("speed: {implementation}: {e}");
+            return false;
+        }
+    };
+    let mut tasks: Vec<Task<'_>> = vec![
+        (
+            "sha3-256",
+            Box::new(|d: &mut [u8]| {
+                d256.reset();
+                d256.update(d);
+                black_box(d256.clone().finalize());
+            }) as Operation<'_>,
+        ),
+        (
+            "sha3-512",
+            Box::new(|d: &mut [u8]| {
+                d512.reset();
+                d512.update(d);
+                black_box(d512.clone().finalize());
+            }),
+        ),
+        (
+            "shake128",
+            Box::new(|d: &mut [u8]| {
+                x128.reset();
+                x128.update(d);
+                let mut out = [0u8; 32];
+                x128.clone().finalize_xof().squeeze(&mut out);
+                black_box(out);
             }),
         ),
     ];
