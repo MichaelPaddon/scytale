@@ -4,6 +4,37 @@
 //! how to carry that over a message: how blocks chain, how a nonce
 //! enters, and, for the authenticated modes, how a tag is computed.
 //!
+//! # Which mode
+//!
+//! | Need | Mode |
+//! | --- | --- |
+//! | Encrypt and authenticate a message | [`Gcm`], with [`Nonces`] |
+//! | The same, when a nonce might repeat | [`GcmSiv`] |
+//! | MACsec frames | [`Xpn`] |
+//! | A disk or other sector-addressed store | [`Xts`] |
+//! | Wrap a key | [`Kw`], or [`Kwp`] for any length |
+//! | Encrypt within a format, such as a card number | [`Ff1`], [`Ff3_1`] |
+//! | Plain stream, for a protocol | [`Ctr`], [`Cbc`], [`Ofb`], [`Cfb128`] |
+//! | Byte or bit at a time, for a legacy protocol | [`Cfb8`], [`Cfb1`] |
+//!
+//! [`Gcm`] is the default. It is fast, standard, and refuses to hand
+//! back a message that does not authenticate. Its one hazard is a
+//! repeated nonce, which [`Nonces`] rules out; where uniqueness cannot
+//! be promised, [`GcmSiv`] survives a repeat.
+//!
+//! [`Xts`] authenticates nothing: it is for storage, where there is
+//! no room for a tag and the threat is a stolen disk. [`Kw`] and
+//! [`Kwp`] are deterministic, which is right for keys and wrong for
+//! anything else. The format-preserving modes are not constant time
+//! and their history is uneven; use them only where the format is
+//! the point.
+//!
+//! The plain modes, [`Ctr`], [`Cbc`], [`Ofb`] and [`Cfb128`],
+//! authenticate nothing and must be paired with a MAC over the
+//! ciphertext, checked before decrypting. [`Cfb8`] and [`Cfb1`] are
+//! those again at a fraction of the speed, for protocols that fixed
+//! their segment size long ago.
+//!
 //! [`BlockCipher`]: crate::symmetric::BlockCipher
 
 pub mod cbc;

@@ -3,6 +3,36 @@
 //! Every fallible call in the library returns this one type. The
 //! variants say what was wrong with the request, and never anything
 //! about the secret it was made with.
+//!
+//! The type is `non_exhaustive`, so a `match` needs an arm for
+//! whatever a later version adds:
+//!
+//! ```
+//! use scytale::symmetric::aes::Aes;
+//! use scytale::Error;
+//!
+//! match Aes::try_new(&[0u8; 7]) {
+//!     Ok(_) => unreachable!(),
+//!     Err(Error::InvalidKeyLength(n)) => assert_eq!(n, 7),
+//!     Err(Error::NotSupported) => panic!("no implementation at all"),
+//!     Err(other) => panic!("{other}"),
+//! }
+//! ```
+//!
+//! # Which variant, from where
+//!
+//! Several variants carry a length, and which one says what was
+//! wrong with it. [`Error::InvalidLength`] is malformed input: data
+//! that is not a size the call can take, such as a wrapped key that
+//! is not a multiple of eight bytes, or more HKDF output than the
+//! construction defines. [`Error::OutputTooSmall`] is the caller's
+//! buffer, and carries the size it needs to be.
+//! [`Error::NotBlockAligned`], [`Error::InvalidNonceLength`],
+//! [`Error::InvalidTagLength`] and [`Error::InvalidKeyLength`] name
+//! the offending argument. [`Error::InvalidSeedLength`] and
+//! [`Error::RequestTooLarge`] come only from the random number
+//! generator, and [`Error::InvalidBitCount`] only from ending a hash
+//! part way through a byte.
 
 use core::fmt;
 

@@ -26,7 +26,8 @@
 //! makes them the same cost as SHA-512: on a 64-bit processor without
 //! SHA-256 instructions that is faster than SHA-256, and their output
 //! cannot be extended the way SHA-256's can, since most of the final
-//! state is thrown away.
+//! state is thrown away. Which of the six to choose is discussed in
+//! [the module above](crate::hash#choosing-a-hash).
 //!
 //! # Bit strings
 //!
@@ -45,7 +46,10 @@
 //! extensions, RISC-V Zknh) make each round cheaper instead, and are
 //! several times the speed of the portable code. x86-64 has no
 //! SHA-512 instruction in common use yet, so SHA-384 and SHA-512 are
-//! portable there.
+//! portable there. Each implementation is a module beside this one,
+//! `x86_64`, `aarch64` and `riscv64`, present only on its own
+//! architecture, with the same type names as `portable`; the types
+//! here choose among them.
 //!
 //! # Not a MAC
 //!

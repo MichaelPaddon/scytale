@@ -12,6 +12,32 @@
 //! password hash: it needs no memory, so purpose-built hardware runs
 //! it far faster than yours. Where the choice is yours, prefer a
 //! memory-hard function.
+//!
+//! ```
+//! use scytale::hash::sha2::Sha256;
+//! use scytale::kdf::pbkdf2::pbkdf2;
+//!
+//! # fn main() -> Result<(), scytale::Error> {
+//! // The salt is stored beside the derived key, and differs for
+//! // every password.
+//! let salt = [0x1f; 16];
+//! let mut key = [0u8; 32];
+//! let password = b"correct horse battery staple";
+//! pbkdf2::<Sha256>(password, &salt, 600_000, &mut key)?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # How many iterations
+//!
+//! Hundreds of thousands, with SHA-256, as of 2026: OWASP's guidance
+//! is 600,000, and SP 800-132, which specifies the construction, says
+//! to pick as many as the application can bear. Each iteration is two
+//! compressions of the hash, so 600,000 of them is a few hundred
+//! milliseconds on a laptop core, which a login can afford and an
+//! attacker guessing billions of passwords cannot. Raise the number
+//! as processors get faster; it is stored beside the salt, so old
+//! keys keep working.
 
 use crate::hash::Hash;
 use crate::mac::hmac::Hmac;

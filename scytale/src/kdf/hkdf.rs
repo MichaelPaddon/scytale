@@ -5,6 +5,44 @@
 //! key, with a context string, to any length up to 255 digests. Most
 //! uses want both, which is [`derive()`]. The salt is optional but
 //! valuable: without one, `extract` is HMAC under a key of zeros.
+//!
+//! ```
+//! use scytale::hash::sha2::Sha256;
+//! use scytale::kdf::hkdf;
+//!
+//! # fn main() -> Result<(), scytale::Error> {
+//! let shared_secret = [0x0b; 32];
+//! let salt = [0x42; 16];
+//!
+//! // Both steps at once: the usual case.
+//! let mut key = [0u8; 32];
+//! hkdf::derive::<Sha256>(&salt, &shared_secret, b"encryption", &mut key)?;
+//!
+//! // Expand only, from a key that is already uniformly random, such
+//! // as one a generator drew. Extracting again would not hurt, but
+//! // there is nothing for it to do.
+//! let prk = [0x7e; 32];
+//! let mut client = [0u8; 32];
+//! let mut server = [0u8; 32];
+//! hkdf::expand::<Sha256>(&prk, b"client write", &mut client)?;
+//! hkdf::expand::<Sha256>(&prk, b"server write", &mut server)?;
+//! assert_ne!(client, server);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Salt and info
+//!
+//! The salt should be random and may be public: a protocol nonce,
+//! sent in the clear, is ideal. It does not need to be secret, and it
+//! is not what makes the output unpredictable; it makes the extract
+//! step behave as a random function even when the keying material is
+//! structured. `info` is what separates keys: the same secret and
+//! salt with different `info` give unrelated keys, so a protocol
+//! derives one key per purpose by naming the purpose there, and never
+//! reuses a key for two. One expansion is limited to 255 digests, 8
+//! kilobytes for SHA-256; a protocol wanting more than that has
+//! something else wrong.
 
 use crate::hash::Hash;
 use crate::mac::hmac::Hmac;

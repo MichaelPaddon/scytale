@@ -68,6 +68,8 @@ jobs:
 
       - name: Docs
         run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   # Architecture-independent checks, so once is enough.
   style:

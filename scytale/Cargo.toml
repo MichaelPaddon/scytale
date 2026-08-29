@@ -3,11 +3,30 @@ name = "scytale"
 description = "Portable cryptographic primitives"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+repository = "https://github.com/MichaelPaddon/scytale"
+documentation = "https://docs.rs/scytale"
+# The README lives at the workspace root; cargo only looks in the
+# package directory on its own.
+readme = "../README.md"
+keywords = ["cryptography", "aes", "sha2", "hmac", "no-std"]
+categories = ["cryptography", "no-std", "no-std::no-alloc"]
 # ACVP vectors are vendored for development but not shipped, to keep
 # the crate small; without them the ACVP suites skip and the built-in
 # vectors in the unit tests remain.
 exclude = ["tests/vectors"]
+
+# Documents every architecture that has its own implementations, so
+# that the backend modules for each are browsable, not only the one
+# docs.rs happens to build on.
+[package.metadata.docs.rs]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "riscv64gc-unknown-linux-gnu",
+]
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 zeroize = { version = "1", default-features = false, features = ["derive"] }

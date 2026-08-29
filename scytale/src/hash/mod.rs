@@ -6,6 +6,46 @@
 //! written against [`Hash`], and the ones that are defined over bit
 //! strings rather than bytes also offer [`BitHash`].
 //!
+//! ```
+//! use scytale::hash::sha2::{Sha256, Sha512_256};
+//! use scytale::hash::{BitHash, Hash};
+//!
+//! # fn main() -> Result<(), scytale::Error> {
+//! // Written once, for any hash.
+//! fn fingerprint<H: Hash>(
+//!     parts: &[&[u8]],
+//! ) -> Result<H::Output, scytale::Error> {
+//!     let mut hash = H::try_new()?;
+//!     for part in parts {
+//!         hash.update(part);
+//!     }
+//!     Ok(hash.finalize())
+//! }
+//! assert_eq!(fingerprint::<Sha256>(&[b"ab", b"c"])?, Sha256::digest(b"abc")?);
+//! let wide = fingerprint::<Sha512_256>(&[b"abc"])?;
+//! assert_eq!(wide.len(), 32);
+//!
+//! // A message of 19 bits: two whole bytes, then the top three bits
+//! // of a third.
+//! let mut hash = Sha256::new();
+//! hash.update(&[0xff, 0x00]);
+//! let digest = hash.finalize_bits(0b1010_0000, 3)?;
+//! assert_ne!(digest, Sha256::digest(&[0xff, 0x00, 0xa0])?);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Choosing a hash
+//!
+//! SHA-256 is the default: every protocol accepts it and most
+//! processors have instructions for it. On a 64-bit processor with no
+//! such instruction SHA-512/256 is faster, gives the same size of
+//! digest, and cannot be length extended (see below), so it is the
+//! better choice where nothing dictates SHA-256. SHA-384 and SHA-512
+//! are for the larger security levels, when a protocol or policy asks
+//! for them. SHA-224 and SHA-512/224 exist for protocols that name
+//! them and are not worth choosing otherwise.
+//!
 //! # Not a MAC
 //!
 //! Hashing a secret key followed by a message does not make a message

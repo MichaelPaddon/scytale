@@ -11,6 +11,33 @@
 //! the message does not: for the SHA-2 family anyone holding a
 //! message's digest can extend the message and compute the digest of
 //! the extension, key unseen.
+//!
+//! ```
+//! use scytale::mac::hmac::HmacSha256;
+//! use scytale::mac::Mac;
+//!
+//! # fn main() -> Result<(), scytale::Error> {
+//! // Written once, for any MAC.
+//! fn seal<M: Mac>(
+//!     key: &[u8],
+//!     message: &[u8],
+//! ) -> Result<M::Tag, scytale::Error> {
+//!     let mut mac = M::try_new(key)?;
+//!     mac.update(message);
+//!     Ok(mac.finalize())
+//! }
+//! let tag = seal::<HmacSha256>(b"key", b"message")?;
+//!
+//! // On receipt: never compare the tag yourself.
+//! let mut mac = HmacSha256::try_new(b"key")?;
+//! mac.update(b"message");
+//! mac.verify(&tag)?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! [`Mac::verify`] takes the same time whether the tag is wrong in
+//! its first byte or its last, and says only that it was wrong.
 
 pub mod hmac;
 

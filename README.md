@@ -2,8 +2,9 @@
 
 Cryptographic primitives in Rust.
 
-This is early work. So far it has AES, the block cipher modes built
-on it, and random numbers.
+This is early work. It has AES and the block cipher modes built on
+it, the SHA-2 hashes with HMAC, HKDF and PBKDF2 over them, and random
+numbers.
 
 ## Goals
 
@@ -42,6 +43,21 @@ a whole architecture.
 | Algorithm | Key sizes | Notes |
 | --- | --- | --- |
 | AES (FIPS 197) | 128, 192, 256 | the block cipher itself |
+
+| Hash | Digest | Notes |
+| --- | --- | --- |
+| SHA-224, SHA-256 (FIPS 180-4) | 28, 32 bytes | the 32-bit family |
+| SHA-384, SHA-512 | 48, 64 bytes | the 64-bit family |
+| SHA-512/224, SHA-512/256 | 28, 32 bytes | truncated; no length extension |
+
+All six take bit strings as well as bytes, as the standard defines
+them. Built on any of them:
+
+| Construction | Kind | Notes |
+| --- | --- | --- |
+| HMAC (FIPS 198-1) | message authentication | constant-time verify |
+| HKDF (RFC 5869) | key derivation | from a secret that is already random |
+| PBKDF2 (SP 800-132) | key derivation | from a password |
 
 Every mode below is generic: it wraps any block cipher, and AES is
 simply the one there is so far.
@@ -150,10 +166,17 @@ too.
 | riscv64 | vector cryptography (Zvkned) | AES | under emulation |
 | riscv64 | scalar cryptography (Zkne, Zknd) | AES | under emulation |
 | riscv64 | vector GHASH (Zvkg) | GHASH | under emulation |
-| any | none needed; portable Rust | both | on hardware |
+| x86-64 | SHA-NI | SHA-256 | on hardware |
+| aarch64 | ARMv8 SHA2 extension | SHA-256 | under emulation |
+| aarch64 | ARMv8 SHA512 extension | SHA-512 | under emulation |
+| riscv64 | scalar cryptography (Zknh) | SHA-256, SHA-512 | under emulation |
+| any | none needed; portable Rust | all | on hardware |
 
 GHASH is the hash inside GCM, GCM-SIV and XPN. Without a carry-less
-multiply instruction it costs more than the cipher does.
+multiply instruction it costs more than the cipher does. SHA-224 and
+SHA-384 and the SHA-512/t pair use the SHA-256 and SHA-512 code, so
+whatever accelerates those accelerates them. x86-64 has no SHA-512
+instruction in common use, so SHA-512 is portable there.
 
 Support is detected while the program runs: on x86-64 with CPUID, on
 aarch64 by reading the ID registers, on RISC-V through the kernel's
@@ -192,6 +215,25 @@ Every mode also has an incremental form for data that arrives in
 pieces. Note that incremental decryption hands back plaintext before
 the tag has been checked; the one-shot call above is the safe
 default.
+
+Hashes and MACs take their message in pieces or in one call, and a
+MAC is checked with `verify`, never by comparing bytes yourself:
+
+```rust
+use scytale::hash::{sha2::Sha256, Hash};
+use scytale::mac::{hmac::HmacSha256, Mac};
+
+let digest = Sha256::digest(message)?;
+
+let tag = HmacSha256::mac(&key, message)?;
+let mut mac = HmacSha256::try_new(&key)?;
+mac.update(message);
+mac.verify(&tag)?;
+```
+
+`Sha256` and the rest pick the best implementation the processor
+supports, as `Aes` does, and each implementation is reachable by name
+under `hash::sha2::portable`, `x86_64`, `aarch64` and `riscv64`.
 
 `Aes` picks the best implementation the processor supports, probing
 once on first use. Each implementation can also be named directly:

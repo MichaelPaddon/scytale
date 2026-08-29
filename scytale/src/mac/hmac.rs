@@ -6,6 +6,33 @@
 //! when the key is set, and every message starts from those states,
 //! so a message costs its own length plus one block and the key is
 //! never reprocessed.
+//!
+//! ```
+//! use scytale::mac::hmac::HmacSha256;
+//! use scytale::mac::Mac;
+//!
+//! # fn main() -> Result<(), scytale::Error> {
+//! let key = [0x0b; 32];
+//!
+//! // In one call.
+//! let tag = HmacSha256::mac(&key, b"Hi There")?;
+//!
+//! // In pieces, then checked in constant time.
+//! let mut mac = HmacSha256::try_new(&key)?;
+//! mac.update(b"Hi ");
+//! mac.update(b"There");
+//! mac.verify(&tag)?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Keys
+//!
+//! Any length is accepted. A key should be at least as long as the
+//! digest, and random: that is what the security argument assumes,
+//! and a shorter key is guessed as such. A key longer than the hash's
+//! block is hashed to a digest first, as the standard says, so there
+//! is nothing to gain past that length.
 
 use core::fmt;
 

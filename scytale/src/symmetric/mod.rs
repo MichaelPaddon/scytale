@@ -1,4 +1,38 @@
 //! Symmetric (shared key) primitives.
+//!
+//! A block cipher, [`aes`], and the modes of operation that turn it
+//! into something a message can be encrypted with, under [`mode`].
+//! Everything here is written against the [`BlockCipher`] trait, so
+//! a mode works with any cipher and any of its implementations.
+//!
+//! # Example
+//!
+//! ```
+//! use scytale::symmetric::aes::Aes;
+//! use scytale::symmetric::mode::Ctr;
+//! use scytale::symmetric::BlockCipher;
+//!
+//! # fn main() -> Result<(), scytale::Error> {
+//! let aes = Aes::try_new(&[0u8; 16])?;
+//!
+//! // The cipher itself transforms one block at a time.
+//! let mut block = [0u8; 16];
+//! aes.encrypt_block(&mut block);
+//! aes.decrypt_block(&mut block);
+//! assert_eq!(block, [0u8; 16]);
+//!
+//! // A mode carries that over a message of any length.
+//! let ctr = Ctr::new(aes);
+//! let mut message = *b"a message of any length";
+//! ctr.encrypt(&[1u8; 16], &mut message)?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! A raw block cipher is the wrong tool for a message: it encrypts
+//! equal blocks to equal blocks, and it authenticates nothing. Reach
+//! for a mode, and unless there is a reason not to, an authenticated
+//! one: see [`mode`] for which.
 
 pub mod aes;
 pub mod mode;

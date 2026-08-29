@@ -11,6 +11,27 @@
 //! | [`Processor`] | the processor's own generator, health tested |
 //! | [`External`] | nothing at all; the caller supplies everything |
 //!
+//! # Example
+//!
+//! ```
+//! use scytale::random::{External, Random, Rng, System};
+//!
+//! # fn main() -> Result<(), scytale::Error> {
+//! // The usual case: let the system feed the generator.
+//! let mut rng = Rng::try_new(System::try_new()?)?;
+//! let mut key = [0u8; 32];
+//! rng.fill(&mut key)?;
+//!
+//! // Material gathered some other way, for a bare board or a test.
+//! // It must be full entropy over its whole length, and at least
+//! // `MIN_SEED` bytes of it.
+//! let seed = [0x5au8; scytale::random::MIN_SEED];
+//! let mut fixed = Rng::<External>::from_seed(&seed)?;
+//! fixed.fill(&mut key)?;
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Why the operating systems are not written out here
 //!
 //! They used to be: a system call made by number on Linux, a named C
