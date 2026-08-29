@@ -9,7 +9,7 @@
 //! | Module | What is in it |
 //! | --- | --- |
 //! | [`symmetric`] | AES and the modes built on any block cipher |
-//! | [`hash`] | the SHA-2 family |
+//! | [`hash`] | the SHA-2 and SHA-3 families, and SHAKE |
 //! | [`mac`] | HMAC over any hash |
 //! | [`kdf`] | HKDF and PBKDF2 |
 //! | [`random`] | a CTR_DRBG generator and the entropy that seeds it |

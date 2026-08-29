@@ -3,8 +3,8 @@
 Cryptographic primitives in Rust.
 
 This is early work. It has AES and the block cipher modes built on
-it, the SHA-2 hashes with HMAC, HKDF and PBKDF2 over them, and random
-numbers.
+it, the SHA-2 and SHA-3 hashes and SHAKE, HMAC, HKDF and PBKDF2 over
+them, and random numbers.
 
 ## Goals
 
@@ -304,6 +304,21 @@ Rates are bytes, counted in millions and thousands of millions:
 CBC encryption, OFB and CFB encryption are serial by definition: each
 block waits for the one before it, so they run at the speed of single
 blocks and no amount of interleaving helps.
+
+The hashes, on the same processor with 16 KB buffers:
+
+| Function | Implementation | Speed |
+| --- | --- | --- |
+| SHA-256 | `shani` | 1.8 GB/s |
+| SHA-256 | `portable` | 270 MB/s |
+| SHA-512 | `portable` | 430 MB/s |
+| HMAC-SHA-256 | `shani` | 1.8 GB/s |
+| SHA3-256 | `portable` | 450 MB/s |
+| SHA3-512 | `portable` | 240 MB/s |
+| SHAKE128 | `portable` | 550 MB/s |
+
+SHA-224, SHA-384 and the SHA-512/t pair run at the speed of the
+function whose code they share.
 
 The ARM and RISC-V implementations have only been run under
 emulation, so there are no timings for them.

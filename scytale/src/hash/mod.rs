@@ -57,9 +57,11 @@
 //! # Not a MAC
 //!
 //! Hashing a secret key followed by a message does not make a message
-//! authentication code. For the hashes here (the SHA-2 family) anyone
-//! who knows the digest of a message can extend that message and
-//! compute the digest of the extension, without the key. Use HMAC.
+//! authentication code. For the SHA-2 family anyone who knows the
+//! digest of a message can extend that message and compute the digest
+//! of the extension, without the key. SHA-3 does not have that flaw,
+//! but a construction that is only safe with one family is a trap
+//! for the next reader. Use HMAC.
 
 pub mod sha2;
 pub mod sha3;

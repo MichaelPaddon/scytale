@@ -14,8 +14,8 @@
 //! which is how the vector suites already treat them. The `auto`
 //! section is `Aes` itself, so the cost of its dispatch shows as the
 //! distance between it and the implementation it chose. The SHA-2
-//! implementations are treated the same way, in sections of their
-//! own after the ciphers.
+//! and SHA-3 implementations are treated the same way, in sections
+//! of their own after the ciphers.
 //!
 //! ```text
 //! cargo bench --bench speed                    # everything
