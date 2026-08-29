@@ -13,6 +13,7 @@ use support::acvp::{
     aes_ctr as ctr, aes_ecb as ecb, aes_ff1 as ff1, aes_ff3_1 as ff3_1,
     aes_gcm as gcm, aes_gcm_siv as gcm_siv, aes_kw as kw, aes_kwp as kwp,
     aes_ofb as ofb, aes_xpn as xpn, aes_xts as xts, ctr_drbg as drbg,
+    sha2 as sha2_vectors,
 };
 
 /// Defines the suites for an implementation that is always
@@ -248,4 +249,142 @@ mod ctr_drbg {
     fn acvp_aft() {
         drbg::run_aft();
     }
+}
+
+/// Defines the SHA-2 suites for one implementation of one variant.
+/// The hardware ones skip, saying so, when the processor cannot.
+macro_rules! sha2_suites {
+    ($name:ident, $ty:ty, $file:literal, $algorithm:literal) => {
+        sha2_suites!($name, $ty, $file, $algorithm, "portable code");
+    };
+    ($name:ident, $ty:ty, $file:literal, $algorithm:literal,
+     $what:literal) => {
+        mod $name {
+            use super::*;
+            use scytale::hash::Hash;
+            use scytale::Error;
+
+            /// Whether to run, reporting a skip when the processor
+            /// cannot. A silent skip would look like a pass.
+            fn supported() -> bool {
+                match <$ty>::try_new() {
+                    Ok(_) => true,
+                    Err(Error::NotSupported) => {
+                        eprintln!(concat!($what, " not available; skipping"));
+                        false
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+            }
+
+            #[test]
+            fn acvp_aft() {
+                if supported() {
+                    sha2_vectors::run_aft::<$ty>($file, $algorithm);
+                }
+            }
+
+            /// Slow; run with `cargo test-extended`.
+            #[test]
+            #[ignore]
+            fn acvp_mct() {
+                if supported() {
+                    sha2_vectors::run_mct::<$ty>($file, $algorithm);
+                }
+            }
+
+            /// Gigabytes of hashing; run with `cargo test-extended`.
+            #[test]
+            #[ignore]
+            fn acvp_ldt() {
+                if supported() {
+                    sha2_vectors::run_ldt::<$ty>($file, $algorithm);
+                }
+            }
+        }
+    };
+}
+
+/// Runs one variant's suites against every implementation this
+/// architecture has.
+macro_rules! every_sha2 {
+    ($variant:ident, $file:literal, $algorithm:literal) => {
+        use super::*;
+        use scytale::hash::sha2;
+
+        sha2_suites!(automatic, sha2::$variant, $file, $algorithm);
+        sha2_suites!(portable, sha2::portable::$variant, $file, $algorithm);
+
+        #[cfg(target_arch = "aarch64")]
+        sha2_suites!(
+            armv8,
+            sha2::aarch64::$variant,
+            $file,
+            $algorithm,
+            "ARMv8 SHA2"
+        );
+
+        #[cfg(target_arch = "riscv64")]
+        sha2_suites!(
+            zknh,
+            sha2::riscv64::$variant,
+            $file,
+            $algorithm,
+            "RISC-V Zknh"
+        );
+    };
+}
+
+/// SHA-224 (FIPS 180-4).
+mod sha2_224 {
+    every_sha2!(
+        Sha224,
+        "ACVP-SHA2-224-1.0/internalProjection.json",
+        "SHA2-224"
+    );
+
+    #[cfg(target_arch = "x86_64")]
+    sha2_suites!(
+        shani,
+        sha2::x86_64::Sha224,
+        "ACVP-SHA2-224-1.0/internalProjection.json",
+        "SHA2-224",
+        "SHA-NI"
+    );
+}
+
+/// SHA-256 (FIPS 180-4).
+mod sha2_256 {
+    every_sha2!(
+        Sha256,
+        "ACVP-SHA2-256-1.0/internalProjection.json",
+        "SHA2-256"
+    );
+
+    #[cfg(target_arch = "x86_64")]
+    sha2_suites!(
+        shani,
+        sha2::x86_64::Sha256,
+        "ACVP-SHA2-256-1.0/internalProjection.json",
+        "SHA2-256",
+        "SHA-NI"
+    );
+}
+
+/// SHA-384 (FIPS 180-4).
+mod sha2_384 {
+    every_sha2!(
+        Sha384,
+        "ACVP-SHA2-384-1.0/internalProjection.json",
+        "SHA2-384"
+    );
+}
+
+/// SHA-512 (FIPS 180-4).
+mod sha2_512 {
+    every_sha2!(
+        Sha512,
+        "ACVP-SHA2-512-1.0/internalProjection.json",
+        "SHA2-512"
+    );
 }

@@ -10,6 +10,7 @@
 
 mod arch;
 mod error;
+pub mod hash;
 mod math;
 pub mod random;
 pub mod symmetric;

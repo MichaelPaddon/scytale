@@ -13,11 +13,14 @@
 //! section, named, rather than only the one `Aes::try_new` picks,
 //! which is how the vector suites already treat them. The `auto`
 //! section is `Aes` itself, so the cost of its dispatch shows as the
-//! distance between it and the implementation it chose.
+//! distance between it and the implementation it chose. The SHA-2
+//! implementations are treated the same way, in sections of their
+//! own after the ciphers.
 //!
 //! ```text
 //! cargo bench --bench speed                    # everything
 //! cargo bench --bench speed -- gcm aesni       # rows matching both
+//! cargo bench --bench speed -- sha             # the hashes only
 //! cargo bench --bench speed -- --seconds 0.25  # a quicker sweep
 //! cargo bench --bench speed -- --self-test     # check the harness
 //! ```
@@ -40,6 +43,8 @@ use std::time::Duration;
 
 use cpu_time::ThreadTime;
 
+use scytale::hash::sha2;
+use scytale::hash::Hash;
 use scytale::symmetric::aes::portable;
 use scytale::symmetric::mode::{Cbc, Ctr, Gcm, GcmSiv, Xts};
 use scytale::symmetric::{aes, Block, BlockCipher};
@@ -210,6 +215,31 @@ fn report(options: &Options) -> ExitCode {
     ran |= section::<portable::Aes>("ttable", options);
     ran |= section::<portable::bitsliced::Aes>("bitsliced", options);
 
+    // The hashes, likewise. SHA-224 and SHA-384 cost the same as
+    // SHA-256 and SHA-512 and are not measured separately.
+    ran |= hash_section::<sha2::Sha256, sha2::Sha512>("auto", options);
+    #[cfg(target_arch = "x86_64")]
+    {
+        ran |= hash_section::<sha2::x86_64::Sha256, sha2::portable::Sha512>(
+            "shani", options,
+        );
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        ran |= hash_section::<sha2::aarch64::Sha256, sha2::aarch64::Sha512>(
+            "armv8", options,
+        );
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        ran |= hash_section::<sha2::riscv64::Sha256, sha2::riscv64::Sha512>(
+            "zknh", options,
+        );
+    }
+    ran |= hash_section::<sha2::portable::Sha256, sha2::portable::Sha512>(
+        "portable", options,
+    );
+
     if !ran {
         eprintln!("speed: nothing matched");
         return ExitCode::FAILURE;
@@ -244,6 +274,65 @@ fn section<C: BlockCipher<Block = [u8; 16]>>(
         }
     };
     let mut tasks = keys.tasks();
+    tasks.retain(|(name, _)| wanted.contains(name));
+
+    println!("\n{implementation}");
+    println!("{}", heading());
+    for (name, operation) in &mut tasks {
+        println!("{}", row(name, operation, options.budget));
+    }
+    true
+}
+
+/// The hash rows, one per family.
+const HASHES: [&str; 2] = ["sha-256", "sha-512"];
+
+/// Measures one pair of hash implementations, one per family,
+/// returning whether it ran anything. A family the processor cannot
+/// run is left out, as with the ciphers; on x86-64 the SHA-NI
+/// section pairs its SHA-256 with the portable SHA-512, there being
+/// no instruction for the latter.
+fn hash_section<S256, S512>(implementation: &str, options: &Options) -> bool
+where
+    S256: Hash<Output = [u8; 32]>,
+    S512: Hash<Output = [u8; 64]>,
+{
+    let wanted: Vec<&'static str> = HASHES
+        .iter()
+        .copied()
+        .filter(|name| options.wants(implementation, name))
+        .collect();
+    if wanted.is_empty() {
+        return false;
+    }
+    let (mut sha256, mut sha512) = match (S256::try_new(), S512::try_new()) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(Error::NotSupported), _) | (_, Err(Error::NotSupported)) => {
+            return false
+        }
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("speed: {implementation}: {e}");
+            return false;
+        }
+    };
+    let mut tasks: Vec<Task<'_>> = vec![
+        (
+            "sha-256",
+            Box::new(|d: &mut [u8]| {
+                sha256.reset();
+                sha256.update(d);
+                black_box(sha256.clone().finalize());
+            }) as Operation<'_>,
+        ),
+        (
+            "sha-512",
+            Box::new(|d: &mut [u8]| {
+                sha512.reset();
+                sha512.update(d);
+                black_box(sha512.clone().finalize());
+            }),
+        ),
+    ];
     tasks.retain(|(name, _)| wanted.contains(name));
 
     println!("\n{implementation}");
