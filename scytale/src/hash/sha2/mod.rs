@@ -18,6 +18,13 @@
 //! assert_eq!(hash.finalize(), Sha256::digest(b"abc"));
 //! ```
 //!
+//! SHA-512/224 and SHA-512/256 (FIPS 180-4 section 5.3.6) are
+//! SHA-512 with another starting value and a shorter digest, which
+//! makes them the same cost as SHA-512: on a 64-bit processor without
+//! SHA-256 instructions that is faster than SHA-256, and their output
+//! cannot be extended the way SHA-256's can, since most of the final
+//! state is thrown away.
+//!
 //! # Bit strings
 //!
 //! SHA-2 is defined over bit strings. A message that is not a whole
@@ -83,6 +90,14 @@ pub mod variant {
     #[derive(Clone, Copy, Debug)]
     pub struct Sha512;
 
+    /// SHA-512/224.
+    #[derive(Clone, Copy, Debug)]
+    pub struct Sha512_224;
+
+    /// SHA-512/256.
+    #[derive(Clone, Copy, Debug)]
+    pub struct Sha512_256;
+
     impl Variant32 for Sha224 {
         // The low halves of SHA-384's initial value.
         const IV: [u32; 8] = [
@@ -130,6 +145,37 @@ pub mod variant {
         ];
         type Output = [u8; 64];
     }
+
+    // The SHA-512/t values are SHA-512 of the string "SHA-512/t",
+    // started from SHA-512's value with every byte xored with 0xa5;
+    // the tests below derive them again.
+    impl Variant64 for Sha512_224 {
+        const IV: [u64; 8] = [
+            0x8c3d37c819544da2,
+            0x73e1996689dcd4d6,
+            0x1dfab7ae32ff9c82,
+            0x679dd514582f9fcf,
+            0x0f6d2b697bd44da8,
+            0x77e36f7304c48942,
+            0x3f9d85a86a1d36c8,
+            0x1112e6ad91d692a1,
+        ];
+        type Output = [u8; 28];
+    }
+
+    impl Variant64 for Sha512_256 {
+        const IV: [u64; 8] = [
+            0x22312194fc2bf72c,
+            0x9f555fa3c84c64c2,
+            0x2393b86b6f53b151,
+            0x963877195940eabd,
+            0x96283ee2a88effe3,
+            0xbe5e1e2553863992,
+            0x2b0199fc2c85b8aa,
+            0x0eb72ddc81c52ca2,
+        ];
+        type Output = [u8; 32];
+    }
 }
 
 /// SHA-224 using the best implementation the processor supports.
@@ -140,6 +186,10 @@ pub type Sha256 = Auto32<variant::Sha256>;
 pub type Sha384 = Auto64<variant::Sha384>;
 /// SHA-512 using the best implementation the processor supports.
 pub type Sha512 = Auto64<variant::Sha512>;
+/// SHA-512/224 using the best implementation the processor supports.
+pub type Sha512_224 = Auto64<variant::Sha512_224>;
+/// SHA-512/256 using the best implementation the processor supports.
+pub type Sha512_256 = Auto64<variant::Sha512_256>;
 
 /// The implementation the processor gets, chosen once per family.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -514,8 +564,55 @@ pub(crate) mod tests {
         check_known_answers::<Sha224, Sha256, Sha384, Sha512>();
     }
 
+    /// The SHA-512/t starting values are SHA-512 of "SHA-512/t" from
+    /// a modified starting value (FIPS 180-4 section 5.3.6).
+    #[test]
+    fn sha512_t_ivs_derive() {
+        fn derive(name: &[u8]) -> [u64; 8] {
+            let iv = variant::Sha512::IV.map(|w| w ^ 0xa5a5a5a5a5a5a5a5);
+            let mut hash = portable::Sha512::with_iv(iv);
+            hash.update(name);
+            let digest = hash.finalize();
+            core::array::from_fn(|i| {
+                u64::from_be_bytes(digest[8 * i..8 * i + 8].try_into().unwrap())
+            })
+        }
+        assert_eq!(derive(b"SHA-512/224"), variant::Sha512_224::IV);
+        assert_eq!(derive(b"SHA-512/256"), variant::Sha512_256::IV);
+    }
+
+    #[test]
+    fn sha512_t_known_answers() {
+        assert_eq!(
+            Sha512_224::digest(b"abc"),
+            hex("4634270f707b6a54daae7530460842e20e37ed265ceee9a43e8924aa")
+                [..28]
+        );
+        assert_eq!(
+            Sha512_256::digest(b"abc"),
+            hex(
+                "53048e2681941ef99b2e29b76b4c7dabe4c2d0c634fc6d46e0e2f13107e7\
+                 af23"
+            )[..32]
+        );
+        assert_eq!(
+            Sha512_224::digest(b""),
+            hex("6ed0dd02806fa89e25de060c19d3ac86cabb87d6a0ddd05c333b84f4")
+                [..28]
+        );
+        assert_eq!(
+            Sha512_256::digest(b""),
+            hex(
+                "c672b8d1ef56ed28ab87c3622c5114069bdd3ad7b8f9737498d0c01ecef0\
+                 967a"
+            )[..32]
+        );
+    }
+
     #[test]
     fn matches_portable() {
+        check_matches_portable::<Sha512_224, portable::Sha512_224>();
+        check_matches_portable::<Sha512_256, portable::Sha512_256>();
         check_matches_portable::<Sha224, portable::Sha224>();
         check_matches_portable::<Sha256, portable::Sha256>();
         check_matches_portable::<Sha384, portable::Sha384>();
@@ -623,6 +720,8 @@ pub(crate) mod tests {
         wipes::<portable::Sha256>();
         wipes::<portable::Sha384>();
         wipes::<portable::Sha512>();
+        wipes::<portable::Sha512_224>();
+        wipes::<portable::Sha512_256>();
         #[cfg(target_arch = "x86_64")]
         {
             wipes::<x86_64::Sha224>();

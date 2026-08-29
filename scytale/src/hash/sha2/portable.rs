@@ -24,6 +24,10 @@ pub type Sha256 = Engine32<Compress, variant::Sha256>;
 pub type Sha384 = Engine64<Compress, variant::Sha384>;
 /// SHA-512, portably.
 pub type Sha512 = Engine64<Compress, variant::Sha512>;
+/// SHA-512/224, portably.
+pub type Sha512_224 = Engine64<Compress, variant::Sha512_224>;
+/// SHA-512/256, portably.
+pub type Sha512_256 = Engine64<Compress, variant::Sha512_256>;
 
 /// The SHA-256 round constants: the fractional parts of the cube
 /// roots of the first 64 primes.

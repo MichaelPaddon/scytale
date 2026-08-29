@@ -388,3 +388,21 @@ mod sha2_512 {
         "SHA2-512"
     );
 }
+
+/// SHA-512/224 (FIPS 180-4 section 5.3.6).
+mod sha2_512_224 {
+    every_sha2!(
+        Sha512_224,
+        "ACVP-SHA2-512-224-1.0/internalProjection.json",
+        "SHA2-512/224"
+    );
+}
+
+/// SHA-512/256 (FIPS 180-4 section 5.3.6).
+mod sha2_512_256 {
+    every_sha2!(
+        Sha512_256,
+        "ACVP-SHA2-512-256-1.0/internalProjection.json",
+        "SHA2-512/256"
+    );
+}

@@ -107,8 +107,22 @@ macro_rules! engine {
             /// # Safety
             /// The caller must have confirmed `C::supported()`.
             pub(crate) unsafe fn new_unchecked() -> Self {
+                Self::from_state(V::IV)
+            }
+
+            /// Starts from `iv` instead of the variant's own value,
+            /// which is how the SHA-512/t values are derived.
+            // Only the 64-bit engine has a use for it.
+            #[cfg(test)]
+            #[allow(dead_code)]
+            pub(crate) fn with_iv(iv: [$word; 8]) -> Self {
+                assert!(C::supported());
+                Self::from_state(iv)
+            }
+
+            fn from_state(state: [$word; 8]) -> Self {
                 $name {
-                    state: V::IV,
+                    state,
                     block: [0; $block],
                     used: 0,
                     bytes: 0,

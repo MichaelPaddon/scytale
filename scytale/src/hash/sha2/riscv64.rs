@@ -23,6 +23,10 @@ pub type Sha256 = Engine32<Zknh, variant::Sha256>;
 pub type Sha384 = Engine64<Zknh, variant::Sha384>;
 /// SHA-512 with Zknh.
 pub type Sha512 = Engine64<Zknh, variant::Sha512>;
+/// SHA-512/224 with Zknh.
+pub type Sha512_224 = Engine64<Zknh, variant::Sha512_224>;
+/// SHA-512/256 with Zknh.
+pub type Sha512_256 = Engine64<Zknh, variant::Sha512_256>;
 
 /// Whether the Zknh instructions are available.
 pub(crate) fn has_zknh() -> bool {
