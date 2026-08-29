@@ -292,15 +292,6 @@ macro_rules! sha2_suites {
                     sha2_vectors::run_mct::<$ty>($file, $algorithm);
                 }
             }
-
-            /// Gigabytes of hashing; run with `cargo test-extended`.
-            #[test]
-            #[ignore]
-            fn acvp_ldt() {
-                if supported() {
-                    sha2_vectors::run_ldt::<$ty>($file, $algorithm);
-                }
-            }
         }
     };
 }
@@ -387,6 +378,40 @@ mod sha2_512 {
         "ACVP-SHA2-512-1.0/internalProjection.json",
         "SHA2-512"
     );
+}
+
+/// The SHA-2 large data tests: messages of 1 to 8 GiB, which take
+/// the length field past 2^32 bits. That field belongs to the shared
+/// engine, one per word size, not to any variant or backend: the
+/// variants differ only in starting value and truncation, and the
+/// backends only in the compression function, and AFT and MCT cover
+/// both of those for each. So one whole group per engine, on the
+/// best implementation the machine has, is the whole check, where
+/// one per implementation and variant was twelve times the hashing
+/// for the same answer.
+mod sha2_ldt {
+    use super::*;
+    use scytale::hash::sha2;
+
+    /// Gigabytes of hashing; run with `cargo test-extended`.
+    #[test]
+    #[ignore]
+    fn sha256() {
+        sha2_vectors::run_ldt::<sha2::Sha256>(
+            "ACVP-SHA2-256-1.0/internalProjection.json",
+            "SHA2-256",
+        );
+    }
+
+    /// Gigabytes of hashing; run with `cargo test-extended`.
+    #[test]
+    #[ignore]
+    fn sha512() {
+        sha2_vectors::run_ldt::<sha2::Sha512>(
+            "ACVP-SHA2-512-1.0/internalProjection.json",
+            "SHA2-512",
+        );
+    }
 }
 
 /// SHA-512/224 (FIPS 180-4 section 5.3.6).

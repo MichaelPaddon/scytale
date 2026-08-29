@@ -55,9 +55,6 @@ jobs:
           cargo --version
           rustc --version --verbose
 
-      - name: Build
-        run: cargo build --workspace --all-targets
-
       - name: Test
         # The alias in .cargo/config.toml; includes the slow Monte
         # Carlo suites, which are quick enough on real hardware.

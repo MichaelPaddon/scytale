@@ -307,7 +307,7 @@ emulation, so there are no timings for them.
 
 ```sh
 cargo test              # unit tests and the one-shot vector suites
-cargo test-extended     # adds the Monte Carlo suites, which are slow
+cargo test-extended     # adds the Monte Carlo and large data suites
 scripts/test-all-arches # every architecture, foreign ones emulated
 ```
 
