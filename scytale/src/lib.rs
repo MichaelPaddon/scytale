@@ -15,7 +15,7 @@
 //! | [`mac`] | HMAC over any hash, and Poly1305 |
 //! | [`kdf`] | HKDF and PBKDF2 |
 //! | [`ecdh`] | X25519 key agreement |
-//! | [`signature`] | Ed25519 signatures |
+//! | [`signature`] | Ed25519 and RSA signatures |
 //! | [`random`] | a CTR_DRBG generator and the entropy that seeds it |
 //! | [`Error`] | the one type every fallible call returns |
 //!
@@ -77,8 +77,9 @@
 //! # Non-goals
 //!
 //! No protocols: TLS, SSH and their kin are built on these pieces,
-//! not in here. No RSA or NIST-curve public-key work yet, though
-//! X25519 and Ed25519 have arrived. No allocator, so
+//! not in here. No NIST-curve public-key work yet, and no RSA key
+//! generation, though X25519, Ed25519 and RSA signing have arrived.
+//! No allocator, so
 //! every output goes into a buffer the caller supplies. The
 //! format-preserving modes, [`Ff1`](symmetric::mode::Ff1) and
 //! [`Ff3_1`](symmetric::mode::Ff3_1), are not constant time, and say

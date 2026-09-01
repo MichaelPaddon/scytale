@@ -12,10 +12,6 @@
 //! is by mask. Only the limb count itself, which is public, shapes
 //! the timing.
 
-// RSA, the arithmetic's intended user, has not landed yet; only the
-// tests call this. Drop this allowance when it does.
-#![allow(dead_code)]
-
 use zeroize::Zeroize;
 
 /// An unsigned integer of `LIMBS` 64-bit words, least significant

@@ -32,9 +32,10 @@
 //! the offending argument. [`Error::InvalidSeedLength`] and
 //! [`Error::RequestTooLarge`] come only from the random number
 //! generator, [`Error::InvalidBitCount`] only from ending a hash
-//! part way through a byte. [`Error::InvalidPublicKey`] and
-//! [`Error::InvalidSignature`] come only from the public-key
-//! algorithms, and say deliberately little.
+//! part way through a byte. [`Error::InvalidPublicKey`],
+//! [`Error::InvalidPrivateKey`] and [`Error::InvalidSignature`] come
+//! only from the public-key algorithms, and say deliberately
+//! little.
 
 use core::fmt;
 
@@ -89,6 +90,9 @@ pub enum Error {
     /// the curve, or it would make a shared secret that anyone can
     /// compute.
     InvalidPublicKey,
+    /// The private key is malformed: an exponent that is zero or
+    /// out of range.
+    InvalidPrivateKey,
     /// The signature is not valid for this message under this public
     /// key.
     ///
@@ -155,6 +159,9 @@ impl fmt::Display for Error {
             Error::InvalidIterations => write!(f, "zero iterations"),
             Error::InvalidPublicKey => {
                 write!(f, "invalid public key")
+            }
+            Error::InvalidPrivateKey => {
+                write!(f, "invalid private key")
             }
             Error::InvalidSignature => {
                 write!(f, "invalid signature")

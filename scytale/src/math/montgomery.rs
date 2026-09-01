@@ -14,10 +14,6 @@
 //! table by scanning every entry. The exponent's *width* in limbs is
 //! visible; its value, and where its bits lie, are not.
 
-// RSA, the arithmetic's intended user, has not landed yet; only the
-// tests call this. Drop this allowance when it does.
-#![allow(dead_code)]
-
 use zeroize::Zeroize;
 
 use super::uint::Uint;

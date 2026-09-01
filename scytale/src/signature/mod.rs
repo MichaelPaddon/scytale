@@ -3,7 +3,9 @@
 //! A signature proves a message came from the holder of a secret
 //! key, and anyone with the public key can check it: unlike a MAC,
 //! checking needs no secret. [`ed25519`] is the scheme of RFC 8032,
-//! and the one to pick unless a protocol names another.
+//! and the one to pick unless a protocol names another; [`rsa`]
+//! signs and verifies PSS and PKCS#1 v1.5, which older protocols
+//! and most deployed certificates still ask for.
 //!
 //! ```
 //! use scytale::random::{Random, Rng, System};
@@ -25,3 +27,4 @@
 //! ```
 
 pub mod ed25519;
+pub mod rsa;
