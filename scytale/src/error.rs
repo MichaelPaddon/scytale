@@ -32,8 +32,9 @@
 //! the offending argument. [`Error::InvalidSeedLength`] and
 //! [`Error::RequestTooLarge`] come only from the random number
 //! generator, [`Error::InvalidBitCount`] only from ending a hash
-//! part way through a byte, and [`Error::InvalidPublicKey`] only
-//! from key agreement with a key that must be refused.
+//! part way through a byte. [`Error::InvalidPublicKey`] and
+//! [`Error::InvalidSignature`] come only from the public-key
+//! algorithms, and say deliberately little.
 
 use core::fmt;
 
@@ -84,9 +85,16 @@ pub enum Error {
     DomainTooSmall,
     /// The iteration count is zero, which would derive nothing.
     InvalidIterations,
-    /// The public key cannot be used: it would make a shared secret
-    /// that anyone can compute.
+    /// The public key cannot be used: it does not name a point on
+    /// the curve, or it would make a shared secret that anyone can
+    /// compute.
     InvalidPublicKey,
+    /// The signature is not valid for this message under this public
+    /// key.
+    ///
+    /// Deliberately says no more than that; which check failed would
+    /// help an attacker.
+    InvalidSignature,
     /// The processor lacks the instructions this implementation needs.
     NotSupported,
     /// The system would not supply random bytes. The number is the
@@ -148,6 +156,9 @@ impl fmt::Display for Error {
             Error::InvalidPublicKey => {
                 write!(f, "invalid public key")
             }
+            Error::InvalidSignature => {
+                write!(f, "invalid signature")
+            }
             Error::NotSupported => {
                 write!(f, "not supported by this processor")
             }
@@ -199,6 +210,10 @@ mod tests {
         assert_eq!(
             render(Error::InvalidPublicKey, &mut buf),
             "invalid public key"
+        );
+        assert_eq!(
+            render(Error::InvalidSignature, &mut buf),
+            "invalid signature"
         );
         assert_eq!(
             render(Error::NotSupported, &mut buf),

@@ -1,7 +1,8 @@
 //! Portable cryptographic primitives.
 //!
 //! Symmetric ciphers and their modes, hashes, message
-//! authentication, key derivation, key agreement and random numbers,
+//! authentication, key derivation, key agreement, signatures and
+//! random numbers,
 //! written to run anywhere Rust
 //! does: `no_std`, no allocator, no cargo features to get wrong. Where
 //! the processor has instructions for a primitive they are used,
@@ -14,6 +15,7 @@
 //! | [`mac`] | HMAC over any hash, and Poly1305 |
 //! | [`kdf`] | HKDF and PBKDF2 |
 //! | [`ecdh`] | X25519 key agreement |
+//! | [`signature`] | Ed25519 signatures |
 //! | [`random`] | a CTR_DRBG generator and the entropy that seeds it |
 //! | [`Error`] | the one type every fallible call returns |
 //!
@@ -75,8 +77,8 @@
 //! # Non-goals
 //!
 //! No protocols: TLS, SSH and their kin are built on these pieces,
-//! not in here. No signatures or public-key encryption yet, though
-//! key agreement has arrived. No allocator, so
+//! not in here. No RSA or NIST-curve public-key work yet, though
+//! X25519 and Ed25519 have arrived. No allocator, so
 //! every output goes into a buffer the caller supplies. The
 //! format-preserving modes, [`Ff1`](symmetric::mode::Ff1) and
 //! [`Ff3_1`](symmetric::mode::Ff3_1), are not constant time, and say
@@ -103,6 +105,7 @@ pub mod kdf;
 pub mod mac;
 mod math;
 pub mod random;
+pub mod signature;
 pub mod symmetric;
 
 mod util;
