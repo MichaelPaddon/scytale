@@ -4,7 +4,7 @@ Cryptographic primitives in Rust.
 
 This is early work. It has AES and the block cipher modes built on
 it, the SHA-2 and SHA-3 hashes and SHAKE, HMAC, HKDF and PBKDF2 over
-them, and random numbers.
+them, X25519 key agreement, and random numbers.
 
 ## Goals
 
@@ -84,6 +84,12 @@ And one that wraps no block cipher:
 | Mode | Kind | Notes |
 | --- | --- | --- |
 | ChaCha20-Poly1305 (RFC 8439) | authenticated | GCM's equal; faster without AES hardware |
+
+And the first public-key piece:
+
+| Algorithm | Kind | Notes |
+| --- | --- | --- |
+| X25519 (RFC 7748) | key agreement | shared secret needs HKDF; refuses low-order keys |
 
 ## Random numbers
 

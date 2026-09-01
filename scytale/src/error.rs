@@ -31,8 +31,9 @@
 //! [`Error::InvalidTagLength`] and [`Error::InvalidKeyLength`] name
 //! the offending argument. [`Error::InvalidSeedLength`] and
 //! [`Error::RequestTooLarge`] come only from the random number
-//! generator, and [`Error::InvalidBitCount`] only from ending a hash
-//! part way through a byte.
+//! generator, [`Error::InvalidBitCount`] only from ending a hash
+//! part way through a byte, and [`Error::InvalidPublicKey`] only
+//! from key agreement with a key that must be refused.
 
 use core::fmt;
 
@@ -83,6 +84,9 @@ pub enum Error {
     DomainTooSmall,
     /// The iteration count is zero, which would derive nothing.
     InvalidIterations,
+    /// The public key cannot be used: it would make a shared secret
+    /// that anyone can compute.
+    InvalidPublicKey,
     /// The processor lacks the instructions this implementation needs.
     NotSupported,
     /// The system would not supply random bytes. The number is the
@@ -141,6 +145,9 @@ impl fmt::Display for Error {
                 write!(f, "too few possible messages to encrypt safely")
             }
             Error::InvalidIterations => write!(f, "zero iterations"),
+            Error::InvalidPublicKey => {
+                write!(f, "invalid public key")
+            }
             Error::NotSupported => {
                 write!(f, "not supported by this processor")
             }
@@ -188,6 +195,10 @@ mod tests {
         assert_eq!(
             render(Error::InvalidLength(7), &mut buf),
             "invalid data length: 7"
+        );
+        assert_eq!(
+            render(Error::InvalidPublicKey, &mut buf),
+            "invalid public key"
         );
         assert_eq!(
             render(Error::NotSupported, &mut buf),
