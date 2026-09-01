@@ -93,6 +93,9 @@ pub enum Error {
     /// The private key is malformed: an exponent that is zero or
     /// out of range.
     InvalidPrivateKey,
+    /// Key generation gave up: the random source kept producing
+    /// candidates that no key can be built from.
+    KeyGenerationFailed,
     /// The signature is not valid for this message under this public
     /// key.
     ///
@@ -163,6 +166,9 @@ impl fmt::Display for Error {
             Error::InvalidPrivateKey => {
                 write!(f, "invalid private key")
             }
+            Error::KeyGenerationFailed => {
+                write!(f, "key generation failed")
+            }
             Error::InvalidSignature => {
                 write!(f, "invalid signature")
             }
@@ -221,6 +227,10 @@ mod tests {
         assert_eq!(
             render(Error::InvalidSignature, &mut buf),
             "invalid signature"
+        );
+        assert_eq!(
+            render(Error::KeyGenerationFailed, &mut buf),
+            "key generation failed"
         );
         assert_eq!(
             render(Error::NotSupported, &mut buf),

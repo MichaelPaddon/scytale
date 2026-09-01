@@ -92,7 +92,7 @@ And the first public-key pieces:
 | --- | --- | --- |
 | X25519 (RFC 7748) | key agreement | shared secret needs HKDF; refuses low-order keys |
 | Ed25519 (RFC 8032) | signatures | deterministic; refuses malleable signatures |
-| RSA-PSS, RSA PKCS#1 v1.5 (RFC 8017) | signatures | any width; no key generation yet |
+| RSA-PSS, RSA PKCS#1 v1.5 (RFC 8017) | signatures | any width; CRT signing and key generation |
 
 ## Random numbers
 

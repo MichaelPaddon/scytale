@@ -77,9 +77,8 @@
 //! # Non-goals
 //!
 //! No protocols: TLS, SSH and their kin are built on these pieces,
-//! not in here. No NIST-curve public-key work yet, and no RSA key
-//! generation, though X25519, Ed25519 and RSA signing have arrived.
-//! No allocator, so
+//! not in here. No NIST-curve public-key work yet, though X25519,
+//! Ed25519 and RSA have arrived. No allocator, so
 //! every output goes into a buffer the caller supplies. The
 //! format-preserving modes, [`Ff1`](symmetric::mode::Ff1) and
 //! [`Ff3_1`](symmetric::mode::Ff3_1), are not constant time, and say

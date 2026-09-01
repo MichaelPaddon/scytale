@@ -13,8 +13,15 @@
 //! The width of a key is part of its type: [`Rsa2048PrivateKey`]
 //! holds a 2048-bit modulus, and the general [`PrivateKey`] takes
 //! the limb and byte counts for any other width, with no ceiling.
-//! Keys are imported from their integer parts; generating fresh
-//! ones is not offered yet.
+//! Keys are imported from their integer parts, or generated fresh
+//! by [`PrivateKey::generate`], which fixes the public exponent at
+//! 65537 and derives every Chinese remainder piece; the accessors
+//! on both key types hand the parts back for storage.
+//!
+//! Generation is the one operation here whose time varies with its
+//! secrets: how many candidates fall to the primality tests depends
+//! on the randomness drawn, as it does in every implementation. The
+//! arithmetic under each candidate is still fixed-sequence.
 //!
 //! A key imported with its primes, through
 //! [`PrivateKey::try_new_crt`], signs by the Chinese remainder
@@ -65,15 +72,15 @@
 //! # Constant time
 //!
 //! The private exponentiation is a fixed sequence of limb operations
-//! whose reads never depend on `d`; see
-//! [`math`](crate::math). Verification, and the padding checks on
-//! both sides, handle only public values.
+//! whose reads never depend on `d` or the primes. Verification, and
+//! the padding checks on both sides, handle only public values.
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::hash::Hash;
 use crate::math::montgomery::Montgomery;
 use crate::math::uint::Uint;
+use crate::random::Random;
 use crate::symmetric::Block;
 use crate::Error;
 
@@ -278,6 +285,18 @@ impl<const LIMBS: usize, const BYTES: usize> PublicKey<LIMBS, BYTES> {
         }
     }
 
+    /// The modulus, big-endian.
+    pub fn modulus_bytes(&self) -> [u8; BYTES] {
+        let mut out = [0u8; BYTES];
+        self.m.modulus().to_be_bytes(&mut out);
+        out
+    }
+
+    /// The public exponent, big-endian in eight bytes.
+    pub fn exponent_bytes(&self) -> [u8; 8] {
+        self.e.0[0].to_be_bytes()
+    }
+
     /// The public operation: the signature back through `e`, as
     /// encoded-message bytes.
     fn undo(&self, signature: &[u8; BYTES]) -> Result<[u8; BYTES], Error> {
@@ -440,6 +459,143 @@ impl<const LIMBS: usize, const BYTES: usize, const HALF: usize>
         self.apply(&em)
     }
 
+    /// Generates a fresh key, with the public exponent 65537 and
+    /// every Chinese remainder piece in place.
+    ///
+    /// The primes are random probable primes: trial division, then
+    /// Miller-Rabin with random witnesses, with round counts read
+    /// from FIPS 186-5 for random candidates of 1024 bits and up.
+    /// Widths below [`Rsa2048PrivateKey`] are for interoperation
+    /// and tests, not for new keys.
+    pub fn generate<R: Random>(rng: &mut R) -> Result<Self, Error> {
+        assert_eq!(2 * HALF, LIMBS, "HALF must be LIMBS / 2");
+        const E_WORD: u64 = 65537;
+
+        let mut p = probable_prime::<HALF, R>(rng)?;
+        let mut q = Uint::<HALF>::ZERO;
+        let mut found = false;
+        for _ in 0..64 {
+            q = probable_prime::<HALF, R>(rng)?;
+            // FIPS 186-5: the primes must not be close, or Fermat
+            // factoring splits the modulus.
+            let (a, borrow) = p.sub_borrow(&q);
+            let mut difference = a;
+            difference.cmov(&q.sub_borrow(&p).0, borrow);
+            if difference.bit_length() > (64 * HALF).saturating_sub(100) {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(Error::KeyGenerationFailed);
+        }
+
+        let n = p.mul_wide::<LIMBS>(&q);
+
+        // phi = (p-1)(q-1) = n - p - q + 1; no borrow can happen.
+        let phi = n
+            .sub_borrow(&p.widen())
+            .0
+            .sub_borrow(&q.widen())
+            .0
+            .add_carry(&Uint::one())
+            .0;
+
+        // d = (1 + k * phi) / e for the k that makes the division
+        // exact: k = -phi^-1 mod e. The whole inversion happens in
+        // one word, because e does.
+        let phi_mod_e = phi.rem_word(E_WORD);
+        let k = E_WORD - inv_mod_word(phi_mod_e, E_WORD);
+        let (k_phi, top) = phi.mul_word(k);
+        let (with_one, carry) = k_phi.add_carry(&Uint::one());
+        let (mut d, remainder) = with_one.div_rem_word(top + carry, E_WORD);
+        debug_assert_eq!(remainder, 0);
+
+        // The Chinese remainder pieces. p is prime, so the inverse
+        // of q is a Fermat power, and the exponentiations that need
+        // an even modulus are plain bit-by-bit remainders instead.
+        let mut p_minus_1 = p.sub_borrow(&Uint::one()).0;
+        let mut q_minus_1 = q.sub_borrow(&Uint::one()).0;
+        let mut dp = d.rem_wide::<HALF>(&p_minus_1);
+        let mut dq = d.rem_wide::<HALF>(&q_minus_1);
+        let mont_p = Montgomery::new(p).ok_or(Error::KeyGenerationFailed)?;
+        let q_mod_p = reduce_once_mod(&q, &p);
+        let mut p_minus_2 = p.sub_borrow(&Uint::from_limbs(&[2])).0;
+        let mut qinv = mont_p.modexp(&q_mod_p, &p_minus_2);
+
+        // Out through bytes and back through try_new_crt, so a
+        // generated key passes exactly the checks an imported one
+        // does.
+        let mut n_bytes = [0u8; BYTES];
+        n.to_be_bytes(&mut n_bytes);
+        let mut d_bytes = [0u8; BYTES];
+        d.to_be_bytes(&mut d_bytes);
+        let mut halves = [[0u8; BYTES]; 5];
+        for (buf, value) in halves.iter_mut().zip([p, q, dp, dq, qinv]) {
+            value.to_be_bytes(&mut buf[..BYTES / 2]);
+        }
+        let key = Self::try_new_crt(
+            &n_bytes,
+            &E_WORD.to_be_bytes(),
+            &d_bytes,
+            &halves[0][..BYTES / 2],
+            &halves[1][..BYTES / 2],
+            &halves[2][..BYTES / 2],
+            &halves[3][..BYTES / 2],
+            &halves[4][..BYTES / 2],
+        );
+
+        p.zeroize();
+        q.zeroize();
+        d.zeroize();
+        dp.zeroize();
+        dq.zeroize();
+        qinv.zeroize();
+        p_minus_1.zeroize();
+        q_minus_1.zeroize();
+        p_minus_2.zeroize();
+        d_bytes.zeroize();
+        for buf in halves.iter_mut() {
+            buf.zeroize();
+        }
+        key
+    }
+
+    /// The private exponent, big-endian. The caller holds a secret
+    /// now, and should wipe it when done.
+    pub fn d_bytes(&self) -> [u8; BYTES] {
+        let mut out = [0u8; BYTES];
+        self.d.to_be_bytes(&mut out);
+        out
+    }
+
+    /// Writes the Chinese remainder pieces, big-endian, into five
+    /// buffers of half the modulus width each. Fails with
+    /// [`Error::InvalidPrivateKey`] on a key imported without them,
+    /// and [`Error::InvalidLength`] on a buffer of the wrong size.
+    /// The caller holds secrets now, and should wipe them when done.
+    pub fn crt_bytes(
+        &self,
+        p: &mut [u8],
+        q: &mut [u8],
+        dp: &mut [u8],
+        dq: &mut [u8],
+        qinv: &mut [u8],
+    ) -> Result<(), Error> {
+        let crt = self.crt.as_ref().ok_or(Error::InvalidPrivateKey)?;
+        for out in [&p, &q, &dp, &dq, &qinv] {
+            if out.len() != BYTES / 2 {
+                return Err(Error::InvalidLength(out.len()));
+            }
+        }
+        crt.p.modulus().to_be_bytes(p);
+        crt.q.modulus().to_be_bytes(q);
+        crt.dp.to_be_bytes(dp);
+        crt.dq.to_be_bytes(dq);
+        crt.qinv.to_be_bytes(qinv);
+        Ok(())
+    }
+
     /// The private operation: the encoded message through `d`, or
     /// through the primes when the key carries them.
     fn apply(&self, em: &[u8; BYTES]) -> Result<[u8; BYTES], Error> {
@@ -494,6 +650,114 @@ impl<const HALF: usize> Crt<HALF> {
         h.zeroize();
         s
     }
+}
+
+/// Draws random candidates until one survives trial division and
+/// Miller-Rabin. The cap on attempts is FIPS 186-5's, and failing it
+/// means the random source is not producing usable candidates.
+fn probable_prime<const HALF: usize, R: Random>(
+    rng: &mut R,
+) -> Result<Uint<HALF>, Error> {
+    for _ in 0..5 * 64 * HALF {
+        let mut limbs = [0u64; HALF];
+        for limb in limbs.iter_mut() {
+            let mut bytes = [0u8; 8];
+            rng.fill(&mut bytes)?;
+            *limb = u64::from_le_bytes(bytes);
+        }
+        // Odd, and with the top two bits set so the product of two
+        // candidates fills the modulus width exactly.
+        limbs[0] |= 1;
+        limbs[HALF - 1] |= 3 << 62;
+        let mut candidate = Uint(limbs);
+        limbs.zeroize();
+
+        // Trial division by every odd number to 2000; the composite
+        // divisors are redundant but harmless, and the loop stays
+        // two lines.
+        let mut divisor = 3u64;
+        let mut composite = false;
+        while divisor < 2000 {
+            if candidate.rem_word(divisor) == 0 {
+                composite = true;
+                break;
+            }
+            divisor += 2;
+        }
+        // A prime congruent to 1 mod e would make e share a factor
+        // with phi, and no d would exist.
+        if composite || candidate.rem_word(65537) == 1 {
+            candidate.zeroize();
+            continue;
+        }
+        if miller_rabin(&candidate, rng)? {
+            return Ok(candidate);
+        }
+        candidate.zeroize();
+    }
+    Err(Error::KeyGenerationFailed)
+}
+
+/// Miller-Rabin with random witnesses. Eight rounds: FIPS 186-5
+/// table B.1 asks for at most five on random candidates of 1024
+/// bits, and the extras are margin for the narrower legacy widths.
+fn miller_rabin<const HALF: usize, R: Random>(
+    candidate: &Uint<HALF>,
+    rng: &mut R,
+) -> Result<bool, Error> {
+    let m = Montgomery::new(*candidate).ok_or(Error::KeyGenerationFailed)?;
+    let one = Uint::<HALF>::one();
+    let minus_one = candidate.sub_borrow(&one).0;
+    // candidate - 1 = 2^s * t with t odd.
+    let s = minus_one.trailing_zeros();
+    let mut t = minus_one.shr(s);
+
+    'witness: for _ in 0..8 {
+        // A random witness below the candidate: clearing the top
+        // bit is enough, since the candidate has it set, and tiny
+        // witnesses are nudged to two.
+        let mut limbs = [0u64; HALF];
+        for limb in limbs.iter_mut() {
+            let mut bytes = [0u8; 8];
+            rng.fill(&mut bytes)?;
+            *limb = u64::from_le_bytes(bytes);
+        }
+        limbs[HALF - 1] &= !(1 << 63);
+        let mut a = Uint(limbs);
+        limbs.zeroize();
+        if a.bit_length() < 2 {
+            a = Uint::from_limbs(&[2]);
+        }
+
+        let mut x = m.modexp(&a, &t);
+        if x.0 == one.0 || x.0 == minus_one.0 {
+            continue;
+        }
+        for _ in 1..s {
+            x = m.mulmod(&x, &x);
+            if x.0 == minus_one.0 {
+                continue 'witness;
+            }
+        }
+        t.zeroize();
+        return Ok(false);
+    }
+    t.zeroize();
+    Ok(true)
+}
+
+/// The inverse of `a` modulo `m`, by the extended Euclidean
+/// algorithm in one word; `a` and `m` must be coprime.
+fn inv_mod_word(a: u64, m: u64) -> u64 {
+    let (mut t, mut new_t) = (0i128, 1i128);
+    let (mut r, mut new_r) = (i128::from(m), i128::from(a));
+    while new_r != 0 {
+        let quotient = r / new_r;
+        (t, new_t) = (new_t, t - quotient * new_t);
+        (r, new_r) = (new_r, r - quotient * new_r);
+    }
+    debug_assert_eq!(r, 1, "not coprime");
+    ((t % i128::from(m) + i128::from(m)) % i128::from(m)) as u64
 }
 
 /// The remainder of `value` modulo `n`, where `value` is known to be
@@ -961,5 +1225,148 @@ mod tests {
             key.sign_pkcs1::<Sha256>(MSG),
             Err(Error::InvalidPrivateKey),
         ));
+    }
+    /// A generated key signs, verifies, exports, and re-imports both
+    /// with and without its CRT pieces, all agreeing byte for byte.
+    #[test]
+    fn generates_working_keys() {
+        use crate::random::{Rng, System};
+        let mut rng = Rng::try_new(System::try_new().unwrap()).unwrap();
+        let key = Rsa1024PrivateKey::generate(&mut rng).unwrap();
+
+        let sig = key.sign_pss::<Sha256>(MSG, &[7u8; 16]).unwrap();
+        key.public_key().verify_pss::<Sha256>(MSG, &sig).unwrap();
+        let sig = key.sign_pkcs1::<Sha256>(MSG).unwrap();
+        key.public_key().verify_pkcs1::<Sha256>(MSG, &sig).unwrap();
+
+        let n = key.public_key().modulus_bytes();
+        let e = key.public_key().exponent_bytes();
+        assert_eq!(e, [0, 0, 0, 0, 0, 1, 0, 1]);
+        let d = key.d_bytes();
+        let mut p = [0u8; 64];
+        let mut q = [0u8; 64];
+        let mut dp = [0u8; 64];
+        let mut dq = [0u8; 64];
+        let mut qinv = [0u8; 64];
+        key.crt_bytes(&mut p, &mut q, &mut dp, &mut dq, &mut qinv)
+            .unwrap();
+
+        // Re-imported with CRT, and as a plain exponent: all three
+        // keys make the same signature, which also proves d and the
+        // CRT pieces agree.
+        let with_crt =
+            Rsa1024PrivateKey::try_new_crt(&n, &e, &d, &p, &q, &dp, &dq, &qinv)
+                .unwrap();
+        let plain = Rsa1024PrivateKey::try_new(&n, &e, &d).unwrap();
+        assert_eq!(with_crt.sign_pkcs1::<Sha256>(MSG).unwrap(), sig);
+        assert_eq!(plain.sign_pkcs1::<Sha256>(MSG).unwrap(), sig);
+    }
+
+    /// A dead random source cannot loop forever; it fails. The tiny
+    /// width keeps the capped search cheap.
+    #[test]
+    fn generation_fails_without_entropy() {
+        struct Zeros;
+        impl crate::random::Random for Zeros {
+            fn fill(&mut self, out: &mut [u8]) -> Result<(), Error> {
+                out.fill(0);
+                Ok(())
+            }
+        }
+        assert!(matches!(
+            PrivateKey::<2, 16, 1>::generate(&mut Zeros),
+            Err(Error::KeyGenerationFailed),
+        ));
+    }
+
+    /// Exporting CRT pieces from a key that has none, or into wrong
+    /// buffers, is refused.
+    #[test]
+    fn crt_export_needs_crt_and_room() {
+        let key = key1024();
+        let plain = Rsa1024PrivateKey::try_new(
+            &unhex::<128>(N1024),
+            E,
+            &unhex::<128>(D1024),
+        )
+        .unwrap();
+        let mut small = [0u8; 63];
+        let mut buf = [[0u8; 64]; 4];
+        let [ref mut a, ref mut b, ref mut c, ref mut d] = buf;
+        assert!(matches!(
+            plain.crt_bytes(&mut small, a, b, c, d),
+            Err(Error::InvalidPrivateKey),
+        ));
+        let crt_key = {
+            let (p, q, dp, dq, qinv) = crt_parts_1024();
+            Rsa1024PrivateKey::try_new_crt(
+                &unhex::<128>(N1024),
+                E,
+                &unhex::<128>(D1024),
+                &p,
+                &q,
+                &dp,
+                &dq,
+                &qinv,
+            )
+            .unwrap()
+        };
+        assert!(matches!(
+            crt_key.crt_bytes(&mut small, a, b, c, d),
+            Err(Error::InvalidLength(63)),
+        ));
+        let _ = key;
+    }
+
+    const P1024: &str =
+        "ded94047096410d910e4b796a631463c8ba4bc51a7f51007e47d00fe74b7bacc\
+         5e1bef5fa160eb536e3ffbeb13d85458fd4cfa34308b779103a15be78c936247";
+
+    const Q1024: &str =
+        "edfc25751deed003561b8708d4403c9fff4f3d87f7f1127a82dfdb2b70bf9cb9\
+         eea5a3c9db922400f7c204a31663ed1b09b8d0e62a6558db73473c7e3c85d80f";
+
+    const DP1024: &str =
+        "52c9ccfa56ffc8ce8b5b1ce527aaa898379ca4a5854b22807c1f006e87b7f5fa\
+         947fb64705b1f6dad0db8e603fc81f55cc0c7beb45999a7ad22970f62da05763";
+
+    const DQ1024: &str =
+        "a65b8003a26cf1d3a33992e74517b24955bb1a941569db34f08f7331a69b0aff\
+         9e27039b737570dd8c537fd2513080ea499d7bc9a9113750100157f41672a959";
+
+    const QINV1024: &str =
+        "2203ff0aa7f1629991e463adfebe4629dc50aee793221bf728347fb5ab03de34\
+         086cdad1fc21bbc9cbbcade52b5e77f017ac74377a8b566b4953e2d3ae47b23c";
+
+    type CrtParts1024 = ([u8; 64], [u8; 64], [u8; 64], [u8; 64], [u8; 64]);
+
+    fn crt_parts_1024() -> CrtParts1024 {
+        (
+            unhex::<64>(P1024),
+            unhex::<64>(Q1024),
+            unhex::<64>(DP1024),
+            unhex::<64>(DQ1024),
+            unhex::<64>(QINV1024),
+        )
+    }
+
+    /// The 1024-bit CRT signature also matches its plain twin,
+    /// covering the second width end to end.
+    #[test]
+    fn crt_matches_plain_signing_1024() {
+        let (p, q, dp, dq, qinv) = crt_parts_1024();
+        let key = Rsa1024PrivateKey::try_new_crt(
+            &unhex::<128>(N1024),
+            E,
+            &unhex::<128>(D1024),
+            &p,
+            &q,
+            &dp,
+            &dq,
+            &qinv,
+        )
+        .unwrap();
+        let sig = key.sign_pkcs1::<Sha256>(MSG).unwrap();
+        assert_eq!(sig, unhex::<128>(V15_1024_SHA256));
     }
 }
