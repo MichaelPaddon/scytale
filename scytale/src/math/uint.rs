@@ -120,14 +120,64 @@ impl<const LIMBS: usize> Uint<LIMBS> {
 
     /// `2 * self mod n`, for a value already below `n`.
     pub(crate) fn double_mod(&self, n: &Self) -> Self {
-        let (doubled, carry) = self.add_carry(self);
-        let (reduced, borrow) = doubled.sub_borrow(n);
-        // The doubling is below 2n, so one subtraction settles it:
-        // taken when the sum overflowed the width or exceeds n.
+        self.add_mod(self, n)
+    }
+
+    /// `self + other mod n`, for values already below `n`.
+    pub(crate) fn add_mod(&self, other: &Self, n: &Self) -> Self {
+        let (sum, carry) = self.add_carry(other);
+        let (reduced, borrow) = sum.sub_borrow(n);
+        // The sum is below 2n, so one subtraction settles it: taken
+        // when the sum overflowed the width or exceeds n.
         let take = carry | (1 - borrow);
-        let mut out = doubled;
+        let mut out = sum;
         out.cmov(&reduced, take);
         out
+    }
+
+    /// `self - other mod n`, for values already below `n`.
+    pub(crate) fn sub_mod(&self, other: &Self, n: &Self) -> Self {
+        let (diff, borrow) = self.sub_borrow(other);
+        let (wrapped, _) = diff.add_carry(n);
+        let mut out = diff;
+        out.cmov(&wrapped, borrow);
+        out
+    }
+
+    /// The full double-width product; `OUT` must be twice `LIMBS`.
+    pub(crate) fn mul_wide<const OUT: usize>(&self, other: &Self) -> Uint<OUT> {
+        assert_eq!(OUT, 2 * LIMBS, "OUT must be 2 * LIMBS");
+        let mut out = [0u64; OUT];
+        for (i, &a) in self.0.iter().enumerate() {
+            let mut carry = 0u64;
+            for (j, &b) in other.0.iter().enumerate() {
+                let v = u128::from(out[i + j])
+                    + u128::from(a) * u128::from(b)
+                    + u128::from(carry);
+                out[i + j] = v as u64;
+                carry = (v >> 64) as u64;
+            }
+            // Nothing has written this word yet, so the carry lands
+            // whole.
+            out[i + LIMBS] = carry;
+        }
+        Uint(out)
+    }
+
+    /// The value in a wider type; `OUT` must not be narrower.
+    pub(crate) fn widen<const OUT: usize>(&self) -> Uint<OUT> {
+        assert!(OUT >= LIMBS, "OUT must not be narrower");
+        let mut out = [0u64; OUT];
+        out[..LIMBS].copy_from_slice(&self.0);
+        Uint(out)
+    }
+
+    /// A value from borrowed limbs, which must fit.
+    pub(crate) fn from_limbs(limbs: &[u64]) -> Self {
+        debug_assert!(limbs.len() <= LIMBS);
+        let mut out = [0u64; LIMBS];
+        out[..limbs.len()].copy_from_slice(limbs);
+        Uint(out)
     }
 }
 

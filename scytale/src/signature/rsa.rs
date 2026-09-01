@@ -14,8 +14,15 @@
 //! holds a 2048-bit modulus, and the general [`PrivateKey`] takes
 //! the limb and byte counts for any other width, with no ceiling.
 //! Keys are imported from their integer parts; generating fresh
-//! ones is not offered yet, and neither is CRT acceleration, so
-//! signing costs one full-width exponentiation.
+//! ones is not offered yet.
+//!
+//! A key imported with its primes, through
+//! [`PrivateKey::try_new_crt`], signs by the Chinese remainder
+//! theorem: two half-width exponentiations in place of one full one,
+//! roughly three times faster. Every CRT signature is checked with
+//! the public exponent before release, because a wrong result there
+//! is not merely wrong: one faulty CRT signature factors the modulus
+//! (Boneh, DeMillo and Lipton), so nothing unchecked ever leaves.
 //!
 //! ```
 //! use scytale::hash::sha2::Sha256;
@@ -133,30 +140,46 @@ pub struct PublicKey<const LIMBS: usize, const BYTES: usize> {
     e: Uint<1>,
 }
 
-/// An RSA private key. The public half rides along, and the private
-/// exponent is wiped on drop.
-pub struct PrivateKey<const LIMBS: usize, const BYTES: usize> {
+/// An RSA private key. The public half rides along, and every
+/// private part is wiped on drop.
+///
+/// `HALF` is the width of one prime, half of `LIMBS`; the aliases
+/// fill it in. It is a parameter only because the language cannot
+/// yet derive it.
+pub struct PrivateKey<const LIMBS: usize, const BYTES: usize, const HALF: usize>
+{
     public: PublicKey<LIMBS, BYTES>,
     d: Uint<LIMBS>,
+    crt: Option<Crt<HALF>>,
+}
+
+/// The Chinese remainder pieces of a private key.
+struct Crt<const HALF: usize> {
+    p: Montgomery<HALF>,
+    q: Montgomery<HALF>,
+    dp: Uint<HALF>,
+    dq: Uint<HALF>,
+    /// `q^-1 mod p`.
+    qinv: Uint<HALF>,
 }
 
 /// A 2048-bit public key.
 pub type Rsa2048PublicKey = PublicKey<32, 256>;
 /// A 2048-bit private key.
-pub type Rsa2048PrivateKey = PrivateKey<32, 256>;
+pub type Rsa2048PrivateKey = PrivateKey<32, 256, 16>;
 /// A 3072-bit public key.
 pub type Rsa3072PublicKey = PublicKey<48, 384>;
 /// A 3072-bit private key.
-pub type Rsa3072PrivateKey = PrivateKey<48, 384>;
+pub type Rsa3072PrivateKey = PrivateKey<48, 384, 24>;
 /// A 4096-bit public key.
 pub type Rsa4096PublicKey = PublicKey<64, 512>;
 /// A 4096-bit private key.
-pub type Rsa4096PrivateKey = PrivateKey<64, 512>;
+pub type Rsa4096PrivateKey = PrivateKey<64, 512, 32>;
 /// A 1024-bit public key: legacy interoperation only, too small for
 /// new uses.
 pub type Rsa1024PublicKey = PublicKey<16, 128>;
 /// A 1024-bit private key: legacy interoperation only.
-pub type Rsa1024PrivateKey = PrivateKey<16, 128>;
+pub type Rsa1024PrivateKey = PrivateKey<16, 128, 8>;
 
 impl<const LIMBS: usize, const BYTES: usize> PublicKey<LIMBS, BYTES> {
     /// A public key from its big-endian parts.
@@ -269,11 +292,16 @@ impl<const LIMBS: usize, const BYTES: usize> PublicKey<LIMBS, BYTES> {
     }
 }
 
-impl<const LIMBS: usize, const BYTES: usize> PrivateKey<LIMBS, BYTES> {
+impl<const LIMBS: usize, const BYTES: usize, const HALF: usize>
+    PrivateKey<LIMBS, BYTES, HALF>
+{
     /// A private key from its big-endian parts: the public modulus
     /// and exponent, then the private exponent, which must be
-    /// nonzero and below the modulus.
+    /// nonzero and below the modulus. Signing uses `d` directly; a
+    /// key that carries its primes should come in through
+    /// [`try_new_crt`](PrivateKey::try_new_crt) instead.
     pub fn try_new(n: &[u8], e: &[u8], d: &[u8]) -> Result<Self, Error> {
+        assert_eq!(2 * HALF, LIMBS, "HALF must be LIMBS / 2");
         let public = PublicKey::try_new(n, e)?;
         if d.len() > BYTES {
             return Err(Error::InvalidPrivateKey);
@@ -282,7 +310,80 @@ impl<const LIMBS: usize, const BYTES: usize> PrivateKey<LIMBS, BYTES> {
         if d.is_zero() || d.less_than(public.m.modulus()) == 0 {
             return Err(Error::InvalidPrivateKey);
         }
-        Ok(PrivateKey { public, d })
+        Ok(PrivateKey {
+            public,
+            d,
+            crt: None,
+        })
+    }
+
+    /// A private key with its Chinese remainder pieces, in the order
+    /// the PKCS#1 `RSAPrivateKey` structure carries them: `p` and
+    /// `q` exactly half the modulus wide with their top bits set,
+    /// the reduced exponents `dp` and `dq`, and `qinv`, the inverse
+    /// of `q` modulo `p`.
+    ///
+    /// The pieces are checked against one another: the primes must
+    /// multiply to the modulus and `qinv` must invert `q`. A wrong
+    /// `dp` or `dq` cannot be caught here, and is caught instead by
+    /// the check every CRT signature gets before it is released.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_crt(
+        n: &[u8],
+        e: &[u8],
+        d: &[u8],
+        p: &[u8],
+        q: &[u8],
+        dp: &[u8],
+        dq: &[u8],
+        qinv: &[u8],
+    ) -> Result<Self, Error> {
+        let mut key = Self::try_new(n, e, d)?;
+
+        let half = |part: &[u8]| -> Result<Uint<HALF>, Error> {
+            if part.len() > BYTES / 2 {
+                return Err(Error::InvalidPrivateKey);
+            }
+            Ok(Uint::from_be_bytes(part))
+        };
+        let p_value = half(p)?;
+        let q_value = half(q)?;
+        // Top bits set, so each prime is exactly half the width,
+        // which the reduction of `q` modulo `p` below relies on.
+        if p_value.0[HALF - 1] >> 63 == 0 || q_value.0[HALF - 1] >> 63 == 0 {
+            return Err(Error::InvalidPrivateKey);
+        }
+        let (difference, _) = p_value.sub_borrow(&q_value);
+        if difference.is_zero() {
+            return Err(Error::InvalidPrivateKey);
+        }
+        if p_value.mul_wide::<LIMBS>(&q_value).0 != key.public.m.modulus().0 {
+            return Err(Error::InvalidPrivateKey);
+        }
+        let p = Montgomery::new(p_value).ok_or(Error::InvalidPrivateKey)?;
+        let q = Montgomery::new(q_value).ok_or(Error::InvalidPrivateKey)?;
+
+        let dp = half(dp)?;
+        let dq = half(dq)?;
+        let qinv = half(qinv)?;
+        if dp.is_zero()
+            || dp.less_than(p.modulus()) == 0
+            || dq.is_zero()
+            || dq.less_than(q.modulus()) == 0
+            || qinv.is_zero()
+            || qinv.less_than(p.modulus()) == 0
+        {
+            return Err(Error::InvalidPrivateKey);
+        }
+        // qinv really must invert q; a wrong value here would only
+        // surface as every signature failing its final check.
+        let q_mod_p = reduce_once_mod(q.modulus(), p.modulus());
+        if p.mulmod(&qinv, &q_mod_p).0 != Uint::<HALF>::one().0 {
+            return Err(Error::InvalidPrivateKey);
+        }
+
+        key.crt = Some(Crt { p, q, dp, dq, qinv });
+        Ok(key)
     }
 
     /// The public half.
@@ -297,7 +398,7 @@ impl<const LIMBS: usize, const BYTES: usize> PrivateKey<LIMBS, BYTES> {
     ) -> Result<[u8; BYTES], Error> {
         let mut em = [0u8; BYTES];
         encode_pkcs1::<H, BYTES>(message, &mut em)?;
-        Ok(self.apply(&em))
+        self.apply(&em)
     }
 
     /// Signs `message` with PSS.
@@ -336,27 +437,100 @@ impl<const LIMBS: usize, const BYTES: usize> PrivateKey<LIMBS, BYTES> {
         em[0] &= 0x7f;
         em[db_len..BYTES - 1].copy_from_slice(h.as_ref());
         em[BYTES - 1] = 0xbc;
-        Ok(self.apply(&em))
+        self.apply(&em)
     }
 
-    /// The private operation: the encoded message through `d`.
-    fn apply(&self, em: &[u8; BYTES]) -> [u8; BYTES] {
+    /// The private operation: the encoded message through `d`, or
+    /// through the primes when the key carries them.
+    fn apply(&self, em: &[u8; BYTES]) -> Result<[u8; BYTES], Error> {
         let m = Uint::<LIMBS>::from_be_bytes(em);
-        let s = self.public.m.modexp(&m, &self.d);
+        let s = match &self.crt {
+            Some(crt) => {
+                let s = crt.apply(&m);
+                // One faulty CRT signature factors the modulus, so
+                // check with the public exponent before anything
+                // leaves. This also catches a wrong dp or dq, which
+                // import cannot.
+                if self.public.m.modexp(&s, &self.public.e).0 != m.0 {
+                    return Err(Error::InvalidPrivateKey);
+                }
+                s
+            }
+            None => self.public.m.modexp(&m, &self.d),
+        };
         let mut out = [0u8; BYTES];
         s.to_be_bytes(&mut out);
-        out
+        Ok(out)
     }
 }
 
-impl<const LIMBS: usize, const BYTES: usize> Drop for PrivateKey<LIMBS, BYTES> {
+impl<const HALF: usize> Crt<HALF> {
+    /// Garner's recombination: exponentiate modulo each prime, then
+    /// lift: `s = sq + q * (qinv * (sp - sq) mod p)`, which is below
+    /// `p * q` with no final reduction.
+    fn apply<const LIMBS: usize>(&self, m: &Uint<LIMBS>) -> Uint<LIMBS> {
+        let lo = Uint::<HALF>::from_limbs(&m.0[..HALF]);
+        let hi = Uint::<HALF>::from_limbs(&m.0[HALF..]);
+        let mut mp = self.p.reduce_wide(&lo, &hi);
+        let mut mq = self.q.reduce_wide(&lo, &hi);
+        let mut sp = self.p.modexp(&mp, &self.dp);
+        let mut sq = self.q.modexp(&mq, &self.dq);
+
+        let sq_mod_p = reduce_once_mod(&sq, self.p.modulus());
+        let mut difference = sp.sub_mod(&sq_mod_p, self.p.modulus());
+        let mut h = self.p.mulmod(&self.qinv, &difference);
+        let (s, carry) = self
+            .q
+            .modulus()
+            .mul_wide::<LIMBS>(&h)
+            .add_carry(&sq.widen());
+        debug_assert_eq!(carry, 0);
+
+        mp.zeroize();
+        mq.zeroize();
+        sp.zeroize();
+        sq.zeroize();
+        difference.zeroize();
+        h.zeroize();
+        s
+    }
+}
+
+/// The remainder of `value` modulo `n`, where `value` is known to be
+/// below `2n`: one conditional subtraction.
+fn reduce_once_mod<const LIMBS: usize>(
+    value: &Uint<LIMBS>,
+    n: &Uint<LIMBS>,
+) -> Uint<LIMBS> {
+    let (reduced, borrow) = value.sub_borrow(n);
+    let mut out = reduced;
+    out.cmov(value, borrow);
+    out
+}
+
+impl<const HALF: usize> Zeroize for Crt<HALF> {
+    fn zeroize(&mut self) {
+        self.p.zeroize();
+        self.q.zeroize();
+        self.dp.zeroize();
+        self.dq.zeroize();
+        self.qinv.zeroize();
+    }
+}
+
+impl<const LIMBS: usize, const BYTES: usize, const HALF: usize> Drop
+    for PrivateKey<LIMBS, BYTES, HALF>
+{
     fn drop(&mut self) {
         self.d.zeroize();
+        if let Some(crt) = &mut self.crt {
+            crt.zeroize();
+        }
     }
 }
 
-impl<const LIMBS: usize, const BYTES: usize> ZeroizeOnDrop
-    for PrivateKey<LIMBS, BYTES>
+impl<const LIMBS: usize, const BYTES: usize, const HALF: usize> ZeroizeOnDrop
+    for PrivateKey<LIMBS, BYTES, HALF>
 {
 }
 
@@ -652,6 +826,140 @@ mod tests {
         assert!(matches!(
             key.sign_pss::<Sha256>(MSG, &salt),
             Err(Error::InvalidLength(_)),
+        ));
+    }
+    const P2048: &str =
+        "c04e0031d3404e9e48359b0b872df10ddab383ef8a7d3552e8160bdba70265e5\
+         5e547b4fea93ff124612c55a1810e8c868b06924577437d6470326d30a7a979e\
+         24c9f0e1e0db637b83a6878722342840e62c97a3ec07ebbda011b621276519e4\
+         6f9bb82f65e98ed31937795b2e9eaee610bbda1ddfef977274bb295687e1dee5";
+
+    const Q2048: &str =
+        "f817c62d739807f8e64e3a010ce43165eeb93c825875afe6351dd4b1bef7d124\
+         5a9608408f93e4c17bec44644f7244c59f9ccf923875ef7a33d172cee7f245cd\
+         e19285cd796f6d8479341643308405b976543b4968be72a578e25e611b7f8e76\
+         dedee163025f11341f1e1d072dd890e9c2b5c58e307707267510a46d0457578d";
+
+    const DP2048: &str =
+        "9c38c17fb895ed48387113db719da8ce1074f5218be7db81d678d279465b745b\
+         b91df86f1ba9cef51167fe5b0a61f2399c927357ca93e72873d7e39a5e50e90a\
+         d7e8157fea234fd5ef4541a44ded012677d691f9e0ad2e9d8583dde9610f88d1\
+         42b9c60efb43997b7468d4757692029373d4a784cd7ede1165330689fd2948e1";
+
+    const DQ2048: &str =
+        "d1bdd7afa96048ad2697cff5ff5e145d26dbb7ca42db0c20c59b38ac24d5021d\
+         87effb7e0964712b1a877eb2877005b045e69e9df1d9d2e22f58cd851b16f9e8\
+         bae1d2f909c72881acae5a7be752563c9b4b4eec1aff97914987a75ed58e9b74\
+         e7aaea457845c3179b8f2bdf5be5116e6f4c997e427efeae869dd144d13cbe29";
+
+    const QINV2048: &str =
+        "7066b0f24630677e6ff95fabbefc030c8723481efdd8e7d9af52e057d10f6f98\
+         bd9a82b664dd1c057281a6970421a8324021125cb72f27f97b9857343e388e32\
+         5bdf3aea9c167bf33468a4318fd38f8002b92bfc284074aa499587f18ddebefc\
+         298a443f2ba98d20f0411d6a37f6aac042e57333e7817abd31e915795968d909";
+
+    type CrtParts = ([u8; 128], [u8; 128], [u8; 128], [u8; 128], [u8; 128]);
+
+    fn crt_parts_2048() -> CrtParts {
+        (
+            unhex::<128>(P2048),
+            unhex::<128>(Q2048),
+            unhex::<128>(DP2048),
+            unhex::<128>(DQ2048),
+            unhex::<128>(QINV2048),
+        )
+    }
+
+    fn crt_key_2048() -> Rsa2048PrivateKey {
+        let (p, q, dp, dq, qinv) = crt_parts_2048();
+        PrivateKey::try_new_crt(
+            &unhex::<256>(N2048),
+            E,
+            &unhex::<256>(D2048),
+            &p,
+            &q,
+            &dp,
+            &dq,
+            &qinv,
+        )
+        .unwrap()
+    }
+
+    /// A CRT key produces byte-identical signatures to the plain
+    /// exponent, across both paddings.
+    #[test]
+    fn crt_matches_plain_signing() {
+        let key = crt_key_2048();
+        let salt = unhex::<32>(SALT);
+
+        let sig = key.sign_pkcs1::<Sha256>(MSG).unwrap();
+        assert_eq!(sig, unhex::<256>(V15_SHA256));
+        key.public_key().verify_pkcs1::<Sha256>(MSG, &sig).unwrap();
+
+        let sig = key.sign_pss::<Sha256>(MSG, &salt).unwrap();
+        assert_eq!(sig, unhex::<256>(PSS_SHA256_SALT32));
+        key.public_key().verify_pss::<Sha256>(MSG, &sig).unwrap();
+    }
+
+    /// Import cross-checks the pieces against one another.
+    #[test]
+    fn crt_rejects_inconsistent_parts() {
+        let n = unhex::<256>(N2048);
+        let d = unhex::<256>(D2048);
+        let (p, q, dp, dq, qinv) = crt_parts_2048();
+        let build = |p: &[u8], q: &[u8], dp: &[u8], dq: &[u8], qinv: &[u8]| {
+            Rsa2048PrivateKey::try_new_crt(&n, E, &d, p, q, dp, dq, qinv)
+        };
+
+        // A prime that does not divide the modulus.
+        let mut bad = p;
+        bad[64] ^= 1;
+        assert!(matches!(
+            build(&bad, &q, &dp, &dq, &qinv),
+            Err(Error::InvalidPrivateKey),
+        ));
+        // Swapped primes: the product still matches, qinv does not.
+        assert!(matches!(
+            build(&q, &p, &dq, &dp, &qinv),
+            Err(Error::InvalidPrivateKey),
+        ));
+        // A wrong inverse.
+        let mut bad = qinv;
+        bad[64] ^= 1;
+        assert!(matches!(
+            build(&p, &q, &dp, &dq, &bad),
+            Err(Error::InvalidPrivateKey),
+        ));
+        // The same prime twice.
+        assert!(matches!(
+            build(&p, &p, &dp, &dp, &qinv),
+            Err(Error::InvalidPrivateKey),
+        ));
+        // A zero reduced exponent.
+        assert!(matches!(
+            build(&p, &q, &[0u8; 4], &dq, &qinv),
+            Err(Error::InvalidPrivateKey),
+        ));
+    }
+
+    /// A wrong dp cannot be caught at import, so the signature check
+    /// catches it: nothing key-leaking is ever released.
+    #[test]
+    fn crt_faulty_exponent_is_caught_before_release() {
+        let n = unhex::<256>(N2048);
+        let d = unhex::<256>(D2048);
+        let (p, q, dp, dq, qinv) = crt_parts_2048();
+        // One flipped bit leaves dp in range, so import accepts it;
+        // the signature it produces is wrong.
+        let mut bad_dp = dp;
+        bad_dp[100] ^= 1;
+        let key = Rsa2048PrivateKey::try_new_crt(
+            &n, E, &d, &p, &q, &bad_dp, &dq, &qinv,
+        )
+        .unwrap();
+        assert!(matches!(
+            key.sign_pkcs1::<Sha256>(MSG),
+            Err(Error::InvalidPrivateKey),
         ));
     }
 }

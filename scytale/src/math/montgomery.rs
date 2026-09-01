@@ -18,6 +18,14 @@ use zeroize::Zeroize;
 
 use super::uint::Uint;
 
+impl<const LIMBS: usize> Zeroize for Montgomery<LIMBS> {
+    fn zeroize(&mut self) {
+        self.n.zeroize();
+        self.inv = 0;
+        self.rr.zeroize();
+    }
+}
+
 /// The context for arithmetic modulo one odd `n`: the constants that
 /// every product needs, computed once.
 pub(crate) struct Montgomery<const LIMBS: usize> {
@@ -63,8 +71,8 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
     }
 
     /// `a * b / R mod n`, the Montgomery product, by coarsely
-    /// integrated operand scanning. Both inputs must be below `n`,
-    /// and the result then is too.
+    /// integrated operand scanning. `b` must be below `n`; `a` may
+    /// be any width-sized value; the result is below `n`.
     pub(crate) fn mul(&self, a: &Uint<LIMBS>, b: &Uint<LIMBS>) -> Uint<LIMBS> {
         let wide = |x: u64, y: u64| u128::from(x) * u128::from(y);
         let mut t = [0u64; LIMBS];
@@ -114,6 +122,32 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
     pub(crate) fn to_mont(&self, a: &Uint<LIMBS>) -> Uint<LIMBS> {
         debug_assert_eq!(a.less_than(&self.n), 1);
         self.mul(a, &self.rr)
+    }
+
+    /// `a * b mod n`, in plain form: two Montgomery passes, the
+    /// second cancelling the first's stray factor.
+    pub(crate) fn mulmod(
+        &self,
+        a: &Uint<LIMBS>,
+        b: &Uint<LIMBS>,
+    ) -> Uint<LIMBS> {
+        self.mul(&self.mul(a, b), &self.rr)
+    }
+
+    /// The remainder of a double-width value, given as its low and
+    /// high halves, modulo `n`. The halves may hold anything; only
+    /// the result is reduced.
+    pub(crate) fn reduce_wide(
+        &self,
+        lo: &Uint<LIMBS>,
+        hi: &Uint<LIMBS>,
+    ) -> Uint<LIMBS> {
+        // In the Montgomery domain the halves are lo * R and
+        // hi * R^2, which is hi shifted up a whole width; their sum
+        // leaves the domain as the remainder.
+        let lo = self.mul(lo, &self.rr);
+        let hi = self.mul(&self.mul(hi, &self.rr), &self.rr);
+        self.from_mont(&lo.add_mod(&hi, &self.n))
     }
 
     /// Moves a value back out of the Montgomery domain. Named for
