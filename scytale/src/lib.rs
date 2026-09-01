@@ -14,8 +14,7 @@
 //! | [`hash`] | the SHA-2 and SHA-3 families, and SHAKE |
 //! | [`mac`] | HMAC over any hash, and Poly1305 |
 //! | [`kdf`] | HKDF and PBKDF2 |
-//! | [`ecdh`] | X25519 key agreement |
-//! | [`signature`] | Ed25519 and RSA signatures |
+//! | [`publickey`] | X25519 agreement, Ed25519 signatures, RSA |
 //! | [`random`] | a CTR_DRBG generator and the entropy that seeds it |
 //! | [`Error`] | the one type every fallible call returns |
 //!
@@ -98,14 +97,13 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 mod arch;
-pub mod ecdh;
 mod error;
 pub mod hash;
 pub mod kdf;
 pub mod mac;
 mod math;
+pub mod publickey;
 pub mod random;
-pub mod signature;
 pub mod symmetric;
 
 mod util;

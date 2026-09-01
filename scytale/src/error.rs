@@ -96,6 +96,13 @@ pub enum Error {
     /// Key generation gave up: the random source kept producing
     /// candidates that no key can be built from.
     KeyGenerationFailed,
+    /// The ciphertext did not decrypt under this key, hash and
+    /// label.
+    ///
+    /// Deliberately one error for every cause; saying which check
+    /// failed would decrypt messages for an attacker, one query at
+    /// a time.
+    DecryptionFailed,
     /// The signature is not valid for this message under this public
     /// key.
     ///
@@ -169,6 +176,9 @@ impl fmt::Display for Error {
             Error::KeyGenerationFailed => {
                 write!(f, "key generation failed")
             }
+            Error::DecryptionFailed => {
+                write!(f, "decryption failed")
+            }
             Error::InvalidSignature => {
                 write!(f, "invalid signature")
             }
@@ -231,6 +241,10 @@ mod tests {
         assert_eq!(
             render(Error::KeyGenerationFailed, &mut buf),
             "key generation failed"
+        );
+        assert_eq!(
+            render(Error::DecryptionFailed, &mut buf),
+            "decryption failed"
         );
         assert_eq!(
             render(Error::NotSupported, &mut buf),

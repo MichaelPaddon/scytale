@@ -1,14 +1,24 @@
-//! RSA signatures (RFC 8017): RSASSA-PSS and RSASSA-PKCS1-v1_5.
+//! RSA (RFC 8017): PSS and PKCS#1 v1.5 signatures, and OAEP
+//! encryption.
 //!
 //! A key is a modulus `n`, the product of two secret primes, with a
 //! public exponent `e` and a private exponent `d` that undo one
 //! another. Signing raises an encoding of the message's digest to
 //! `d`; anyone can raise the signature back through `e` and compare.
+//! Encryption runs the other way: anyone can raise a padded message
+//! through `e`, and only the key holder can bring it back.
 //!
-//! Two encodings are in use. PSS is the modern one, with a security
-//! argument and a salt; PKCS#1 v1.5 is the fixed padding that most
-//! deployed certificates still carry. Sign with PSS unless a
-//! protocol demands otherwise; verify whichever the peer sends.
+//! Two signature encodings are in use. PSS is the modern one, with a
+//! security argument and a salt; PKCS#1 v1.5 is the fixed padding
+//! that most deployed certificates still carry. Sign with PSS unless
+//! a protocol demands otherwise; verify whichever the peer sends.
+//! For encryption there is only OAEP here: the older PKCS#1 v1.5
+//! encryption cannot be decrypted safely (Bleichenbacher's oracle)
+//! and is not offered.
+//!
+//! Use a key for one job. A key that both signs and decrypts hands
+//! an attacker two oracles against the same secret, and proofs for
+//! either scheme assume it has the key to itself.
 //!
 //! The width of a key is part of its type: [`Rsa2048PrivateKey`]
 //! holds a 2048-bit modulus, and the general [`PrivateKey`] takes
@@ -33,7 +43,7 @@
 //!
 //! ```
 //! use scytale::hash::sha2::Sha256;
-//! use scytale::signature::rsa::Rsa1024PrivateKey;
+//! use scytale::publickey::rsa::Rsa1024PrivateKey;
 //!
 //! # fn unhex<const N: usize>(hex: &str) -> [u8; N] {
 //! #     let mut out = [0u8; N];
@@ -295,6 +305,61 @@ impl<const LIMBS: usize, const BYTES: usize> PublicKey<LIMBS, BYTES> {
     /// The public exponent, big-endian in eight bytes.
     pub fn exponent_bytes(&self) -> [u8; 8] {
         self.e.0[0].to_be_bytes()
+    }
+
+    /// Encrypts `message` with OAEP, which must fit the key: at
+    /// most the width minus two digest lengths and two bytes. The
+    /// label is rarely wanted and usually empty; whatever it is,
+    /// decryption must present the same one.
+    pub fn encrypt_oaep<H: Hash, R: Random>(
+        &self,
+        rng: &mut R,
+        label: &[u8],
+        message: &[u8],
+    ) -> Result<[u8; BYTES], Error> {
+        let mut seed = H::Output::ZERO;
+        rng.fill(seed.as_mut())?;
+        let ciphertext = self.oaep_encode::<H>(seed.as_ref(), label, message);
+        seed.as_mut().zeroize();
+        ciphertext
+    }
+
+    /// The encoding half of OAEP, with the seed handed in so the
+    /// tests can pin it.
+    fn oaep_encode<H: Hash>(
+        &self,
+        seed: &[u8],
+        label: &[u8],
+        message: &[u8],
+    ) -> Result<[u8; BYTES], Error> {
+        let h_len = H::Output::SIZE;
+        if BYTES < 2 * h_len + 2 || message.len() > BYTES - 2 * h_len - 2 {
+            return Err(Error::MessageTooLong);
+        }
+        // EM = 0x00 || maskedSeed || maskedDB, where
+        // DB = lHash || zeros || 0x01 || message.
+        let mut em = [0u8; BYTES];
+        let db_len = BYTES - h_len - 1;
+        {
+            let db = &mut em[1 + h_len..];
+            db[..h_len].copy_from_slice(H::digest(label)?.as_ref());
+            db[db_len - message.len() - 1] = 0x01;
+            db[db_len - message.len()..].copy_from_slice(message);
+        }
+        // Each half masks the other: DB under the seed's mask, then
+        // the seed under the masked DB's.
+        let (head, db) = em.split_at_mut(1 + h_len);
+        mgf1_xor::<H>(seed, db)?;
+        head[1..].copy_from_slice(seed);
+        let (head, db) = em.split_at_mut(1 + h_len);
+        mgf1_xor::<H>(db, &mut head[1..])?;
+
+        let m = Uint::<LIMBS>::from_be_bytes(&em);
+        let c = self.m.modexp(&m, &self.e);
+        let mut out = [0u8; BYTES];
+        c.to_be_bytes(&mut out);
+        em.zeroize();
+        Ok(out)
     }
 
     /// The public operation: the signature back through `e`, as
@@ -596,6 +661,74 @@ impl<const LIMBS: usize, const BYTES: usize, const HALF: usize>
         Ok(())
     }
 
+    /// Decrypts an OAEP ciphertext made under the same hash and
+    /// label, writing the message into the front of `out`, which
+    /// must hold the largest message the key can carry, and
+    /// returning its length.
+    ///
+    /// Every way the padding can be wrong is one error, found in one
+    /// constant-time pass: an oracle that says *where* decryption
+    /// failed gives an attacker the message one query at a time
+    /// (Manger's attack), so nothing here branches on secret bytes
+    /// until the single verdict.
+    pub fn decrypt_oaep<H: Hash>(
+        &self,
+        label: &[u8],
+        ciphertext: &[u8; BYTES],
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        let h_len = H::Output::SIZE;
+        if BYTES < 2 * h_len + 2 {
+            return Err(Error::DecryptionFailed);
+        }
+        let longest = BYTES - 2 * h_len - 2;
+        if out.len() < longest {
+            return Err(Error::OutputTooSmall(longest));
+        }
+        // The range check is on the public ciphertext.
+        let c = Uint::<LIMBS>::from_be_bytes(ciphertext);
+        if c.less_than(self.public.m.modulus()) == 0 {
+            return Err(Error::DecryptionFailed);
+        }
+        let mut em = self.apply(ciphertext)?;
+
+        // Unmask: the seed under the masked DB, then DB under the
+        // seed.
+        let (head, db) = em.split_at_mut(1 + h_len);
+        mgf1_xor::<H>(db, &mut head[1..])?;
+        mgf1_xor::<H>(&head[1..], db)?;
+
+        // One flag accumulates every check: the leading zero byte,
+        // the label hash, and the zeros-then-0x01 frame around the
+        // message.
+        let mut bad = head[0];
+        let lhash = H::digest(label)?;
+        for (a, b) in db[..h_len].iter().zip(lhash.as_ref()) {
+            bad |= a ^ b;
+        }
+        let mut looking = 1u8;
+        let mut start = 0usize;
+        for (i, &byte) in db.iter().enumerate().skip(h_len) {
+            let is_one = eq_byte(byte, 0x01);
+            let is_zero = eq_byte(byte, 0x00);
+            let found = looking & is_one;
+            start |= (i + 1) & usize::from(found).wrapping_neg();
+            bad |= looking & !is_zero & !is_one;
+            looking &= 1 - is_one;
+        }
+        bad |= looking;
+
+        if bad != 0 {
+            em.zeroize();
+            return Err(Error::DecryptionFailed);
+        }
+        let message = &db[start..];
+        out[..message.len()].copy_from_slice(message);
+        let length = message.len();
+        em.zeroize();
+        Ok(length)
+    }
+
     /// The private operation: the encoded message through `d`, or
     /// through the primes when the key carries them.
     fn apply(&self, em: &[u8; BYTES]) -> Result<[u8; BYTES], Error> {
@@ -833,6 +966,13 @@ fn mgf1_xor<H: Hash>(seed: &[u8], out: &mut [u8]) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// One where the bytes are equal, zero otherwise, with no branch
+/// for the comparison to leak through.
+fn eq_byte(a: u8, b: u8) -> u8 {
+    let x = u16::from(a ^ b);
+    (x.wrapping_sub(1) >> 8) as u8 & 1
 }
 
 /// The value without its leading zero bytes.
@@ -1368,5 +1508,170 @@ mod tests {
         .unwrap();
         let sig = key.sign_pkcs1::<Sha256>(MSG).unwrap();
         assert_eq!(sig, unhex::<128>(V15_1024_SHA256));
+    }
+    const OAEP_SEED256: &str =
+        "afa64f41e1e367d9972a04d1d5ad16500c55c7dc8ad700cfd013b3249233e0ab";
+
+    const OAEP_SHA256_NOLABEL: &str =
+        "6c873891ace82ee30335d64cb0f10e2ca182129f2fa3ef25ced68943d1267cac\
+         00c5dcd316bd7d5e615e5ee315e40a8f7e7da786f7c182ce7ea72b292fff6dce\
+         cde22e13bdefb0fdf1b4f84fa9c276389672d919c124f78a38fb058a9189395e\
+         1fb088c86060c2f5cc6f88dc0d1deb026c6cb852f8f468369a19de86954526fc\
+         fa5b729022435127ffae79364eadc61a37d8a4c546317843392581a6b3caac2c\
+         961544bbceb9187df38332ad77def0ed45b5f8d3d898edede5cb4aa5687dfc50\
+         1306ca3af74e20fa9f44a16ec60c0c62d5fd52bd7317f01acfb3acec81fb6c98\
+         1af64549e9faa69f8917987154ca83128e66d8b16af1bd16f49ed92c996dd618";
+
+    const OAEP_SHA256_LABEL: &str =
+        "11d42b6db867974fc4e0bf205b1f44f83d4d663b8c100c426142094b615ac840\
+         847d43ee33a878185c352c9b0f76d4233e07c1c61a3927fe61f95ba7c5b1a5a8\
+         9fcaecc666fbcd693ee03a056c3628ca10de3fb0a04e24cf5e4028da85740a48\
+         7276ee9df78e4bdd104f671389af6c97eed1db7b43dac52e299b830d0850fb7a\
+         744078202cc72ba74475ede6a9b9e3f65ac68262613962a8534cf695dd1a5328\
+         f0505c4cd830d1f5acd41d98b1f6769da8b776de79f988fb12a7196328f66515\
+         3f338e4216fcf5f5357c957d4220be215f7288e243c4c89ea09df6220f954a93\
+         5141beda826aa5a37da12933dd0e9edaebe9adfbab5668432373f7c96ee0e81f";
+
+    const OAEP_SHA512: &str =
+        "43f41cb0ee6164d5a4035ac86ed250408ede7a45120ec94ff7d8810d2d0b2318\
+         bfb201bbee46ee795ba801b1201cc7f6b64a82ecda24f1291bd14c4382884081\
+         29c5bd293dd88812d97339b341e127fa7c0cfda7f01c2a847e3bf3bcfb3488b3\
+         39b84446466e07274ef6a53076f43f1c129cc4b8448d46fc3d54873d44c53788\
+         ca5ca25d40b87f2e3638e0766454188513e4a10d957979116604b71a544b5b93\
+         c3880005c176a19c31345caa60678a3db7983047b856489349677205fde61035\
+         134006eb65da88bed184fecbf6a2db827280b2b20ae7d756ae3374eaa34adcd7\
+         5ebca5f7374717ee9c41f33d497b93ab3498ef0e2e2eb94545ddf60230922228";
+
+    const OAEP_SHA256_MAX: &str =
+        "2fdba0e5a0e0ea429e9d42c864107ebb35aa363fee342edfb2585930b56a416e\
+         a5fe332d0f6dfacbe7231a4e95e2811630e3318b7d7aae07ba473d4a51d6466f\
+         3335e4d220a7de0ac74b84154e28b01c6e2af8289f19ea8fa7cdd33495e3e65b\
+         91b3acf26cbe96c65c6b9e1a299b76cbaacc9255acb1c451a7d5f1a1d96ce344\
+         d563682db508f7f59cb2e9eb80d7fc697916871689828b42d1322e89338d31a6\
+         61a5c81b72347c549a47b3468b6ba6f9973f964e796b504a79e4c0f3f502c52e\
+         a09be39d95014d67bc305fb4427219e246199fe7b6b9d15c3e9ee9d013f7eea1\
+         8c0360ad59294c4fa49306be07e5d7993a570c6736a5f46568c6ad32ffc6e75c";
+
+    /// Encryption with a pinned seed matches an independent
+    /// implementation, and decryption inverts it, across hashes,
+    /// labels and the largest message that fits.
+    #[test]
+    fn oaep_known_answers() {
+        let key = key2048();
+        let public = key.public_key();
+        let seed = unhex::<32>(OAEP_SEED256);
+        let msg = b"attack at dawn";
+        let mut out = [0u8; 256];
+
+        let c = public.oaep_encode::<Sha256>(&seed, b"", msg).unwrap();
+        assert_eq!(c, unhex::<256>(OAEP_SHA256_NOLABEL));
+        let n = key.decrypt_oaep::<Sha256>(b"", &c, &mut out).unwrap();
+        assert_eq!(&out[..n], msg);
+
+        let c = public
+            .oaep_encode::<Sha256>(&seed, b"the label", msg)
+            .unwrap();
+        assert_eq!(c, unhex::<256>(OAEP_SHA256_LABEL));
+        let n = key
+            .decrypt_oaep::<Sha256>(b"the label", &c, &mut out)
+            .unwrap();
+        assert_eq!(&out[..n], msg);
+
+        // The largest message that fits with SHA-256.
+        let mut big = [0u8; 256 - 64 - 2];
+        for (i, byte) in big.iter_mut().enumerate() {
+            *byte = i as u8;
+        }
+        let c = public.oaep_encode::<Sha256>(&seed, b"", &big).unwrap();
+        assert_eq!(c, unhex::<256>(OAEP_SHA256_MAX));
+        let n = key.decrypt_oaep::<Sha256>(b"", &c, &mut out).unwrap();
+        assert_eq!(&out[..n], &big[..]);
+    }
+
+    /// The SHA-512 known answer, whose seed is a digest long.
+    #[test]
+    fn oaep_sha512_known_answer() {
+        let key = key2048();
+        let seed = unhex::<64>(
+            "afa64f41e1e367d9972a04d1d5ad16500c55c7dc8ad700cfd013b3249233e0ab\
+             d2c83f42ff3029c16224591c041cc9081602104103cc4d6d6038e8eee227e861",
+        );
+        let msg = b"attack at dawn";
+        let c = key
+            .public_key()
+            .oaep_encode::<Sha512>(&seed, b"", msg)
+            .unwrap();
+        assert_eq!(c, unhex::<256>(OAEP_SHA512));
+        let mut out = [0u8; 256];
+        let n = key.decrypt_oaep::<Sha512>(b"", &c, &mut out).unwrap();
+        assert_eq!(&out[..n], msg);
+    }
+
+    /// A fresh random seed round-trips, and an empty message is a
+    /// message.
+    #[test]
+    fn oaep_round_trips() {
+        use crate::random::{Rng, System};
+        let mut rng = Rng::try_new(System::try_new().unwrap()).unwrap();
+        let key = key1024();
+        let public = key.public_key();
+        let mut out = [0u8; 128];
+        let c = public
+            .encrypt_oaep::<Sha256, _>(&mut rng, b"", b"hello")
+            .unwrap();
+        let n = key.decrypt_oaep::<Sha256>(b"", &c, &mut out).unwrap();
+        assert_eq!(&out[..n], b"hello");
+        let c = public
+            .encrypt_oaep::<Sha256, _>(&mut rng, b"", b"")
+            .unwrap();
+        let n = key.decrypt_oaep::<Sha256>(b"", &c, &mut out).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    /// Every way a ciphertext can be wrong is the same error.
+    #[test]
+    fn oaep_rejects_uniformly() {
+        let key = key2048();
+        let seed = unhex::<32>(OAEP_SEED256);
+        let c = unhex::<256>(OAEP_SHA256_NOLABEL);
+        let mut out = [0u8; 256];
+
+        // A flipped bit anywhere.
+        for byte in [0, 128, 255] {
+            let mut bad = c;
+            bad[byte] ^= 1;
+            assert_eq!(
+                key.decrypt_oaep::<Sha256>(b"", &bad, &mut out),
+                Err(Error::DecryptionFailed),
+            );
+        }
+        // The wrong label, and the wrong hash.
+        assert_eq!(
+            key.decrypt_oaep::<Sha256>(b"wrong", &c, &mut out),
+            Err(Error::DecryptionFailed),
+        );
+        assert_eq!(
+            key.decrypt_oaep::<Sha512>(b"", &c, &mut out),
+            Err(Error::DecryptionFailed),
+        );
+        // A representative at or above the modulus.
+        assert_eq!(
+            key.decrypt_oaep::<Sha256>(b"", &[0xff; 256], &mut out),
+            Err(Error::DecryptionFailed),
+        );
+        // Too small an output buffer is its own, public error.
+        assert_eq!(
+            key.decrypt_oaep::<Sha256>(b"", &c, &mut [0u8; 8]),
+            Err(Error::OutputTooSmall(256 - 64 - 2)),
+        );
+        // A message the key cannot carry.
+        assert_eq!(
+            key.public_key().oaep_encode::<Sha256>(
+                &seed,
+                b"",
+                &[0u8; 256 - 64 - 1],
+            ),
+            Err(Error::MessageTooLong),
+        );
     }
 }
