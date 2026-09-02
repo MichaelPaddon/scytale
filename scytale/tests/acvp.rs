@@ -818,3 +818,70 @@ mod chacha20_poly1305 {
         support::wycheproof::chacha20_poly1305::run();
     }
 }
+
+/// The public-key algorithms, through Project Wycheproof's cases,
+/// which supply the edge cases the standards' own vectors leave
+/// out, and through the ACVP suites where NIST publishes them.
+/// ACVP RSA keyGen is deliberately absent: its vectors replay a
+/// seeded candidate stream, and `generate` draws from a live random
+/// source.
+mod publickey {
+    use super::*;
+
+    #[test]
+    fn wycheproof_x25519() {
+        support::wycheproof::x25519::run();
+    }
+
+    #[test]
+    fn wycheproof_ed25519() {
+        support::wycheproof::ed25519::run();
+    }
+
+    #[test]
+    fn wycheproof_rsa() {
+        support::wycheproof::rsa::run();
+    }
+
+    #[test]
+    fn acvp_eddsa_sig_gen() {
+        support::acvp::eddsa::run_sig_gen();
+    }
+
+    #[test]
+    fn acvp_eddsa_sig_ver() {
+        support::acvp::eddsa::run_sig_ver();
+    }
+
+    #[test]
+    fn acvp_rsa_sig_ver() {
+        support::acvp::rsa_sig::run_sig_ver();
+    }
+
+    #[test]
+    fn acvp_rsa_sig_gen_answers() {
+        support::acvp::rsa_sig::run_sig_gen();
+    }
+
+    #[test]
+    fn acvp_xecdh() {
+        support::acvp::xecdh::run();
+    }
+}
+
+/// HKDF as SP 800-56Cr2's key-derivation step, and GMAC as GCM with
+/// no plaintext: two algorithms the crate always had, now run
+/// against their own ACVP suites.
+mod derived_suites {
+    use super::*;
+
+    #[test]
+    fn acvp_kda_hkdf() {
+        support::acvp::kda_hkdf::run();
+    }
+
+    #[test]
+    fn acvp_aes_gmac() {
+        support::acvp::aes_gmac::run();
+    }
+}

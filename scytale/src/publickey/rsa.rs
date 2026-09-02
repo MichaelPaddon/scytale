@@ -74,7 +74,8 @@
 //! // choice; an empty salt makes the signature deterministic.
 //! let salt = [0x5a; 32];
 //! let signature = key.sign_pss::<Sha256>(b"the message", &salt)?;
-//! key.public_key().verify_pss::<Sha256>(b"the message", &signature)?;
+//! let public = key.public_key();
+//! public.verify_pss::<Sha256>(b"the message", &signature, salt.len())?;
 //! # Ok(())
 //! # }
 //! ```
@@ -244,18 +245,23 @@ impl<const LIMBS: usize, const BYTES: usize> PublicKey<LIMBS, BYTES> {
         }
     }
 
-    /// Checks a PSS signature over `message`.
+    /// Checks a PSS signature over `message`, made with a salt of
+    /// `salt_len` bytes.
     ///
-    /// The salt length is read from the padding rather than fixed in
-    /// advance, so any length the key's width allows is accepted.
+    /// The length is a parameter of the scheme, not of the
+    /// signature: RFC 8017 verifies against a fixed value, and a
+    /// verifier that accepts whatever length the padding claims
+    /// lets a signature swap parameter sets. Most protocols fix it
+    /// at the digest length.
     pub fn verify_pss<H: Hash>(
         &self,
         message: &[u8],
         signature: &[u8; BYTES],
+        salt_len: usize,
     ) -> Result<(), Error> {
         let mut em = self.undo(signature)?;
         let h_len = H::Output::SIZE;
-        if BYTES < h_len + 2 {
+        if BYTES < h_len + salt_len + 2 {
             return Err(Error::InvalidSignature);
         }
         // EM = maskedDB || H || 0xbc, with the top bit clear because
@@ -273,16 +279,13 @@ impl<const LIMBS: usize, const BYTES: usize> PublicKey<LIMBS, BYTES> {
         mgf1_xor::<H>(h, db)?;
         db[0] &= 0x7f;
 
-        // DB = zeros || 0x01 || salt; the 0x01 marks where the salt
-        // starts, which is how its length travels.
-        let one_at = db
-            .iter()
-            .position(|&b| b != 0)
-            .ok_or(Error::InvalidSignature)?;
-        if db[one_at] != 0x01 {
+        // DB = zeros || 0x01 || salt, with the salt exactly where
+        // the fixed length puts it.
+        let separator = db_len - salt_len - 1;
+        if db[..separator].iter().any(|&b| b != 0) || db[separator] != 0x01 {
             return Err(Error::InvalidSignature);
         }
-        let salt = &db[one_at + 1..];
+        let salt = &db[separator + 1..];
 
         let mut hasher = H::try_new()?;
         hasher.update(&[0u8; 8]);
@@ -1115,11 +1118,18 @@ mod tests {
 
         let sig = key.sign_pss::<Sha256>(MSG, &salt).unwrap();
         assert_eq!(sig, unhex::<256>(PSS_SHA256_SALT32));
-        key.public_key().verify_pss::<Sha256>(MSG, &sig).unwrap();
+        key.public_key()
+            .verify_pss::<Sha256>(MSG, &sig, 32)
+            .unwrap();
+        // The wrong expected length is the wrong parameter set.
+        assert_eq!(
+            key.public_key().verify_pss::<Sha256>(MSG, &sig, 0),
+            Err(Error::InvalidSignature),
+        );
 
         let sig = key.sign_pss::<Sha256>(MSG, &[]).unwrap();
         assert_eq!(sig, unhex::<256>(PSS_SHA256_SALT0));
-        key.public_key().verify_pss::<Sha256>(MSG, &sig).unwrap();
+        key.public_key().verify_pss::<Sha256>(MSG, &sig, 0).unwrap();
     }
 
     /// A second width exercises different const parameters end to
@@ -1135,7 +1145,9 @@ mod tests {
 
         let sig = key.sign_pss::<Sha384>(MSG, &salt).unwrap();
         assert_eq!(sig, unhex::<128>(PSS_1024_SHA384_SALT32));
-        key.public_key().verify_pss::<Sha384>(MSG, &sig).unwrap();
+        key.public_key()
+            .verify_pss::<Sha384>(MSG, &sig, 32)
+            .unwrap();
     }
 
     #[test]
@@ -1150,7 +1162,7 @@ mod tests {
             Err(Error::InvalidSignature),
         );
         assert_eq!(
-            public.verify_pss::<Sha256>(b"other message", &pss),
+            public.verify_pss::<Sha256>(b"other message", &pss, 16),
             Err(Error::InvalidSignature),
         );
         for sig in [&v15, &pss] {
@@ -1161,7 +1173,7 @@ mod tests {
                 Err(Error::InvalidSignature),
             );
             assert_eq!(
-                public.verify_pss::<Sha256>(MSG, &bad),
+                public.verify_pss::<Sha256>(MSG, &bad, 16),
                 Err(Error::InvalidSignature),
             );
         }
@@ -1174,7 +1186,7 @@ mod tests {
         // before any arithmetic.
         let too_big = [0xffu8; 128];
         assert_eq!(
-            public.verify_pss::<Sha256>(MSG, &too_big),
+            public.verify_pss::<Sha256>(MSG, &too_big, 16),
             Err(Error::InvalidSignature),
         );
     }
@@ -1302,7 +1314,9 @@ mod tests {
 
         let sig = key.sign_pss::<Sha256>(MSG, &salt).unwrap();
         assert_eq!(sig, unhex::<256>(PSS_SHA256_SALT32));
-        key.public_key().verify_pss::<Sha256>(MSG, &sig).unwrap();
+        key.public_key()
+            .verify_pss::<Sha256>(MSG, &sig, 32)
+            .unwrap();
     }
 
     /// Import cross-checks the pieces against one another.
@@ -1375,7 +1389,9 @@ mod tests {
         let key = Rsa1024PrivateKey::generate(&mut rng).unwrap();
 
         let sig = key.sign_pss::<Sha256>(MSG, &[7u8; 16]).unwrap();
-        key.public_key().verify_pss::<Sha256>(MSG, &sig).unwrap();
+        key.public_key()
+            .verify_pss::<Sha256>(MSG, &sig, 16)
+            .unwrap();
         let sig = key.sign_pkcs1::<Sha256>(MSG).unwrap();
         key.public_key().verify_pkcs1::<Sha256>(MSG, &sig).unwrap();
 

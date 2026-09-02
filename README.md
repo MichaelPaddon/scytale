@@ -359,11 +359,15 @@ cargo test-extended     # adds the Monte Carlo and large data suites
 scripts/test-all-arches # every architecture, foreign ones emulated
 ```
 
-The ACVP vectors live in `scytale/tests/vectors` and are not shipped
-in the published crate, to keep it small. Building and using the
-library never needs them; running the tests from a downloaded crate
-skips the ACVP suites and leaves the FIPS 197 and NIST SP 800-38A
-vectors, which are built into the tests, as the check.
+The ACVP and Project Wycheproof vectors live in
+`scytale/tests/vectors` and are not shipped in the published crate,
+to keep it small. Building and using the library never needs them;
+running the tests from a downloaded crate skips those suites and
+leaves the standards' own vectors, which are built into the unit
+tests, as the check. The public-key algorithms run against both:
+ACVP's RSA, EDDSA, XECDH and KDA suites, and Wycheproof's X25519,
+Ed25519, RSA signature and RSA-OAEP files, whose deliberately
+twisted cases are the point.
 
 `scripts/test-all-arches` runs the host architecture directly and the
 others with [cross](https://github.com/cross-rs/cross), which needs

@@ -3,6 +3,9 @@
 //! inputs, and messages built to trip carries.
 
 pub mod chacha20_poly1305;
+pub mod ed25519;
+pub mod rsa;
+pub mod x25519;
 
 use serde_json::Value;
 
