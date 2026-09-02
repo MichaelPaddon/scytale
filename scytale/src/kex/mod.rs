@@ -1,12 +1,11 @@
-//! Key establishment: two parties end up sharing a secret key.
+//! Key agreement: both parties contribute a key pair and derive the
+//! same secret, one that neither of them chose.
 //!
-//! It comes in two shapes (NIST SP 800-56). Key agreement, where
-//! both parties contribute a key pair and derive the same secret
-//! that neither chose: [`x25519`]. And key transport, where one
-//! party picks the secret and encrypts it to the other's public
-//! key: [`rsa`], with OAEP. Agreement is the better default; when
-//! the post-quantum encapsulation schemes land they will sit beside
-//! these.
+//! The scheme here is [`x25519`]. When one side must instead pick
+//! the secret and encrypt it to the other, that is public-key
+//! encryption, under [`pke`](crate::pke); when the post-quantum
+//! encapsulation schemes land they will sit beside these in a
+//! module of their own.
 //!
 //! A shared secret from key agreement is a curve point, not a key:
 //! run it through [`hkdf`](crate::kdf::hkdf) and use the output.
@@ -32,5 +31,4 @@
 //! # }
 //! ```
 
-pub mod rsa;
 pub mod x25519;

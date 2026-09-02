@@ -1,5 +1,5 @@
-//! RSA-OAEP key transport (RFC 8017): one side chooses a secret and
-//! encrypts it to the other's public key.
+//! RSA-OAEP encryption (RFC 8017): anyone encrypts to the public
+//! key, and only the holder of the private key can decrypt.
 //!
 //! A key is a modulus `n`, the product of two secret primes, with a
 //! public exponent `e` and a private exponent `d` that undo one
@@ -11,7 +11,7 @@
 //! OAEP is for moving keys, not data: a message must fit inside one
 //! modulus less the padding, and each decryption costs a private
 //! exponentiation, so encrypt a symmetric key and let a cipher carry
-//! the data. NIST SP 800-56B calls this key transport.
+//! the data.
 //!
 //! The keys here only encrypt. RSA signatures are a different job
 //! with their own keys, under [`sig::rsa`](crate::sig::rsa), and a
@@ -32,7 +32,7 @@
 //!
 //! ```
 //! use scytale::hash::sha2::Sha256;
-//! use scytale::kex::rsa::Rsa2048PrivateKey;
+//! use scytale::pke::rsa::Rsa2048PrivateKey;
 //! use scytale::random::{Rng, System};
 //!
 //! # fn main() -> Result<(), scytale::Error> {

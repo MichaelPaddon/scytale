@@ -7,7 +7,7 @@
 //! integer of any fixed width, and [`montgomery`] the multiplication
 //! and exponentiation modulo an odd number built on it, which is the
 //! arithmetic under RSA. [`rsa`] is the key machinery itself,
-//! shared by the RSA signature and key transport schemes.
+//! shared by the RSA signature and encryption schemes.
 
 pub(crate) mod fe25519;
 pub(crate) mod montgomery;

@@ -3,9 +3,9 @@
 Cryptographic primitives in Rust.
 
 This is early work. It has AES and the block cipher modes built on
-it, the SHA-2 and SHA-3 hashes and SHAKE, HMAC, HKDF and PBKDF2 over
-them, X25519 key agreement, Ed25519 and RSA signatures, and random
-numbers.
+it, ChaCha20 and ChaCha20-Poly1305, the SHA-2 and SHA-3 hashes and
+SHAKE, HMAC, HKDF and PBKDF2 over them, X25519 key agreement, RSA-OAEP
+encryption, Ed25519 and RSA signatures, and random numbers.
 
 ## Goals
 
@@ -41,28 +41,26 @@ a whole architecture.
 
 ## Supported algorithms
 
+Every public module is named for the job a caller wants done, not for
+the machinery behind it:
+
+| Module | Job | Algorithms |
+| --- | --- | --- |
+| `cipher` | encryption | AES, ChaCha20, and the modes built on them |
+| `hash` | digests | SHA-2, SHA-3, SHAKE |
+| `mac` | message authentication | HMAC, Poly1305 |
+| `kdf` | key derivation | HKDF, PBKDF2 |
+| `kex` | key agreement | X25519 |
+| `pke` | public-key encryption | RSA-OAEP |
+| `sig` | signatures | Ed25519, RSA-PSS, RSA PKCS#1 v1.5 |
+| `random` | random numbers | CTR_DRBG over AES-256, and what seeds it |
+
+### Ciphers
+
 | Algorithm | Key sizes | Notes |
 | --- | --- | --- |
 | AES (FIPS 197) | 128, 192, 256 | the block cipher itself |
 | ChaCha20 (RFC 8439) | 256 | a stream cipher; no tables, no AES needed |
-
-| Hash | Digest | Notes |
-| --- | --- | --- |
-| SHA-224, SHA-256 (FIPS 180-4) | 28, 32 bytes | the 32-bit family |
-| SHA-384, SHA-512 | 48, 64 bytes | the 64-bit family |
-| SHA-512/224, SHA-512/256 | 28, 32 bytes | truncated; no length extension |
-| SHA3-224 to SHA3-512 (FIPS 202) | 28 to 64 bytes | no length extension |
-| SHAKE128, SHAKE256 | any length | extendable output |
-
-All of them take bit strings as well as bytes, as the standards
-define them. Built on any of them:
-
-| Construction | Kind | Notes |
-| --- | --- | --- |
-| HMAC (FIPS 198-1) | message authentication | constant-time verify |
-| Poly1305 (RFC 8439) | message authentication | one-time key; for the AEAD |
-| HKDF (RFC 5869) | key derivation | from a secret that is already random |
-| PBKDF2 (SP 800-132) | key derivation | from a password |
 
 Every mode below is generic: it wraps any block cipher, and AES is
 simply the one there is so far.
@@ -86,16 +84,64 @@ And one that wraps no block cipher:
 | --- | --- | --- |
 | ChaCha20-Poly1305 (RFC 8439) | authenticated | GCM's equal; faster without AES hardware |
 
-And the first public-key pieces, under `scytale::sig` (signatures)
-and `scytale::kex` (key establishment). RSA signing and RSA
+`encrypt_blocks` on the cipher itself encrypts each block
+independently, which is ECB. On its own that is not a safe way to
+encrypt a message, because equal blocks produce equal ciphertext. Use
+a mode.
+
+Most initialisation vectors need to be *unique* rather than random,
+which is a stronger requirement. `mode::Nonces` counts nonces for GCM
+and GCM-SIV so a repeat is impossible rather than merely unlikely.
+
+Key wrapping is the odd one out: it takes no nonce and is
+deterministic, so wrapping the same key twice gives the same answer.
+That is safe for a key, which cannot be guessed, and unsafe for
+anything an attacker might guess and confirm. Its output is eight
+bytes longer than its input, which is where the check value lives.
+
+The two format-preserving modes are not constant time: they do
+arithmetic in the caller's radix, and division is not a constant-time
+instruction on any of these processors. Their documentation says so
+too.
+
+### Hashes
+
+| Hash | Digest | Notes |
+| --- | --- | --- |
+| SHA-224, SHA-256 (FIPS 180-4) | 28, 32 bytes | the 32-bit family |
+| SHA-384, SHA-512 | 48, 64 bytes | the 64-bit family |
+| SHA-512/224, SHA-512/256 | 28, 32 bytes | truncated; no length extension |
+| SHA3-224 to SHA3-512 (FIPS 202) | 28 to 64 bytes | no length extension |
+| SHAKE128, SHAKE256 | any length | extendable output |
+
+All of them take bit strings as well as bytes, as the standards
+define them.
+
+### Message authentication
+
+| Construction | Notes |
+| --- | --- |
+| HMAC (FIPS 198-1) | over any hash; constant-time verify |
+| Poly1305 (RFC 8439) | one-time key; for the AEAD |
+
+### Key derivation
+
+| Construction | Notes |
+| --- | --- |
+| HKDF (RFC 5869) | over any hash; from a secret that is already random |
+| PBKDF2 (SP 800-132) | over any hash; from a password |
+
+### Key agreement, public-key encryption and signatures
+
+Three jobs, three modules. RSA does two of them, and its signing and
 encryption keys are distinct types: a key does one job.
 
-| Algorithm | Kind | Notes |
+| Algorithm | Module | Notes |
 | --- | --- | --- |
-| X25519 (RFC 7748) | key agreement | shared secret needs HKDF; refuses low-order keys |
-| Ed25519 (RFC 8032) | signatures | deterministic; refuses malleable signatures |
-| RSA-PSS, RSA PKCS#1 v1.5 (RFC 8017) | signatures | any width; CRT signing and key generation |
-| RSA-OAEP (RFC 8017) | key transport | constant-time unpadding; no v1.5 decryption, ever |
+| X25519 (RFC 7748) | `kex` | shared secret needs HKDF; refuses low-order keys |
+| RSA-OAEP (RFC 8017) | `pke` | constant-time unpadding; no v1.5 decryption, ever |
+| Ed25519 (RFC 8032) | `sig` | deterministic; refuses malleable signatures |
+| RSA-PSS, RSA PKCS#1 v1.5 (RFC 8017) | `sig` | any width; CRT signing and key generation |
 
 ## Random numbers
 
@@ -155,26 +201,6 @@ state has been duplicated and the child must reseed or start again;
 nothing here can detect that without asking the kernel on every call,
 which is most of the reason to hold a generator at all. The state is
 wiped when the generator is dropped.
-
-Most initialisation vectors need to be *unique* rather than random,
-which is a stronger requirement. `mode::Nonces` counts nonces for GCM
-and GCM-SIV so a repeat is impossible rather than merely unlikely.
-
-`encrypt_blocks` on the cipher itself encrypts each block
-independently, which is ECB. On its own that is not a safe way to
-encrypt a message, because equal blocks produce equal ciphertext. Use
-a mode.
-
-Key wrapping is the odd one out: it takes no nonce and is
-deterministic, so wrapping the same key twice gives the same answer.
-That is safe for a key, which cannot be guessed, and unsafe for
-anything an attacker might guess and confirm. Its output is eight
-bytes longer than its input, which is where the check value lives.
-
-The two format-preserving modes are not constant time: they do
-arithmetic in the caller's radix, and division is not a constant-time
-instruction on any of these processors. Their documentation says so
-too.
 
 ## Supported architectures
 

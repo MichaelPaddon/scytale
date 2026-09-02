@@ -1,8 +1,8 @@
-//! The RSA key machinery shared by the signature and key transport
+//! The RSA key machinery shared by the signature and encryption
 //! schemes: key validation and import, the modular exponentiations,
 //! Chinese remainder recombination with its fault check, key
 //! generation, and MGF1. The schemes in [`sig::rsa`](crate::sig::rsa)
-//! and [`kex::rsa`](crate::kex::rsa) wrap these in distinct key
+//! and [`pke::rsa`](crate::pke::rsa) wrap these in distinct key
 //! types, so a signing key cannot decrypt and a decryption key
 //! cannot sign.
 

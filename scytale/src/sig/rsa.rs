@@ -11,7 +11,7 @@
 //! a protocol demands otherwise; verify whichever the peer sends.
 //!
 //! The keys here only sign. RSA encryption is a different job with
-//! its own keys, under [`kex::rsa`](crate::kex::rsa), and a key
+//! its own keys, under [`pke::rsa`](crate::pke::rsa), and a key
 //! should do one or the other: a key that both signs and decrypts
 //! hands an attacker two oracles against the same secret, and the
 //! proofs for either scheme assume it has the key to itself.

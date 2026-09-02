@@ -1,8 +1,8 @@
 //! Portable cryptographic primitives.
 //!
 //! Symmetric ciphers and their modes, hashes, message
-//! authentication, key derivation, key agreement, signatures and
-//! random numbers,
+//! authentication, key derivation, key agreement, public-key
+//! encryption, signatures and random numbers,
 //! written to run anywhere Rust
 //! does: `no_std`, no allocator, no cargo features to get wrong. Where
 //! the processor has instructions for a primitive they are used,
@@ -14,7 +14,8 @@
 //! | [`hash`] | the SHA-2 and SHA-3 families, and SHAKE |
 //! | [`mac`] | HMAC over any hash, and Poly1305 |
 //! | [`kdf`] | HKDF and PBKDF2 |
-//! | [`kex`] | X25519 agreement, RSA-OAEP key transport |
+//! | [`kex`] | X25519 key agreement |
+//! | [`pke`] | RSA-OAEP public-key encryption |
 //! | [`random`] | a CTR_DRBG generator and the entropy that seeds it |
 //! | [`sig`] | Ed25519 and RSA signatures |
 //! | [`Error`] | the one type every fallible call returns |
@@ -105,6 +106,7 @@ pub mod kdf;
 pub mod kex;
 pub mod mac;
 mod math;
+pub mod pke;
 pub mod random;
 pub mod sig;
 
