@@ -87,6 +87,15 @@ impl<const LIMBS: usize, const BYTES: usize> Public<LIMBS, BYTES> {
         Some(out)
     }
 
+    /// Whether `input` is a representative the primitives accept,
+    /// that is, strictly below the modulus. Cheaper than
+    /// [`apply`](Self::apply), which answers the same question only
+    /// by doing the exponentiation as well.
+    pub(crate) fn in_range(&self, input: &[u8; BYTES]) -> bool {
+        let s = Uint::<LIMBS>::from_be_bytes(input);
+        s.less_than(self.m.modulus()) != 0
+    }
+
     /// The modulus, big-endian.
     pub(crate) fn modulus_bytes(&self) -> [u8; BYTES] {
         let mut out = [0u8; BYTES];

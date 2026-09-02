@@ -1,11 +1,16 @@
-//! RSA sigVer (FIPS 186-5), plus the sigGen file's sample
-//! signatures run through verification: sigGen supplies no private
-//! key, so its worked answers serve as extra known-good signatures
-//! under NIST-chosen keys and exponents.
+//! RSA sigVer under FIPS 186-5 and FIPS 186-4, plus the 186-5 sigGen
+//! file's sample signatures run through verification: sigGen supplies
+//! no private key, so its worked answers serve as extra known-good
+//! signatures under NIST-chosen keys and exponents.
 //!
 //! Groups whose hash or mask function is a SHAKE are skipped: FIPS
 //! 186-5 allows XOFs in both roles, and the crate's PSS is defined
 //! over fixed-output hashes with MGF1 as the mask.
+//!
+//! The 186-4 file is worth running beside 186-5 for its 1024-bit
+//! groups, a width 186-5 no longer offers. Its ANSI X9.31 groups are
+//! skipped, that encoding not being implemented, as are its SHA-1
+//! groups.
 
 use super::{hex, load};
 use scytale::hash::sha2::{Sha224, Sha256, Sha384, Sha512};
@@ -29,7 +34,8 @@ macro_rules! dispatch_hash {
             "SHA3-256" => Some($run::<Sha3_256>($($arg),*)),
             "SHA3-384" => Some($run::<Sha3_384>($($arg),*)),
             "SHA3-512" => Some($run::<Sha3_512>($($arg),*)),
-            "SHAKE-128" | "SHAKE-256" => None,
+            // SHA-1 appears only in the 186-4 file.
+            "SHAKE-128" | "SHAKE-256" | "SHA-1" => None,
             other => panic!("unknown hash {other}"),
         }
     };
@@ -60,12 +66,27 @@ where
     }
 }
 
-/// Runs the sigVer suite; a no-op without the vendored vectors.
+/// Runs the FIPS 186-5 sigVer suite; a no-op without the vendored
+/// vectors.
 pub fn run_sig_ver() {
     run(
         "RSA-SigVer-FIPS186-5/internalProjection.json",
+        "FIPS186-5",
         "sigVer",
         true,
+        20,
+    );
+}
+
+/// Runs the FIPS 186-4 sigVer suite, whose 1024-bit groups are the
+/// reason to keep it beside 186-5.
+pub fn run_sig_ver_186_4() {
+    run(
+        "RSA-SigVer-FIPS186-4/internalProjection.json",
+        "FIPS186-4",
+        "sigVer",
+        true,
+        144,
     );
 }
 
@@ -73,13 +94,21 @@ pub fn run_sig_ver() {
 pub fn run_sig_gen() {
     run(
         "RSA-SigGen-FIPS186-5/internalProjection.json",
+        "FIPS186-5",
         "sigGen",
         false,
+        20,
     );
 }
 
-fn run(file: &str, mode: &str, has_verdicts: bool) {
-    let Some(doc) = load(file, "RSA", "FIPS186-5") else {
+fn run(
+    file: &str,
+    revision: &str,
+    mode: &str,
+    has_verdicts: bool,
+    least: usize,
+) {
+    let Some(doc) = load(file, "RSA", revision) else {
         return;
     };
     assert_eq!(doc["mode"], mode);
@@ -87,7 +116,15 @@ fn run(file: &str, mode: &str, has_verdicts: bool) {
     let mut rejections = 0;
     for group in doc["testGroups"].as_array().expect("testGroups") {
         let alg = group["hashAlg"].as_str().expect("hashAlg");
-        if group["sigType"] == "pss" && group["maskFunction"] != "mgf1" {
+        // 186-5 names the mask function; 186-4 has only MGF1 and
+        // records none, so an absent field is MGF1.
+        let mask = group["maskFunction"].as_str().unwrap_or("mgf1");
+        if group["sigType"] == "pss" && mask != "mgf1" {
+            continue;
+        }
+        // ANSI X9.31 padding appears only in the 186-4 file and is
+        // not implemented.
+        if group["sigType"] == "ansx9.31" {
             continue;
         }
         // SP 800-106 randomized hashing signs a salted transform of
@@ -98,13 +135,14 @@ fn run(file: &str, mode: &str, has_verdicts: bool) {
         for t in group["tests"].as_array().expect("tests") {
             let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
             let accepted = match group["modulo"].as_u64().expect("modulo") {
+                1024 => dispatch_hash!(alg, verify_one_1024, group, t),
                 2048 => dispatch_hash!(alg, verify_one_2048, group, t),
                 3072 => dispatch_hash!(alg, verify_one_3072, group, t),
                 4096 => dispatch_hash!(alg, verify_one_4096, group, t),
                 other => panic!("unknown modulus {other}"),
             };
             let Some(accepted) = accepted else {
-                continue; // a SHAKE group
+                continue; // a SHAKE or SHA-1 group
             };
             let should_pass = if has_verdicts {
                 t["testPassed"].as_bool().expect("testPassed")
@@ -118,10 +156,17 @@ fn run(file: &str, mode: &str, has_verdicts: bool) {
             }
         }
     }
-    assert!(cases >= 20, "only {cases} cases in {mode}");
+    assert!(cases >= least, "only {cases} cases in {file}");
     if has_verdicts {
         assert!(rejections >= 10, "only {rejections} rejections");
     }
+}
+
+fn verify_one_1024<H: scytale::sig::rsa::DigestInfo>(
+    group: &Value,
+    t: &Value,
+) -> bool {
+    verify_one::<H, 16, 128>(group, t)
 }
 
 fn verify_one_2048<H: scytale::sig::rsa::DigestInfo>(

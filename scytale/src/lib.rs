@@ -83,7 +83,9 @@
 //! every output goes into a buffer the caller supplies. The
 //! format-preserving modes, [`Ff1`](cipher::mode::Ff1) and
 //! [`Ff3_1`](cipher::mode::Ff3_1), are not constant time, and say
-//! so.
+//! so. The raw RSA primitives are offered, for building a scheme the
+//! crate does not have and for the component test suites, but they
+//! pad and check nothing and say so at length.
 //!
 //! # Rust version
 //!

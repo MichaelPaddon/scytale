@@ -11,7 +11,7 @@ encryption, Ed25519 and RSA signatures, and random numbers.
 
 **Correct.** Every implementation is checked against the standard
 test vectors and against the NIST Automated Cryptographic Validation
-Program (ACVP) vectors: 14,765 one-shot cases and 3600 Monte Carlo
+Program (ACVP) vectors: 53,405 one-shot cases and 3600 Monte Carlo
 steps, the latter being 3.6 million chained cipher calls with the key
 re-derived at each step. Each case runs against every implementation
 the processor supports, not just one. Every implementation is also
@@ -142,6 +142,7 @@ encryption keys are distinct types: a key does one job.
 | RSA-OAEP (RFC 8017) | `pke` | constant-time unpadding; no v1.5 decryption, ever |
 | Ed25519 (RFC 8032) | `sig` | deterministic; refuses malleable signatures |
 | RSA-PSS, RSA PKCS#1 v1.5 (RFC 8017) | `sig` | any width; CRT signing and key generation |
+| RSA primitives (RFC 8017) | `sig`, `pke` | raw, unpadded; for building schemes and for validation |
 
 ## Random numbers
 
@@ -393,9 +394,12 @@ to keep it small. Building and using the library never needs them;
 running the tests from a downloaded crate skips those suites and
 leaves the standards' own vectors, which are built into the unit
 tests, as the check. The public-key algorithms run against both:
-ACVP's RSA, EDDSA, XECDH and KDA suites, and Wycheproof's X25519,
-Ed25519, RSA signature and RSA-OAEP files, whose deliberately
-twisted cases are the point.
+ACVP's RSA, KTS-IFC, EDDSA, XECDH and KDA suites, and Wycheproof's
+X25519, Ed25519, RSA signature and RSA-OAEP files, whose deliberately
+twisted cases are the point. RSA is the one algorithm whose raw
+primitives NIST publishes vectors for, and those run too: they are the
+only external check on a value the crate produces under a private
+exponent rather than merely verifies.
 
 `scripts/test-all-arches` runs the host architecture directly and the
 others with [cross](https://github.com/cross-rs/cross), which needs

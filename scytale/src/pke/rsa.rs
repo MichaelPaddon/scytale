@@ -6,8 +6,13 @@
 //! another. Anyone can raise a padded message through `e`; only the
 //! key holder can bring it back through `d`.
 //!
-//! Only OAEP is offered: the older PKCS#1 v1.5 encryption cannot be
-//! decrypted safely (Bleichenbacher's oracle) and is not here. And
+//! Only OAEP is offered as a padding: the older PKCS#1 v1.5
+//! encryption cannot be decrypted safely (Bleichenbacher's oracle)
+//! and is not here. The raw primitives beneath it,
+//! [`encrypt_primitive`](PublicKey::encrypt_primitive) and
+//! [`decrypt_primitive`](PrivateKey::decrypt_primitive), are public
+//! for building a scheme this crate does not have and for the ACVP
+//! component suites; they pad nothing and check nothing. And
 //! OAEP is for moving keys, not data: a message must fit inside one
 //! modulus less the padding, and each decryption costs a private
 //! exponentiation, so encrypt a symmetric key and let a cipher carry
@@ -117,6 +122,27 @@ impl<const LIMBS: usize, const BYTES: usize> PublicKey<LIMBS, BYTES> {
         Ok(PublicKey {
             raw: Public::try_new(n, e)?,
         })
+    }
+
+    /// The RSA encryption primitive, RSAEP of RFC 8017: raises
+    /// `message` to the public exponent, with no padding applied.
+    ///
+    /// # This is not encryption
+    ///
+    /// Raw RSA is deterministic and malleable, so a message enciphered
+    /// this way leaks equality and can be mauled in transit. Use
+    /// [`encrypt_oaep`](Self::encrypt_oaep) unless you are
+    /// implementing a scheme it does not cover, or driving the
+    /// component test suites that exercise the primitive on its own.
+    ///
+    /// Returns [`Error::MessageTooLong`] when the representative is
+    /// at or above the modulus, which is the only input the primitive
+    /// refuses.
+    pub fn encrypt_primitive(
+        &self,
+        message: &[u8; BYTES],
+    ) -> Result<[u8; BYTES], Error> {
+        self.raw.apply(message).ok_or(Error::MessageTooLong)
     }
 
     /// Encrypts `message` with OAEP, which must fit the key: at
@@ -267,6 +293,35 @@ impl<const LIMBS: usize, const BYTES: usize, const HALF: usize>
         qinv: &mut [u8],
     ) -> Result<(), Error> {
         self.raw.crt_bytes(p, q, dp, dq, qinv)
+    }
+
+    /// The RSA decryption primitive, RSADP of RFC 8017: raises
+    /// `ciphertext` to the private exponent, through the primes when
+    /// the key carries them, with no padding removed.
+    ///
+    /// # This is not decryption
+    ///
+    /// Nothing here authenticates the ciphertext or checks any
+    /// padding, and a scheme built on this without care is where
+    /// Bleichenbacher's and Manger's attacks live. Use
+    /// [`decrypt_oaep`](Self::decrypt_oaep) unless you are
+    /// implementing a scheme it does not cover, or driving the
+    /// component test suites that exercise the primitive on its own.
+    ///
+    /// Returns [`Error::DecryptionFailed`] when the ciphertext is at
+    /// or above the modulus. As everywhere else in the crate, a
+    /// result computed through the primes is checked with the public
+    /// exponent before it is returned.
+    pub fn decrypt_primitive(
+        &self,
+        ciphertext: &[u8; BYTES],
+    ) -> Result<[u8; BYTES], Error> {
+        // The scheme owns this check everywhere else; the primitive
+        // has no scheme above it, so it makes the check itself.
+        if !self.public.raw.in_range(ciphertext) {
+            return Err(Error::DecryptionFailed);
+        }
+        self.raw.apply(&self.public.raw, ciphertext)
     }
 
     /// Decrypts an OAEP ciphertext made under the same hash and
@@ -601,5 +656,50 @@ mod tests {
             ),
             Err(Error::MessageTooLong),
         );
+    }
+
+    /// The primitives undo one another, and the private one is not
+    /// the identity.
+    #[test]
+    fn primitives_round_trip() {
+        let key = key2048();
+        let public = key.public_key();
+        let mut m = [0u8; 256];
+        m[0] = 0x01;
+        m[255] = 0x42;
+
+        let c = public.encrypt_primitive(&m).unwrap();
+        assert_ne!(c, m, "the primitive did nothing");
+        assert_eq!(key.decrypt_primitive(&c).unwrap(), m);
+    }
+
+    /// A representative at or above the modulus is refused by both
+    /// directions, each naming its own error.
+    #[test]
+    fn primitives_reject_out_of_range() {
+        let key = key2048();
+        let public = key.public_key();
+        let n = unhex::<256>(N2048);
+        assert_eq!(public.encrypt_primitive(&n), Err(Error::MessageTooLong));
+        assert_eq!(key.decrypt_primitive(&n), Err(Error::DecryptionFailed));
+
+        let mut under = n;
+        under[255] -= 1;
+        assert!(public.encrypt_primitive(&under).is_ok());
+        assert!(key.decrypt_primitive(&under).is_ok());
+    }
+
+    /// OAEP is built on the primitive: undoing the transport by hand
+    /// gives the padded block OAEP encoded.
+    #[test]
+    fn primitive_underlies_oaep() {
+        let key = key2048();
+        let sealed = key
+            .public_key()
+            .oaep_encode::<Sha256>(&unhex::<32>(OAEP_SEED256), b"", b"hello")
+            .unwrap();
+        let em = key.decrypt_primitive(&sealed).unwrap();
+        // OAEP's encoded message always has a zero leading byte.
+        assert_eq!(em[0], 0);
     }
 }

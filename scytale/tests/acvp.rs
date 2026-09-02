@@ -12,10 +12,10 @@ mod support;
 use support::acvp::{
     aes_cbc as cbc, aes_cfb1 as cfb1, aes_cfb128 as cfb128, aes_cfb8 as cfb8,
     aes_ctr as ctr, aes_ecb as ecb, aes_ff1 as ff1, aes_ff3_1 as ff3_1,
-    aes_gcm as gcm, aes_gcm_siv as gcm_siv, aes_kw as kw, aes_kwp as kwp,
-    aes_ofb as ofb, aes_xpn as xpn, aes_xts as xts, ctr_drbg as drbg,
-    hmac as hmac_vectors, pbkdf as pbkdf_vectors, sha as sha_vectors,
-    shake as shake_vectors,
+    aes_gcm as gcm, aes_gcm_siv as gcm_siv, aes_gmac as gmac, aes_kw as kw,
+    aes_kwp as kwp, aes_ofb as ofb, aes_xpn as xpn, aes_xts as xts,
+    ctr_drbg as drbg, hmac as hmac_vectors, pbkdf as pbkdf_vectors,
+    sha as sha_vectors, shake as shake_vectors,
 };
 
 /// Defines the suites for an implementation that is always
@@ -206,6 +206,13 @@ mod aes_gcm {
 /// AES-GCM-SIV (RFC 8452), which survives a repeated nonce.
 mod aes_gcm_siv {
     every_aes!(gcm_siv, aft_only);
+}
+
+/// ACVP-AES-GMAC: GCM with no plaintext, which is how the crate
+/// offers GMAC. Run across every implementation, as the other modes
+/// are, because the tag is the cipher's work.
+mod aes_gmac {
+    every_aes!(gmac, aft_only);
 }
 
 /// AES in XTS mode (SP 800-38E), the mode used for storage.
@@ -649,6 +656,27 @@ macro_rules! hmac_suite {
 
 /// Runs one variant's HMAC suite against every implementation this
 /// architecture has.
+/// The same for HMAC over a SHA-3 digest, whose backends differ from
+/// the SHA-2 ones: only AArch64 has instructions for Keccak.
+macro_rules! every_hmac_sha3 {
+    ($variant:ident, $file:literal, $algorithm:literal) => {
+        use super::*;
+        use scytale::hash::sha3;
+
+        hmac_suite!(automatic, sha3::$variant, $file, $algorithm);
+        hmac_suite!(portable, sha3::portable::$variant, $file, $algorithm);
+
+        #[cfg(target_arch = "aarch64")]
+        hmac_suite!(
+            armv8,
+            sha3::aarch64::$variant,
+            $file,
+            $algorithm,
+            "ARMv8 SHA3"
+        );
+    };
+}
+
 macro_rules! every_hmac {
     ($variant:ident, $file:literal, $algorithm:literal) => {
         use super::*;
@@ -745,51 +773,33 @@ mod hmac_sha2_512_256 {
 }
 
 /// HMAC over each SHA-3 digest, whose rates exceed any SHA-2 block.
-/// The automatic type runs; every SHA-3 backend is checked against
-/// the portable one in the unit tests.
 mod hmac_sha3_224 {
-    use super::*;
-    use scytale::hash::sha3;
-
-    hmac_suite!(
-        automatic,
-        sha3::Sha3_224,
+    every_hmac_sha3!(
+        Sha3_224,
         "ACVP-HMAC-SHA3-224-1.0/internalProjection.json",
         "HMAC-SHA3-224"
     );
 }
 
 mod hmac_sha3_256 {
-    use super::*;
-    use scytale::hash::sha3;
-
-    hmac_suite!(
-        automatic,
-        sha3::Sha3_256,
+    every_hmac_sha3!(
+        Sha3_256,
         "ACVP-HMAC-SHA3-256-1.0/internalProjection.json",
         "HMAC-SHA3-256"
     );
 }
 
 mod hmac_sha3_384 {
-    use super::*;
-    use scytale::hash::sha3;
-
-    hmac_suite!(
-        automatic,
-        sha3::Sha3_384,
+    every_hmac_sha3!(
+        Sha3_384,
         "ACVP-HMAC-SHA3-384-1.0/internalProjection.json",
         "HMAC-SHA3-384"
     );
 }
 
 mod hmac_sha3_512 {
-    use super::*;
-    use scytale::hash::sha3;
-
-    hmac_suite!(
-        automatic,
-        sha3::Sha3_512,
+    every_hmac_sha3!(
+        Sha3_512,
         "ACVP-HMAC-SHA3-512-1.0/internalProjection.json",
         "HMAC-SHA3-512"
     );
@@ -819,19 +829,54 @@ mod chacha20_poly1305 {
     }
 }
 
-/// The public-key algorithms, through Project Wycheproof's cases,
-/// which supply the edge cases the standards' own vectors leave
-/// out, and through the ACVP suites where NIST publishes them.
-/// ACVP RSA keyGen is deliberately absent: its vectors replay a
-/// seeded candidate stream, and `generate` draws from a live random
-/// source.
-mod publickey {
+/// Key agreement: X25519, through ACVP's shared-secret and key
+/// generation suites and Project Wycheproof's edge cases.
+///
+/// ACVP's XECDH keyVer suite is not here; [`support::acvp::xecdh`]
+/// says why.
+mod kex {
     use super::*;
 
     #[test]
     fn wycheproof_x25519() {
         support::wycheproof::x25519::run();
     }
+
+    #[test]
+    fn acvp_xecdh() {
+        support::acvp::xecdh::run();
+    }
+
+    #[test]
+    fn acvp_xecdh_key_gen() {
+        support::acvp::xecdh::run_key_gen();
+    }
+}
+
+/// Public-key encryption: RSA-OAEP, through ACVP's key transport
+/// suite and Project Wycheproof's decryption cases, with the raw
+/// decryption primitive beside them.
+mod pke {
+    use super::*;
+
+    #[test]
+    fn acvp_kts_ifc() {
+        support::acvp::kts_ifc::run();
+    }
+
+    #[test]
+    fn acvp_rsa_decryption_primitive() {
+        support::acvp::rsa_primitive::run_decryption_primitive();
+    }
+}
+
+/// Signatures: Ed25519 and RSA, through ACVP and Project Wycheproof.
+///
+/// ACVP RSA keyGen is deliberately absent: its vectors replay a
+/// seeded candidate stream, and `generate` draws from a live random
+/// source.
+mod sig {
+    use super::*;
 
     #[test]
     fn wycheproof_ed25519() {
@@ -841,6 +886,16 @@ mod publickey {
     #[test]
     fn wycheproof_rsa() {
         support::wycheproof::rsa::run();
+    }
+
+    #[test]
+    fn acvp_eddsa_key_gen() {
+        support::acvp::eddsa::run_key_gen();
+    }
+
+    #[test]
+    fn acvp_eddsa_key_ver() {
+        support::acvp::eddsa::run_key_ver();
     }
 
     #[test]
@@ -859,29 +914,27 @@ mod publickey {
     }
 
     #[test]
+    fn acvp_rsa_sig_ver_186_4() {
+        support::acvp::rsa_sig::run_sig_ver_186_4();
+    }
+
+    #[test]
     fn acvp_rsa_sig_gen_answers() {
         support::acvp::rsa_sig::run_sig_gen();
     }
 
     #[test]
-    fn acvp_xecdh() {
-        support::acvp::xecdh::run();
+    fn acvp_rsa_signature_primitive() {
+        support::acvp::rsa_primitive::run_signature_primitive();
     }
 }
 
-/// HKDF as SP 800-56Cr2's key-derivation step, and GMAC as GCM with
-/// no plaintext: two algorithms the crate always had, now run
-/// against their own ACVP suites.
-mod derived_suites {
+/// HKDF, as SP 800-56Cr2's key-derivation step.
+mod hkdf {
     use super::*;
 
     #[test]
     fn acvp_kda_hkdf() {
         support::acvp::kda_hkdf::run();
-    }
-
-    #[test]
-    fn acvp_aes_gmac() {
-        support::acvp::aes_gmac::run();
     }
 }

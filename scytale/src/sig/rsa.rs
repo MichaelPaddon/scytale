@@ -10,6 +10,12 @@
 //! that most deployed certificates still carry. Sign with PSS unless
 //! a protocol demands otherwise; verify whichever the peer sends.
 //!
+//! The raw primitives under both,
+//! [`sign_primitive`](PrivateKey::sign_primitive) and
+//! [`verify_primitive`](PublicKey::verify_primitive), are public for
+//! building an encoding this crate does not have and for the ACVP
+//! component suites; they encode nothing and check nothing.
+//!
 //! The keys here only sign. RSA encryption is a different job with
 //! its own keys, under [`pke::rsa`](crate::pke::rsa), and a key
 //! should do one or the other: a key that both signs and decrypts
@@ -192,6 +198,29 @@ impl<const LIMBS: usize, const BYTES: usize> PublicKey<LIMBS, BYTES> {
         })
     }
 
+    /// The RSA verification primitive, RSAVP1 of RFC 8017: raises
+    /// `signature` to the public exponent and hands back the
+    /// representative, with no padding removed and nothing checked.
+    ///
+    /// # This is not signature verification
+    ///
+    /// Raw RSA is malleable, and a representative recovered this way
+    /// says nothing about who produced it until an encoding has been
+    /// rebuilt and compared. Use [`verify_pkcs1`](Self::verify_pkcs1)
+    /// or [`verify_pss`](Self::verify_pss) unless you are
+    /// implementing a scheme those do not cover, or driving the
+    /// component test suites that exercise the primitive on its own.
+    ///
+    /// Returns [`Error::InvalidSignature`] when the signature is at
+    /// or above the modulus, which is the only input the primitive
+    /// refuses.
+    pub fn verify_primitive(
+        &self,
+        signature: &[u8; BYTES],
+    ) -> Result<[u8; BYTES], Error> {
+        self.raw.apply(signature).ok_or(Error::InvalidSignature)
+    }
+
     /// Checks a PKCS#1 v1.5 signature over `message`.
     pub fn verify_pkcs1<H: DigestInfo>(
         &self,
@@ -316,6 +345,36 @@ impl<const LIMBS: usize, const BYTES: usize, const HALF: usize>
     /// The public half.
     pub fn public_key(&self) -> &PublicKey<LIMBS, BYTES> {
         &self.public
+    }
+
+    /// The RSA signature primitive, RSASP1 of RFC 8017: raises
+    /// `message` to the private exponent, through the primes when
+    /// the key carries them, with no encoding applied.
+    ///
+    /// # This is not signing
+    ///
+    /// The input must already be a message representative that some
+    /// scheme has built; handing raw data here produces something
+    /// that is malleable and forgeable. Use
+    /// [`sign_pss`](Self::sign_pss) or
+    /// [`sign_pkcs1`](Self::sign_pkcs1) unless you are implementing a
+    /// scheme those do not cover, or driving the component test
+    /// suites that exercise the primitive on its own.
+    ///
+    /// Returns [`Error::MessageTooLong`] when the representative is
+    /// at or above the modulus. As everywhere else in the crate, a
+    /// result computed through the primes is checked with the public
+    /// exponent before it is returned.
+    pub fn sign_primitive(
+        &self,
+        message: &[u8; BYTES],
+    ) -> Result<[u8; BYTES], Error> {
+        // The scheme owns this check everywhere else; the primitive
+        // has no scheme above it, so it makes the check itself.
+        if !self.public.raw.in_range(message) {
+            return Err(Error::MessageTooLong);
+        }
+        self.raw.apply(&self.public.raw, message)
     }
 
     /// Signs `message` with PKCS#1 v1.5 padding.
@@ -970,5 +1029,51 @@ mod tests {
         .unwrap();
         let sig = key.sign_pkcs1::<Sha256>(MSG).unwrap();
         assert_eq!(sig, unhex::<128>(V15_1024_SHA256));
+    }
+
+    /// The primitives undo one another, and the private one goes the
+    /// same way with the primes as without.
+    #[test]
+    fn primitives_round_trip() {
+        let key = key2048();
+        let public = key.public_key();
+        let mut m = [0u8; 256];
+        m[0] = 0x01;
+        m[255] = 0x42;
+
+        let s = key.sign_primitive(&m).unwrap();
+        assert_eq!(public.verify_primitive(&s).unwrap(), m);
+        assert_ne!(s, m, "the primitive did nothing");
+
+        assert_eq!(crt_key_2048().sign_primitive(&m).unwrap(), s);
+    }
+
+    /// A representative at or above the modulus is refused by both
+    /// directions, which is the only input either one rejects.
+    #[test]
+    fn primitives_reject_out_of_range() {
+        let key = key2048();
+        let public = key.public_key();
+        let n = unhex::<256>(N2048);
+        assert_eq!(key.sign_primitive(&n), Err(Error::MessageTooLong));
+        assert_eq!(public.verify_primitive(&n), Err(Error::InvalidSignature));
+
+        // One below the modulus is inside the range, so it works.
+        let mut under = n;
+        under[255] -= 1;
+        assert!(key.sign_primitive(&under).is_ok());
+        assert!(public.verify_primitive(&under).is_ok());
+    }
+
+    /// The scheme is built on the primitive, so a PSS signature is
+    /// what the primitive gives for the encoding PSS produced.
+    #[test]
+    fn primitive_underlies_the_scheme() {
+        let key = key2048();
+        let signature = key.sign_pss::<Sha256>(b"a message", &[7; 32]).unwrap();
+        let em = key.public_key().verify_primitive(&signature).unwrap();
+        // The encoded message ends in PSS's trailer byte.
+        assert_eq!(em[255], 0xbc);
+        assert_eq!(key.sign_primitive(&em).unwrap(), signature);
     }
 }

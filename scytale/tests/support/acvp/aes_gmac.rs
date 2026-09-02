@@ -4,14 +4,15 @@
 //! and longer nonces, with cases that must be rejected.
 
 use super::{groups as suite_groups, hex};
-use scytale::cipher::aes::Aes;
 use scytale::cipher::mode::Gcm;
+use scytale::cipher::BlockCipher;
 use scytale::Error;
 
 const FILE: &str = "ACVP-AES-GMAC-1.0/internalProjection.json";
 
-/// Runs the suite; a no-op without the vendored vectors.
-pub fn run() {
+/// Runs the suite against `C`; a no-op without the vendored
+/// vectors.
+pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
     let Some(groups) = suite_groups(FILE, "ACVP-AES-GMAC", "1.0", "AFT") else {
         return;
     };
@@ -21,8 +22,8 @@ pub fn run() {
         let tag_len = group["tagLen"].as_u64().expect("tagLen") as usize / 8;
         for t in group["tests"].as_array().expect("tests") {
             let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
-            let gcm = Gcm::try_new(Aes::try_new(&hex(&t["key"])).expect("key"))
-                .expect("gcm");
+            let key = C::try_new(&hex(&t["key"])).expect("key");
+            let gcm = Gcm::<C>::try_new(key).expect("gcm");
             let nonce = hex(&t["iv"]);
             let aad = hex(&t["aad"]);
             let expected = hex(&t["tag"]);
