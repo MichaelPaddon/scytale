@@ -39,9 +39,9 @@ use core::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::Mac;
+use crate::cipher::Block;
 use crate::hash::sha2;
 use crate::hash::Hash;
-use crate::symmetric::Block;
 use crate::Error;
 
 /// HMAC-SHA-224.

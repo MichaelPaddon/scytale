@@ -43,16 +43,16 @@ use std::time::Duration;
 
 use cpu_time::ThreadTime;
 
+use scytale::cipher::aes::portable;
+use scytale::cipher::chacha20;
+use scytale::cipher::mode::ChaCha20Poly1305;
+use scytale::cipher::mode::{Cbc, Ctr, Gcm, GcmSiv, Xts};
+use scytale::cipher::{aes, Block, BlockCipher};
 use scytale::hash::{sha2, sha3};
 use scytale::hash::{Hash, Xof, XofReader};
 use scytale::mac::hmac::Hmac;
 use scytale::mac::poly1305::Poly1305;
 use scytale::mac::Mac;
-use scytale::symmetric::aes::portable;
-use scytale::symmetric::chacha20;
-use scytale::symmetric::mode::ChaCha20Poly1305;
-use scytale::symmetric::mode::{Cbc, Ctr, Gcm, GcmSiv, Xts};
-use scytale::symmetric::{aes, Block, BlockCipher};
 use scytale::Error;
 
 /// Buffer sizes reported, the ones `openssl speed` uses.
@@ -202,18 +202,18 @@ fn report(options: &Options) -> ExitCode {
     ran |= section::<aes::Aes>("auto", options);
     #[cfg(target_arch = "x86_64")]
     {
-        use scytale::symmetric::aes::x86_64;
+        use scytale::cipher::aes::x86_64;
         ran |= section::<x86_64::vaes::Aes>("vaes", options);
         ran |= section::<x86_64::aesni::Aes>("aesni", options);
     }
     #[cfg(target_arch = "aarch64")]
     {
-        use scytale::symmetric::aes::aarch64;
+        use scytale::cipher::aes::aarch64;
         ran |= section::<aarch64::armv8::Aes>("armv8", options);
     }
     #[cfg(target_arch = "riscv64")]
     {
-        use scytale::symmetric::aes::riscv64;
+        use scytale::cipher::aes::riscv64;
         ran |= section::<riscv64::zvkned::Aes>("zvkned", options);
         ran |= section::<riscv64::zkn::Aes>("zkn", options);
     }

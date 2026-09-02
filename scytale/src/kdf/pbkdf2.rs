@@ -39,10 +39,10 @@
 //! as processors get faster; it is stored beside the salt, so old
 //! keys keep working.
 
+use crate::cipher::Block;
 use crate::hash::Hash;
 use crate::mac::hmac::Hmac;
 use crate::mac::Mac;
-use crate::symmetric::Block;
 use crate::Error;
 
 /// Fills `key` from `password` and `salt` with `iterations` rounds.

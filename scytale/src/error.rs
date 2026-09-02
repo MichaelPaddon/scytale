@@ -8,7 +8,7 @@
 //! whatever a later version adds:
 //!
 //! ```
-//! use scytale::symmetric::aes::Aes;
+//! use scytale::cipher::aes::Aes;
 //! use scytale::Error;
 //!
 //! match Aes::try_new(&[0u8; 7]) {

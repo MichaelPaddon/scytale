@@ -114,7 +114,7 @@ macro_rules! every_aes {
     };
     ($suite:ident, $kind:ident) => {
         use super::*;
-        use scytale::symmetric::aes;
+        use scytale::cipher::aes;
 
         suites!(automatic, aes::Aes, $suite, $kind);
         suites!(portable, aes::portable::Aes, $suite, $kind);

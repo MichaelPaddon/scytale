@@ -1,8 +1,8 @@
 //! ACVP-AES-CFB8 1.0, run through [`Cfb8`] over any block cipher.
 
 use super::{groups as suite_groups, hex};
-use scytale::symmetric::mode::Cfb8;
-use scytale::symmetric::{Block, BlockCipher};
+use scytale::cipher::mode::Cfb8;
+use scytale::cipher::{Block, BlockCipher};
 use serde_json::Value;
 
 /// The IV as the cipher's block type.

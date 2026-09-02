@@ -12,8 +12,8 @@
 //! record them as zero.
 
 use super::{groups as suite_groups, hex};
-use scytale::symmetric::mode::Ctr;
-use scytale::symmetric::{Block, BlockCipher};
+use scytale::cipher::mode::Ctr;
+use scytale::cipher::{Block, BlockCipher};
 use serde_json::Value;
 
 /// The IV as the cipher's block type.

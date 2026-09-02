@@ -6,9 +6,11 @@
 //! Curve25519, shared by X25519 and Ed25519. [`uint`] is an unsigned
 //! integer of any fixed width, and [`montgomery`] the multiplication
 //! and exponentiation modulo an odd number built on it, which is the
-//! arithmetic under RSA.
+//! arithmetic under RSA. [`rsa`] is the key machinery itself,
+//! shared by the RSA signature and key transport schemes.
 
 pub(crate) mod fe25519;
 pub(crate) mod montgomery;
 pub(crate) mod natural;
+pub(crate) mod rsa;
 pub(crate) mod uint;

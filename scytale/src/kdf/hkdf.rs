@@ -44,10 +44,10 @@
 //! kilobytes for SHA-256; a protocol wanting more than that has
 //! something else wrong.
 
+use crate::cipher::Block;
 use crate::hash::Hash;
 use crate::mac::hmac::Hmac;
 use crate::mac::Mac;
-use crate::symmetric::Block;
 use crate::Error;
 
 /// Extracts a pseudorandom key from `ikm` under `salt`, which may be

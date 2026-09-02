@@ -43,7 +43,7 @@
 pub mod hmac;
 pub mod poly1305;
 
-use crate::symmetric::Block;
+use crate::cipher::Block;
 use crate::Error;
 
 /// A message authentication code, computed incrementally.

@@ -66,7 +66,7 @@
 pub mod sha2;
 pub mod sha3;
 
-use crate::symmetric::Block;
+use crate::cipher::Block;
 use crate::Error;
 
 /// A hash function over byte strings, computed incrementally.

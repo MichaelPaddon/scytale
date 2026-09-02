@@ -7,8 +7,8 @@
 //! and nonces of 96 bits and otherwise.
 
 use super::{groups as suite_groups, hex};
-use scytale::symmetric::mode::Gcm;
-use scytale::symmetric::BlockCipher;
+use scytale::cipher::mode::Gcm;
+use scytale::cipher::BlockCipher;
 use scytale::Error;
 use serde_json::Value;
 

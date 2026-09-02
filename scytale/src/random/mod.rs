@@ -101,7 +101,7 @@ use core::fmt;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::symmetric::aes::{Aes, BLOCK_SIZE};
+use crate::cipher::aes::{Aes, BLOCK_SIZE};
 use crate::Error;
 
 pub use source::{External, Processor, System};

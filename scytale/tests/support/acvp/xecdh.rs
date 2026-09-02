@@ -3,7 +3,7 @@
 //! both sides.
 
 use super::{hex, load};
-use scytale::publickey::x25519;
+use scytale::kex::x25519;
 
 /// Runs the suite; a no-op without the vendored vectors.
 pub fn run() {

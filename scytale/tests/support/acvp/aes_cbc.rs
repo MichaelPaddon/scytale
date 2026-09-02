@@ -1,8 +1,8 @@
 //! ACVP-AES-CBC 1.0, run through [`Cbc`] over any block cipher.
 
 use super::{groups as suite_groups, hex};
-use scytale::symmetric::mode::Cbc;
-use scytale::symmetric::{Block, BlockCipher};
+use scytale::cipher::mode::Cbc;
+use scytale::cipher::{Block, BlockCipher};
 use serde_json::Value;
 
 /// The IV as the cipher's block type.

@@ -27,8 +27,8 @@ use core::marker::PhantomData;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::cipher::Block;
 use crate::hash::{BitHash, Hash};
-use crate::symmetric::Block;
 use crate::Error;
 
 /// Keeps the traits here to this crate's own implementations.

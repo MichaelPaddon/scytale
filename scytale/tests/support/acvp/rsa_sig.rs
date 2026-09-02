@@ -11,7 +11,7 @@ use super::{hex, load};
 use scytale::hash::sha2::{Sha224, Sha256, Sha384, Sha512};
 use scytale::hash::sha2::{Sha512_224, Sha512_256};
 use scytale::hash::sha3::{Sha3_224, Sha3_256, Sha3_384, Sha3_512};
-use scytale::publickey::rsa::PublicKey;
+use scytale::sig::rsa::PublicKey;
 use serde_json::Value;
 
 /// Runs one case through the right hash, or `None` for a hash the
@@ -41,7 +41,7 @@ fn verify_one<H, const L: usize, const B: usize>(
     t: &Value,
 ) -> bool
 where
-    H: scytale::publickey::rsa::DigestInfo,
+    H: scytale::sig::rsa::DigestInfo,
 {
     let n = hex(&group["n"]);
     let key =
@@ -124,21 +124,21 @@ fn run(file: &str, mode: &str, has_verdicts: bool) {
     }
 }
 
-fn verify_one_2048<H: scytale::publickey::rsa::DigestInfo>(
+fn verify_one_2048<H: scytale::sig::rsa::DigestInfo>(
     group: &Value,
     t: &Value,
 ) -> bool {
     verify_one::<H, 32, 256>(group, t)
 }
 
-fn verify_one_3072<H: scytale::publickey::rsa::DigestInfo>(
+fn verify_one_3072<H: scytale::sig::rsa::DigestInfo>(
     group: &Value,
     t: &Value,
 ) -> bool {
     verify_one::<H, 48, 384>(group, t)
 }
 
-fn verify_one_4096<H: scytale::publickey::rsa::DigestInfo>(
+fn verify_one_4096<H: scytale::sig::rsa::DigestInfo>(
     group: &Value,
     t: &Value,
 ) -> bool {

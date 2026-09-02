@@ -8,8 +8,8 @@
 //! standard handles separately is covered too.
 
 use super::{groups as suite_groups, hex};
-use scytale::symmetric::mode::Kwp;
-use scytale::symmetric::BlockCipher;
+use scytale::cipher::mode::Kwp;
+use scytale::cipher::BlockCipher;
 use scytale::Error;
 use serde_json::Value;
 

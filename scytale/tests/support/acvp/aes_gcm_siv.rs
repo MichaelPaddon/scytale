@@ -5,8 +5,8 @@
 //! whose tags must be rejected.
 
 use super::{groups as suite_groups, hex};
-use scytale::symmetric::mode::GcmSiv;
-use scytale::symmetric::BlockCipher;
+use scytale::cipher::mode::GcmSiv;
+use scytale::cipher::BlockCipher;
 use scytale::Error;
 use serde_json::Value;
 

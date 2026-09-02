@@ -4,8 +4,8 @@
 //! and longer nonces, with cases that must be rejected.
 
 use super::{groups as suite_groups, hex};
-use scytale::symmetric::aes::Aes;
-use scytale::symmetric::mode::Gcm;
+use scytale::cipher::aes::Aes;
+use scytale::cipher::mode::Gcm;
 use scytale::Error;
 
 const FILE: &str = "ACVP-AES-GMAC-1.0/internalProjection.json";

@@ -86,14 +86,16 @@ And one that wraps no block cipher:
 | --- | --- | --- |
 | ChaCha20-Poly1305 (RFC 8439) | authenticated | GCM's equal; faster without AES hardware |
 
-And the first public-key pieces:
+And the first public-key pieces, under `scytale::sig` (signatures)
+and `scytale::kex` (key establishment). RSA signing and RSA
+encryption keys are distinct types: a key does one job.
 
 | Algorithm | Kind | Notes |
 | --- | --- | --- |
 | X25519 (RFC 7748) | key agreement | shared secret needs HKDF; refuses low-order keys |
 | Ed25519 (RFC 8032) | signatures | deterministic; refuses malleable signatures |
 | RSA-PSS, RSA PKCS#1 v1.5 (RFC 8017) | signatures | any width; CRT signing and key generation |
-| RSA-OAEP (RFC 8017) | encryption | constant-time unpadding; no v1.5 decryption, ever |
+| RSA-OAEP (RFC 8017) | key transport | constant-time unpadding; no v1.5 decryption, ever |
 
 ## Random numbers
 
@@ -222,7 +224,7 @@ so that each processor's own modules can be read, is at
 ## Using it
 
 ```rust
-use scytale::symmetric::aes::Aes;
+use scytale::cipher::aes::Aes;
 
 let aes = Aes::try_new(&key)?;
 
@@ -238,7 +240,7 @@ A mode wraps the cipher. Authenticated encryption returns a tag, and
 decryption checks it before the plaintext is worth anything:
 
 ```rust
-use scytale::symmetric::{aes::Aes, mode::Gcm};
+use scytale::cipher::{aes::Aes, mode::Gcm};
 
 let gcm = Gcm::try_new(Aes::try_new(&key)?)?;
 
@@ -276,7 +278,7 @@ once on first use. Each implementation can also be named directly:
 
 | Type | Uses |
 | --- | --- |
-| `symmetric::aes::Aes` | the best of the below for this processor |
+| `cipher::aes::Aes` | the best of the below for this processor |
 | `aes::x86_64::vaes::Aes` | VAES |
 | `aes::x86_64::aesni::Aes` | AES-NI |
 | `aes::aarch64::armv8::Aes` | ARMv8 cryptography extension |

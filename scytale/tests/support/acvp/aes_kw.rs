@@ -6,8 +6,8 @@
 //! wrapping is refused rather than quietly accepted.
 
 use super::{groups as suite_groups, hex};
-use scytale::symmetric::mode::Kw;
-use scytale::symmetric::BlockCipher;
+use scytale::cipher::mode::Kw;
+use scytale::cipher::BlockCipher;
 use scytale::Error;
 use serde_json::Value;
 

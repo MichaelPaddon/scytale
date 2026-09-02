@@ -5,8 +5,8 @@
 //! decryption cases carry a tag that must be rejected.
 
 use super::{groups as suite_groups, hex};
-use scytale::symmetric::mode::Xpn;
-use scytale::symmetric::BlockCipher;
+use scytale::cipher::mode::Xpn;
+use scytale::cipher::BlockCipher;
 use scytale::Error;
 use serde_json::Value;
 

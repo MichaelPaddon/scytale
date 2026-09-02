@@ -5,8 +5,8 @@
 //! position in that alphabet and back again.
 
 use super::{groups as suite_groups, hex};
-use scytale::symmetric::mode::Ff1;
-use scytale::symmetric::BlockCipher;
+use scytale::cipher::mode::Ff1;
+use scytale::cipher::BlockCipher;
 use serde_json::Value;
 
 const FILE: &str = "ACVP-AES-FF1-1.0/internalProjection.json";

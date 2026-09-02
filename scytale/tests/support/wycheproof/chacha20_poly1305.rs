@@ -5,7 +5,7 @@
 
 use super::super::acvp::hex;
 use super::load;
-use scytale::symmetric::mode::ChaCha20Poly1305;
+use scytale::cipher::mode::ChaCha20Poly1305;
 use scytale::Error;
 
 const FILE: &str = "wycheproof/chacha20_poly1305_test.json";

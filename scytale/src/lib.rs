@@ -10,12 +10,13 @@
 //!
 //! | Module | What is in it |
 //! | --- | --- |
-//! | [`symmetric`] | AES, ChaCha20, and the modes built on them |
+//! | [`cipher`] | AES, ChaCha20, and the modes built on them |
 //! | [`hash`] | the SHA-2 and SHA-3 families, and SHAKE |
 //! | [`mac`] | HMAC over any hash, and Poly1305 |
 //! | [`kdf`] | HKDF and PBKDF2 |
-//! | [`publickey`] | X25519 agreement, Ed25519 signatures, RSA |
+//! | [`kex`] | X25519 agreement, RSA-OAEP key transport |
 //! | [`random`] | a CTR_DRBG generator and the entropy that seeds it |
+//! | [`sig`] | Ed25519 and RSA signatures |
 //! | [`Error`] | the one type every fallible call returns |
 //!
 //! # Example
@@ -25,8 +26,8 @@
 //! use scytale::hash::Hash;
 //! use scytale::kdf::hkdf;
 //! use scytale::mac::hmac::Hmac;
-//! use scytale::symmetric::aes::Aes;
-//! use scytale::symmetric::mode::{Gcm, Nonces};
+//! use scytale::cipher::aes::Aes;
+//! use scytale::cipher::mode::{Gcm, Nonces};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! // A session key, and keys for each job derived from it.
@@ -79,8 +80,8 @@
 //! not in here. No NIST-curve public-key work yet, though X25519,
 //! Ed25519 and RSA have arrived. No allocator, so
 //! every output goes into a buffer the caller supplies. The
-//! format-preserving modes, [`Ff1`](symmetric::mode::Ff1) and
-//! [`Ff3_1`](symmetric::mode::Ff3_1), are not constant time, and say
+//! format-preserving modes, [`Ff1`](cipher::mode::Ff1) and
+//! [`Ff3_1`](cipher::mode::Ff3_1), are not constant time, and say
 //! so.
 //!
 //! # Rust version
@@ -97,14 +98,15 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 mod arch;
+pub mod cipher;
 mod error;
 pub mod hash;
 pub mod kdf;
+pub mod kex;
 pub mod mac;
 mod math;
-pub mod publickey;
 pub mod random;
-pub mod symmetric;
+pub mod sig;
 
 mod util;
 

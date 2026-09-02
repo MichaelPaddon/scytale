@@ -6,8 +6,8 @@
 //! block back.
 
 use super::{groups as suite_groups, hex};
-use scytale::symmetric::mode::Ofb;
-use scytale::symmetric::{Block, BlockCipher};
+use scytale::cipher::mode::Ofb;
+use scytale::cipher::{Block, BlockCipher};
 use serde_json::Value;
 
 /// The IV as the cipher's block type.

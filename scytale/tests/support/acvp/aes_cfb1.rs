@@ -4,8 +4,8 @@
 //! bit of a byte, which is how the mode reads them too.
 
 use super::{groups as suite_groups, hex};
-use scytale::symmetric::mode::Cfb1;
-use scytale::symmetric::{Block, BlockCipher};
+use scytale::cipher::mode::Cfb1;
+use scytale::cipher::{Block, BlockCipher};
 use serde_json::Value;
 
 /// The IV as the cipher's block type.
