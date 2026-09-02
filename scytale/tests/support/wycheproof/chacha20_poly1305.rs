@@ -2,9 +2,16 @@
 //! the valid ones must round-trip, and the invalid ones (wrong tags,
 //! wrong lengths, and ciphertexts built to exercise Poly1305 carries)
 //! must be rejected with the buffer wiped.
+//!
+//! [`run`] drives the whole AEAD, which fixes the backend to the one
+//! the processor picks. [`run_cipher`] takes the same file the other
+//! way round and drives one named backend, so that every keystream
+//! this crate can produce meets external vectors rather than only
+//! the in-module comparison against the portable code.
 
 use super::super::acvp::hex;
 use super::load;
+use scytale::cipher::chacha20::{Backend, Cipher};
 use scytale::cipher::mode::ChaCha20Poly1305;
 use scytale::Error;
 
@@ -67,4 +74,62 @@ pub fn run() {
     }
     assert!(valid >= 200, "only {valid} valid cases");
     assert!(invalid >= 50, "only {invalid} invalid cases");
+}
+
+/// Runs the keystream of every valid case under backend `B`, which
+/// `what` names for the skip message; a no-op without the vendored
+/// vectors.
+///
+/// The AEAD takes its Poly1305 key from block zero and encrypts from
+/// block one, so a valid case's ciphertext is its message xored with
+/// the keystream from block one. That is the whole of what a backend
+/// contributes to the AEAD: Poly1305 has no backends, and the
+/// framing around it is the same code whichever keystream runs
+/// underneath.
+///
+/// Block zero is not reachable this way, since only the tag depends
+/// on it. It is covered for the processor's chosen backend by [`run`]
+/// checking the tag, and for the others by the in-module comparison
+/// against the portable keystream.
+pub fn run_cipher<B: Backend>(what: &str) {
+    let Some(doc) = load(FILE, "CHACHA20-POLY1305") else {
+        return;
+    };
+    // Asked once rather than per case, and reported: a silent skip
+    // would look like a pass.
+    match Cipher::<B>::try_new(&[0u8; 32]) {
+        Ok(_) => {}
+        Err(Error::NotSupported) => {
+            eprintln!("{what} not available; skipping");
+            return;
+        }
+        Err(e) => panic!("{e}"),
+    }
+
+    let mut cases = 0;
+    for group in doc["testGroups"].as_array().expect("testGroups") {
+        // The nonce length is the AEAD's business, not the cipher's.
+        if group["ivSize"] != 96 {
+            continue;
+        }
+        for t in group["tests"].as_array().expect("tests") {
+            // Only a valid case has a ciphertext that is its message
+            // under the keystream; the rest are forgeries.
+            if t["result"] != "valid" {
+                continue;
+            }
+            let tag = format!("tcId {}: {}", t["tcId"], t["comment"]);
+            let cipher = Cipher::<B>::try_new(&hex(&t["key"])).expect("key");
+            let nonce: [u8; 12] = hex(&t["iv"]).try_into().expect("nonce");
+            let msg = hex(&t["msg"]);
+
+            let mut data = msg.clone();
+            cipher.encrypt(&nonce, 1, &mut data).expect("encrypt");
+            assert_eq!(data, hex(&t["ct"]), "{tag} ciphertext");
+            cipher.decrypt(&nonce, 1, &mut data).expect("decrypt");
+            assert_eq!(data, msg, "{tag} plaintext");
+            cases += 1;
+        }
+    }
+    assert!(cases >= 200, "only {cases} cases under {what}");
 }

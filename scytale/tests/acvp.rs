@@ -816,17 +816,46 @@ mod pbkdf2 {
     }
 }
 
+/// One ChaCha20 backend against the keystream Wycheproof's cases
+/// imply, which is what a backend can get wrong.
+macro_rules! chacha20_backend {
+    ($name:ident, $backend:ty, $what:literal) => {
+        mod $name {
+            use super::*;
+
+            #[test]
+            fn wycheproof_keystream() {
+                support::wycheproof::chacha20_poly1305::run_cipher::<$backend>(
+                    $what,
+                );
+            }
+        }
+    };
+}
+
 /// ChaCha20-Poly1305 (RFC 8439), through Project Wycheproof's cases:
-/// there is no ACVP suite for it. The automatic type is what runs;
-/// every ChaCha20 backend is checked against the portable one in
-/// the unit tests.
+/// there is no ACVP suite for it. The whole AEAD runs under the
+/// backend the processor picks, and each backend runs the keystream
+/// those same cases imply.
 mod chacha20_poly1305 {
     use super::*;
+    use scytale::cipher::chacha20;
 
     #[test]
     fn wycheproof() {
         support::wycheproof::chacha20_poly1305::run();
     }
+
+    chacha20_backend!(portable, chacha20::portable::Portable, "portable");
+
+    #[cfg(target_arch = "x86_64")]
+    chacha20_backend!(avx2, chacha20::x86_64::Avx2, "AVX2");
+
+    #[cfg(target_arch = "aarch64")]
+    chacha20_backend!(neon, chacha20::aarch64::Neon, "NEON");
+
+    #[cfg(target_arch = "riscv64")]
+    chacha20_backend!(zvbb, chacha20::riscv64::Zvbb, "RISC-V vectors");
 }
 
 /// Key agreement: X25519, through ACVP's shared-secret and key
