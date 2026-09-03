@@ -3,7 +3,9 @@
 //! A signature binds a message to the holder of a key. [`ed25519`]
 //! is the scheme to pick unless a protocol names another; [`ecdsa`]
 //! over P-256 and P-384 and [`rsa`] with PSS and PKCS#1 v1.5 padding
-//! cover the protocols and certificates that ask for them by name.
+//! cover the protocols and certificates that ask for them by name;
+//! [`ml_dsa`] is the post-quantum choice, with keys and signatures
+//! of a few kilobytes.
 //!
 //! ```
 //! use scytale::random::{Random, Rng, System};
@@ -29,4 +31,5 @@
 
 pub mod ecdsa;
 pub mod ed25519;
+pub mod ml_dsa;
 pub mod rsa;

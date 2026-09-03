@@ -471,6 +471,42 @@ pub(crate) fn write_pkcs8_with(
     })
 }
 
+/// Which forms of a private key a PKCS#8 carried, for the
+/// post-quantum schemes whose keys the IETF LAMPS profiles write as
+/// a CHOICE: `[0]` the seed alone, an OCTET STRING the expanded key
+/// alone, or a SEQUENCE of both.
+pub(crate) struct SeedOrExpanded<'a> {
+    pub(crate) seed: Option<&'a [u8]>,
+    pub(crate) expanded: Option<&'a [u8]>,
+}
+
+pub(crate) fn read_seed_or_expanded(
+    der: &[u8],
+) -> Result<SeedOrExpanded<'_>, Error> {
+    let mut outer = Reader::new(der);
+    let forms = if let Some(seed) = outer.optional(context_primitive(0))? {
+        SeedOrExpanded {
+            seed: Some(seed),
+            expanded: None,
+        }
+    } else if let Some(mut both) = outer.optional_sequence()? {
+        let seed = both.element(context_primitive(0))?;
+        let expanded = both.octet_string()?;
+        both.end()?;
+        SeedOrExpanded {
+            seed: Some(seed),
+            expanded: Some(expanded),
+        }
+    } else {
+        SeedOrExpanded {
+            seed: None,
+            expanded: Some(outer.octet_string()?),
+        }
+    };
+    outer.end()?;
+    Ok(forms)
+}
+
 /// The width of an RFC 8410 curve key, secret or public.
 const CURVE_KEY: usize = 32;
 

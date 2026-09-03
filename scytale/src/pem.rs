@@ -84,6 +84,21 @@ pub(crate) fn encode(label: &str, der: &[u8], out: &mut [u8]) -> usize {
     n
 }
 
+/// [`encode`] with the size check made: `der` as a block under
+/// `label` into the front of `out`, or [`Error::OutputTooSmall`]
+/// with the length it needs.
+pub(crate) fn write(
+    label: &str,
+    der: &[u8],
+    out: &mut [u8],
+) -> Result<usize, Error> {
+    let needed = encoded_len(label, der.len());
+    if out.len() < needed {
+        return Err(Error::OutputTooSmall(needed));
+    }
+    Ok(encode(label, der, out))
+}
+
 /// Reads one PEM block whose label is one of `labels`, decoding
 /// the DER into the front of `out`. Returns which label it was, as
 /// an index into `labels`, and the DER's length. A block whose DER

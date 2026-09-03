@@ -18,7 +18,7 @@
 //! | [`kex`] | X25519 and ECDH key agreement |
 //! | [`pke`] | RSA-OAEP public-key encryption |
 //! | [`random`] | a CTR_DRBG generator and the entropy that seeds it |
-//! | [`sig`] | Ed25519, ECDSA and RSA signatures |
+//! | [`sig`] | Ed25519, ECDSA, ML-DSA and RSA signatures |
 //! | [`Error`] | the one type every fallible call returns |
 //!
 //! # Example

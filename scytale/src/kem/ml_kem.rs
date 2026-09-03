@@ -55,10 +55,8 @@
 
 use zeroize::Zeroize;
 
-use crate::der::{self, Reader};
 use crate::hash::sha3::{Sha3_256, Sha3_512, Shake128, Shake256};
 use crate::hash::{Hash, Xof, XofReader};
-use crate::pem;
 use crate::util;
 use crate::Error;
 
@@ -641,53 +639,13 @@ const SCRATCH: usize = 4096;
 const PRIVATE_LABEL: &str = "PRIVATE KEY";
 const PUBLIC_LABEL: &str = "PUBLIC KEY";
 
-/// Which of the private key's forms a PKCS#8 carried.
-struct PrivateForms<'a> {
-    seed: Option<&'a [u8]>,
-    expanded: Option<&'a [u8]>,
-}
-
-/// The `ML-KEM-PrivateKey` CHOICE: `[0]` a seed, an OCTET STRING an
-/// expanded key, a SEQUENCE both.
-fn read_private_forms(der: &[u8]) -> Result<PrivateForms<'_>, Error> {
-    let mut outer = Reader::new(der);
-    let forms = if let Some(seed) = outer.optional(der::context_primitive(0))? {
-        PrivateForms {
-            seed: Some(seed),
-            expanded: None,
-        }
-    } else if let Some(mut both) = outer.optional_sequence()? {
-        let seed = both.element(der::context_primitive(0))?;
-        let expanded = both.octet_string()?;
-        both.end()?;
-        PrivateForms {
-            seed: Some(seed),
-            expanded: Some(expanded),
-        }
-    } else {
-        PrivateForms {
-            seed: None,
-            expanded: Some(outer.octet_string()?),
-        }
-    };
-    outer.end()?;
-    Ok(forms)
-}
-
-fn to_pem(label: &str, der: &[u8], out: &mut [u8]) -> Result<usize, Error> {
-    let needed = pem::encoded_len(label, der.len());
-    if out.len() < needed {
-        return Err(Error::OutputTooSmall(needed));
-    }
-    Ok(pem::encode(label, der, out))
-}
-
 /// One parameter set's public types.
 macro_rules! parameter_set {
     ($k:literal, $arc:literal, $name:literal) => {
         use zeroize::Zeroize;
 
-        use crate::kem::ml_kem::{self, params, PrivateForms};
+        use crate::der::SeedOrExpanded;
+        use crate::kem::ml_kem::{self, params};
         use crate::random::Random;
         use crate::Error;
 
@@ -843,8 +801,8 @@ macro_rules! parameter_set {
                 if algorithm.oid != OID || !algorithm.params.is_empty() {
                     return Err(Error::InvalidEncoding);
                 }
-                let PrivateForms { seed, expanded } =
-                    ml_kem::read_private_forms(info.private_key)?;
+                let SeedOrExpanded { seed, expanded } =
+                    crate::der::read_seed_or_expanded(info.private_key)?;
                 let key = match (seed, expanded) {
                     (Some(seed), expanded) => {
                         let seed: &[u8; SEED_SIZE] = seed
@@ -902,7 +860,7 @@ macro_rules! parameter_set {
                 let label = ml_kem::PRIVATE_LABEL;
                 let result = self
                     .der_bytes(&mut der)
-                    .and_then(|n| ml_kem::to_pem(label, &der[..n], out));
+                    .and_then(|n| crate::pem::write(label, &der[..n], out));
                 der.zeroize();
                 result
             }
@@ -976,7 +934,7 @@ macro_rules! parameter_set {
             pub fn pem_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
                 let mut der = [0u8; ml_kem::SCRATCH];
                 let n = self.der_bytes(&mut der)?;
-                ml_kem::to_pem(ml_kem::PUBLIC_LABEL, &der[..n], out)
+                crate::pem::write(ml_kem::PUBLIC_LABEL, &der[..n], out)
             }
         }
     };
@@ -1000,6 +958,7 @@ pub mod ml_kem_1024 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::der;
 
     /// The transform inverts, and the transform-domain product is
     /// the schoolbook product modulo x^256 + 1.

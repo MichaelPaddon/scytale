@@ -23,6 +23,7 @@ pub mod eddsa;
 pub mod hmac;
 pub mod kda_hkdf;
 pub mod kts_ifc;
+pub mod ml_dsa;
 pub mod ml_kem;
 pub mod pbkdf;
 pub mod rsa_primitive;
