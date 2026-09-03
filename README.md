@@ -11,7 +11,7 @@ encryption, Ed25519 and RSA signatures, and random numbers.
 
 **Correct.** Every implementation is checked against the standard
 test vectors and against the NIST Automated Cryptographic Validation
-Program (ACVP) vectors: 53,913 one-shot cases and 3600 Monte Carlo
+Program (ACVP) vectors: 54,183 one-shot cases and 3600 Monte Carlo
 steps, the latter being 3.6 million chained cipher calls with the key
 re-derived at each step. Each case runs against every implementation
 the processor supports, not just one. Every implementation is also
@@ -50,6 +50,7 @@ the machinery behind it:
 | `hash` | digests | SHA-2, SHA-3, SHAKE |
 | `mac` | message authentication | HMAC, Poly1305 |
 | `kdf` | key derivation | HKDF, PBKDF2 |
+| `kem` | key encapsulation | ML-KEM-512, -768 and -1024 |
 | `kex` | key agreement | X25519, ECDH over P-256 and P-384 |
 | `pke` | public-key encryption | RSA-OAEP |
 | `sig` | signatures | Ed25519, ECDSA over P-256 and P-384, RSA-PSS, RSA PKCS#1 v1.5 |
@@ -131,13 +132,14 @@ define them.
 | HKDF (RFC 5869) | over any hash; from a secret that is already random |
 | PBKDF2 (SP 800-132) | over any hash; from a password |
 
-### Key agreement, public-key encryption and signatures
+### Key encapsulation, key agreement, public-key encryption and signatures
 
-Three jobs, three modules. RSA does two of them, and its signing and
+Four jobs, four modules. RSA does two of them, and its signing and
 encryption keys are distinct types: a key does one job.
 
 | Algorithm | Module | Notes |
 | --- | --- | --- |
+| ML-KEM (FIPS 203), all three sets | `kem` | post-quantum; implicit rejection; seed and expanded keys |
 | X25519 (RFC 7748) | `kex` | shared secret needs HKDF; refuses low-order keys |
 | ECDH (SP 800-56A) over P-256, P-384 | `kex` | every public key checked on the curve; compressed points read |
 | RSA-OAEP (RFC 8017) | `pke` | constant-time unpadding; no v1.5 decryption, ever |
@@ -401,9 +403,9 @@ to keep it small. Building and using the library never needs them;
 running the tests from a downloaded crate skips those suites and
 leaves the standards' own vectors, which are built into the unit
 tests, as the check. The public-key algorithms run against both:
-ACVP's RSA, KTS-IFC, ECDSA, EDDSA, XECDH and KDA suites, and
-Wycheproof's ECDH, ECDSA, X25519, Ed25519, RSA signature and RSA-OAEP
-files, whose deliberately twisted cases are the point. The
+ACVP's ML-KEM, RSA, KTS-IFC, ECDSA, EDDSA, XECDH and KDA suites, and
+Wycheproof's ML-KEM, ECDH, ECDSA, X25519, Ed25519, RSA signature and
+RSA-OAEP files, whose deliberately twisted cases are the point. The
 deterministic ECDSA suite checks signatures byte for byte, since RFC
 6979 fixes the nonce. RSA is the one algorithm whose raw
 primitives NIST publishes vectors for, and those run too: they are the

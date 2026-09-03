@@ -14,6 +14,7 @@
 //! | [`hash`] | the SHA-2 and SHA-3 families, and SHAKE |
 //! | [`mac`] | HMAC over any hash, and Poly1305 |
 //! | [`kdf`] | HKDF and PBKDF2 |
+//! | [`kem`] | ML-KEM key encapsulation |
 //! | [`kex`] | X25519 and ECDH key agreement |
 //! | [`pke`] | RSA-OAEP public-key encryption |
 //! | [`random`] | a CTR_DRBG generator and the entropy that seeds it |
@@ -107,6 +108,7 @@ mod der;
 mod error;
 pub mod hash;
 pub mod kdf;
+pub mod kem;
 pub mod kex;
 pub mod mac;
 mod math;

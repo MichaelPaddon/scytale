@@ -41,7 +41,7 @@ pub(crate) const fn context(n: u8) -> u8 {
 
 /// The tag of a primitive context-specific element, `[n] IMPLICIT`
 /// over a primitive type.
-const fn context_primitive(n: u8) -> u8 {
+pub(crate) const fn context_primitive(n: u8) -> u8 {
     0x80 | n
 }
 
@@ -76,7 +76,7 @@ impl<'a> Reader<'a> {
     }
 
     /// The contents of the next element, which must carry `tag`.
-    fn element(&mut self, tag: u8) -> Result<&'a [u8], Error> {
+    pub(crate) fn element(&mut self, tag: u8) -> Result<&'a [u8], Error> {
         if self.peek() != Some(tag) {
             return Err(Error::InvalidEncoding);
         }
@@ -104,6 +104,13 @@ impl<'a> Reader<'a> {
 
     pub(crate) fn sequence(&mut self) -> Result<Reader<'a>, Error> {
         self.element(SEQUENCE).map(Reader::new)
+    }
+
+    /// A SEQUENCE when one is next, for a CHOICE that has one arm.
+    pub(crate) fn optional_sequence(
+        &mut self,
+    ) -> Result<Option<Reader<'a>>, Error> {
+        Ok(self.optional(SEQUENCE)?.map(Reader::new))
     }
 
     /// A non-negative INTEGER as its big-endian magnitude, with the
@@ -248,7 +255,8 @@ impl Writer<'_> {
         self.raw(&bytes[skip..]);
     }
 
-    fn primitive(&mut self, tag: u8, contents: &[u8]) {
+    /// A primitive element of any tag.
+    pub(crate) fn primitive(&mut self, tag: u8, contents: &[u8]) {
         self.header(tag, contents.len());
         self.raw(contents);
     }

@@ -890,6 +890,27 @@ mod kex {
     }
 }
 
+/// Key encapsulation: ML-KEM, through ACVP's keyGen and encapDecap
+/// suites and Project Wycheproof's malformed keys and ciphertexts.
+mod kem {
+    use super::*;
+
+    #[test]
+    fn wycheproof_ml_kem() {
+        support::wycheproof::ml_kem::run();
+    }
+
+    #[test]
+    fn acvp_ml_kem_key_gen() {
+        support::acvp::ml_kem::run_key_gen();
+    }
+
+    #[test]
+    fn acvp_ml_kem_encap_decap() {
+        support::acvp::ml_kem::run_encap_decap();
+    }
+}
+
 /// Public-key encryption: RSA-OAEP, through ACVP's key transport
 /// suite and Project Wycheproof's decryption cases, with the raw
 /// decryption primitive beside them.
