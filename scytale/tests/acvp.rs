@@ -928,8 +928,8 @@ mod pke {
     }
 }
 
-/// Signatures: ECDSA, Ed25519, ML-DSA and RSA, through ACVP and
-/// Project Wycheproof.
+/// Signatures: ECDSA, Ed25519, ML-DSA, SLH-DSA and RSA, through ACVP
+/// and Project Wycheproof.
 ///
 /// ACVP RSA keyGen is deliberately absent: its vectors replay a
 /// seeded candidate stream, and `generate` draws from a live random
@@ -965,6 +965,29 @@ mod sig {
     #[test]
     fn acvp_ml_dsa_sig_ver() {
         support::acvp::ml_dsa::run_sig_ver();
+    }
+
+    #[test]
+    fn acvp_slh_dsa_key_gen() {
+        support::acvp::slh_dsa::run_key_gen();
+    }
+
+    /// One signature per group, every set and both modes; the whole
+    /// file is a minute of hashing and runs under `test-extended`.
+    #[test]
+    fn acvp_slh_dsa_sig_gen() {
+        support::acvp::slh_dsa::run_sig_gen(false);
+    }
+
+    #[test]
+    #[ignore]
+    fn acvp_slh_dsa_sig_gen_all() {
+        support::acvp::slh_dsa::run_sig_gen(true);
+    }
+
+    #[test]
+    fn acvp_slh_dsa_sig_ver() {
+        support::acvp::slh_dsa::run_sig_ver();
     }
 
     #[test]

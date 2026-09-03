@@ -18,7 +18,7 @@
 //! | [`kex`] | X25519 and ECDH key agreement |
 //! | [`pke`] | RSA-OAEP public-key encryption |
 //! | [`random`] | a CTR_DRBG generator and the entropy that seeds it |
-//! | [`sig`] | Ed25519, ECDSA, ML-DSA and RSA signatures |
+//! | [`sig`] | Ed25519, ECDSA, ML-DSA, SLH-DSA and RSA signatures |
 //! | [`Error`] | the one type every fallible call returns |
 //!
 //! # Example
@@ -79,9 +79,7 @@
 //! # Non-goals
 //!
 //! No protocols: TLS, SSH and their kin are built on these pieces,
-//! not in here. No post-quantum schemes yet; the classical set is
-//! complete, with X25519, Ed25519, RSA and the NIST curves P-256
-//! and P-384. No allocator, so every output goes into a buffer the
+//! not in here. No allocator, so every output goes into a buffer the
 //! caller supplies. The
 //! format-preserving modes, [`Ff1`](cipher::mode::Ff1) and
 //! [`Ff3_1`](cipher::mode::Ff3_1), are not constant time, and say

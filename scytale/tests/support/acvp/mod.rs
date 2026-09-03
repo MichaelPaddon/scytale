@@ -30,6 +30,7 @@ pub mod rsa_primitive;
 pub mod rsa_sig;
 pub mod sha;
 pub mod shake;
+pub mod slh_dsa;
 pub mod xecdh;
 
 use serde_json::Value;

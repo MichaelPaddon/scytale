@@ -5,7 +5,8 @@
 //! over P-256 and P-384 and [`rsa`] with PSS and PKCS#1 v1.5 padding
 //! cover the protocols and certificates that ask for them by name;
 //! [`ml_dsa`] is the post-quantum choice, with keys and signatures
-//! of a few kilobytes.
+//! of a few kilobytes, and [`slh_dsa`] the conservative one, resting
+//! on hashes alone at the price of signatures ten times larger.
 //!
 //! ```
 //! use scytale::random::{Random, Rng, System};
@@ -33,3 +34,4 @@ pub mod ecdsa;
 pub mod ed25519;
 pub mod ml_dsa;
 pub mod rsa;
+pub mod slh_dsa;

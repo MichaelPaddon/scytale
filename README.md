@@ -11,7 +11,7 @@ encryption, Ed25519 and RSA signatures, and random numbers.
 
 **Correct.** Every implementation is checked against the standard
 test vectors and against the NIST Automated Cryptographic Validation
-Program (ACVP) vectors: 54,483 one-shot cases and 3600 Monte Carlo
+Program (ACVP) vectors: 54,939 one-shot cases and 3600 Monte Carlo
 steps, the latter being 3.6 million chained cipher calls with the key
 re-derived at each step. Each case runs against every implementation
 the processor supports, not just one. Every implementation is also
@@ -53,7 +53,7 @@ the machinery behind it:
 | `kem` | key encapsulation | ML-KEM-512, -768 and -1024 |
 | `kex` | key agreement | X25519, ECDH over P-256 and P-384 |
 | `pke` | public-key encryption | RSA-OAEP |
-| `sig` | signatures | Ed25519, ECDSA over P-256 and P-384, ML-DSA-44, -65 and -87, RSA-PSS, RSA PKCS#1 v1.5 |
+| `sig` | signatures | Ed25519, ECDSA over P-256 and P-384, ML-DSA, SLH-DSA, RSA-PSS, RSA PKCS#1 v1.5 |
 | `random` | random numbers | CTR_DRBG over AES-256, and what seeds it |
 
 ### Ciphers
@@ -147,6 +147,7 @@ encryption keys are distinct types: a key does one job.
 | ECDSA (FIPS 186-5) over P-256, P-384 | `sig` | RFC 6979 nonces; r \|\| s and DER signature forms |
 | RSA-PSS, RSA PKCS#1 v1.5 (RFC 8017) | `sig` | any width; CRT signing and key generation |
 | ML-DSA (FIPS 204), all three sets | `sig` | post-quantum; hedged or deterministic; context strings |
+| SLH-DSA (FIPS 205), all twelve sets | `sig` | post-quantum, hash-based; hedged or deterministic; context strings |
 | RSA primitives (RFC 8017) | `sig`, `pke` | raw, unpadded; for building schemes and for validation |
 
 Every key reads and writes the formats other software stores it in:
@@ -404,10 +405,10 @@ to keep it small. Building and using the library never needs them;
 running the tests from a downloaded crate skips those suites and
 leaves the standards' own vectors, which are built into the unit
 tests, as the check. The public-key algorithms run against both:
-ACVP's ML-KEM, ML-DSA, RSA, KTS-IFC, ECDSA, EDDSA, XECDH and KDA
-suites, and Wycheproof's ML-KEM, ML-DSA, ECDH, ECDSA, X25519, Ed25519,
-RSA signature and RSA-OAEP files, whose deliberately twisted cases
-are the point. The
+ACVP's ML-KEM, ML-DSA, SLH-DSA, RSA, KTS-IFC, ECDSA, EDDSA, XECDH and
+KDA suites, and Wycheproof's ML-KEM, ML-DSA, ECDH, ECDSA, X25519,
+Ed25519, RSA signature and RSA-OAEP files, whose deliberately twisted
+cases are the point. The
 deterministic ECDSA suite checks signatures byte for byte, since RFC
 6979 fixes the nonce. RSA is the one algorithm whose raw
 primitives NIST publishes vectors for, and those run too: they are the
