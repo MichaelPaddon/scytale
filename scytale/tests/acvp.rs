@@ -705,6 +705,19 @@ macro_rules! every_hmac {
     };
 }
 
+/// HMAC (FIPS 198-1) over SHA-1, which has one implementation.
+mod hmac_sha1 {
+    use super::*;
+    use scytale::hash::sha1;
+
+    hmac_suite!(
+        automatic,
+        sha1::Sha1,
+        "HMAC-SHA-1-1.0/internalProjection.json",
+        "HMAC-SHA-1"
+    );
+}
+
 /// HMAC (FIPS 198-1) over each SHA-2 variant.
 mod hmac_sha2_224 {
     every_hmac!(

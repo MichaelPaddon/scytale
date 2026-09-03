@@ -114,57 +114,69 @@ use crate::Error;
 
 /// A hash that PKCS#1 v1.5 can name: one with a DER `DigestInfo`
 /// prefix. All the SHA-2 and SHA-3 digests have one, under the one
-/// NIST arc; PSS needs no such name and takes any [`Hash`].
+/// NIST arc, and SHA-1 has its own for verifying what was signed
+/// before it was withdrawn; PSS needs no such name and takes any
+/// [`Hash`].
 pub trait DigestInfo: Hash {
-    /// The final byte of the OID 2.16.840.1.101.3.4.2.x.
-    const OID: u8;
+    /// The DER in front of the digest: two SEQUENCEs, the algorithm's
+    /// OID, a NULL, and the OCTET STRING header.
+    const PREFIX: &'static [u8];
+}
+
+/// The 19-byte prefix of a digest under 2.16.840.1.101.3.4.2.x.
+macro_rules! nist_prefix {
+    ($oid:literal, $len:literal) => {
+        &[
+            0x30,
+            0x11 + $len,
+            0x30,
+            0x0d,
+            0x06,
+            0x09,
+            0x60,
+            0x86,
+            0x48,
+            0x01,
+            0x65,
+            0x03,
+            0x04,
+            0x02,
+            $oid,
+            0x05,
+            0x00,
+            0x04,
+            $len,
+        ]
+    };
 }
 
 macro_rules! digest_info {
-    ($($hash:ty => $oid:expr,)*) => {
+    ($($hash:ty => $oid:literal, $len:literal;)*) => {
         $(impl DigestInfo for $hash {
-            const OID: u8 = $oid;
+            const PREFIX: &'static [u8] = nist_prefix!($oid, $len);
         })*
     };
 }
 
 digest_info! {
-    crate::hash::sha2::Sha224 => 4,
-    crate::hash::sha2::Sha256 => 1,
-    crate::hash::sha2::Sha384 => 2,
-    crate::hash::sha2::Sha512 => 3,
-    crate::hash::sha2::Sha512_224 => 5,
-    crate::hash::sha2::Sha512_256 => 6,
-    crate::hash::sha3::Sha3_224 => 7,
-    crate::hash::sha3::Sha3_256 => 8,
-    crate::hash::sha3::Sha3_384 => 9,
-    crate::hash::sha3::Sha3_512 => 10,
+    crate::hash::sha2::Sha224 => 4, 28;
+    crate::hash::sha2::Sha256 => 1, 32;
+    crate::hash::sha2::Sha384 => 2, 48;
+    crate::hash::sha2::Sha512 => 3, 64;
+    crate::hash::sha2::Sha512_224 => 5, 28;
+    crate::hash::sha2::Sha512_256 => 6, 32;
+    crate::hash::sha3::Sha3_224 => 7, 28;
+    crate::hash::sha3::Sha3_256 => 8, 32;
+    crate::hash::sha3::Sha3_384 => 9, 48;
+    crate::hash::sha3::Sha3_512 => 10, 64;
 }
 
-/// The 19 bytes of DER in front of the digest: two SEQUENCEs, the
-/// algorithm's OID, a NULL, and the OCTET STRING header.
-fn digest_info_prefix(oid: u8, digest_len: usize) -> [u8; 19] {
-    [
-        0x30,
-        0x11 + digest_len as u8,
-        0x30,
-        0x0d,
-        0x06,
-        0x09,
-        0x60,
-        0x86,
-        0x48,
-        0x01,
-        0x65,
-        0x03,
-        0x04,
-        0x02,
-        oid,
-        0x05,
-        0x00,
-        0x04,
-        digest_len as u8,
-    ]
+impl DigestInfo for crate::hash::sha1::Sha1 {
+    // 1.3.14.3.2.26, under the old OIW arc.
+    const PREFIX: &'static [u8] = &[
+        0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05,
+        0x00, 0x04, 0x14,
+    ];
 }
 
 /// An RSA verification key of `LIMBS` 64-bit words; `BYTES` is the
@@ -629,7 +641,7 @@ fn encode_pkcs1<H: DigestInfo, const BYTES: usize>(
     em: &mut [u8; BYTES],
 ) -> Result<(), Error> {
     let digest = H::digest(message)?;
-    let t_len = 19 + H::Output::SIZE;
+    let t_len = H::PREFIX.len() + H::Output::SIZE;
     if BYTES < t_len + 11 {
         // The key is too narrow for this digest.
         return Err(Error::InvalidKeyLength(BYTES));
@@ -638,8 +650,7 @@ fn encode_pkcs1<H: DigestInfo, const BYTES: usize>(
     em[1] = 0x01;
     em[2..BYTES - t_len - 1].fill(0xff);
     em[BYTES - t_len - 1] = 0x00;
-    let prefix = digest_info_prefix(H::OID, H::Output::SIZE);
-    em[BYTES - t_len..BYTES - H::Output::SIZE].copy_from_slice(&prefix);
+    em[BYTES - t_len..BYTES - H::Output::SIZE].copy_from_slice(H::PREFIX);
     em[BYTES - H::Output::SIZE..].copy_from_slice(digest.as_ref());
     Ok(())
 }

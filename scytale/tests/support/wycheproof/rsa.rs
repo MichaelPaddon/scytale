@@ -12,6 +12,7 @@
 
 use super::super::acvp::hex;
 use super::load;
+use scytale::hash::sha1::Sha1;
 use scytale::hash::sha2::{Sha256, Sha512};
 use scytale::hash::Hash;
 use scytale::pke::rsa::PrivateKey;
@@ -44,6 +45,14 @@ pub fn run() {
     );
     pss::<Sha512, 64, 512>(
         "wycheproof/rsa_pss_4096_sha512_mgf1_32_test.json",
+        &mut c,
+    );
+    pss::<Sha1, 32, 256>(
+        "wycheproof/rsa_pss_2048_sha1_mgf1_20_test.json",
+        &mut c,
+    );
+    oaep::<Sha1, 32, 256, 16>(
+        "wycheproof/rsa_oaep_2048_sha1_mgf1sha1_test.json",
         &mut c,
     );
     oaep::<Sha256, 32, 256, 16>(

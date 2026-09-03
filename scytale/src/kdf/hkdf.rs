@@ -115,8 +115,7 @@ mod tests {
         out
     }
 
-    // RFC 5869 appendix A. Cases 4 to 6 use SHA-1, which the crate
-    // does not have yet.
+    // RFC 5869 appendix A; cases 4 to 7 use SHA-1.
 
     #[test]
     fn rfc5869_case_1() {
@@ -172,6 +171,75 @@ mod tests {
             hex::<42>(
                 "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c7\
                  38d2d9d201395faa4b61a96c8"
+            )
+        );
+    }
+
+    #[test]
+    fn rfc5869_case_4() {
+        use crate::hash::sha1::Sha1;
+        let ikm = [0x0b; 11];
+        let salt = hex::<13>("000102030405060708090a0b0c");
+        let info = hex::<10>("f0f1f2f3f4f5f6f7f8f9");
+        let prk = extract::<Sha1>(&salt, &ikm).unwrap();
+        assert_eq!(prk, hex::<20>("9b6c18c432a7bf8f0e71c8eb88f4b30baa2ba243"));
+        let mut okm = [0u8; 42];
+        expand::<Sha1>(&prk, &info, &mut okm).unwrap();
+        assert_eq!(
+            okm,
+            hex::<42>(
+                "085a01ea1b10f36933068b56efa5ad81a4f14b822f5b091568a9cdd4f15\
+                 5fda2c22e422478d305f3f896"
+            )
+        );
+    }
+
+    #[test]
+    fn rfc5869_case_5() {
+        use crate::hash::sha1::Sha1;
+        let ikm: [u8; 80] = core::array::from_fn(|i| i as u8);
+        let salt: [u8; 80] = core::array::from_fn(|i| 0x60 + i as u8);
+        let info: [u8; 80] = core::array::from_fn(|i| 0xb0 + i as u8);
+        let mut okm = [0u8; 82];
+        derive::<Sha1>(&salt, &ikm, &info, &mut okm).unwrap();
+        assert_eq!(
+            okm,
+            hex::<82>(
+                "0bd770a74d1160f7c9f12cd5912a06ebff6adcae899d92191fe4305673b\
+                 a2ffe8fa3f1a4e5ad79f3f334b3b202b2173c486ea37ce3d397ed034c7f\
+                 9dfeb15c5e927336d0441f4c4300e2cff0d0900b52d3b4"
+            )
+        );
+    }
+
+    #[test]
+    fn rfc5869_case_6() {
+        use crate::hash::sha1::Sha1;
+        let ikm = [0x0b; 22];
+        let mut okm = [0u8; 42];
+        derive::<Sha1>(&[], &ikm, &[], &mut okm).unwrap();
+        assert_eq!(
+            okm,
+            hex::<42>(
+                "0ac1af7002b3d761d1e55298da9d0506b9ae52057220a306e07b6b87e8d\
+                 f21d0ea00033de03984d34918"
+            )
+        );
+    }
+
+    /// Case 7: no salt at all, which the RFC defines as a salt of
+    /// zeros the hash's length, the same as an empty one here.
+    #[test]
+    fn rfc5869_case_7() {
+        use crate::hash::sha1::Sha1;
+        let ikm = [0x0c; 22];
+        let mut okm = [0u8; 42];
+        derive::<Sha1>(&[], &ikm, &[], &mut okm).unwrap();
+        assert_eq!(
+            okm,
+            hex::<42>(
+                "2c91117204d745f3500d636a62f64f0ab3bae548aa53d423b0d1f27ebba\
+                 6f5e5673a081d70cce7acfc48"
             )
         );
     }

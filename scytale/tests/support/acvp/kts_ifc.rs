@@ -11,8 +11,8 @@
 //! That still leaves a real test. The mode is `noKdfKc`, so the
 //! transported secret is the derived keying material itself with no
 //! derivation step in between, and each case hands over the whole
-//! private key of whichever party decrypts. The groups using SHA-1
-//! for OAEP are skipped, leaving the two under SHA-512.
+//! private key of whichever party decrypts. Two groups use SHA-1 for
+//! OAEP and two SHA-512; all four run.
 //!
 //! One of those two carries an associated-data pattern, which is the
 //! OAEP label: `l` as four big-endian bytes, then the initiator's
@@ -21,7 +21,9 @@
 //! initiator group.
 
 use super::{hex, load};
+use scytale::hash::sha1::Sha1;
 use scytale::hash::sha2::Sha512;
+use scytale::hash::Hash;
 use scytale::pke::rsa::Rsa2048PrivateKey;
 use serde_json::Value;
 
@@ -44,7 +46,7 @@ fn skip_reason(group: &Value) -> Option<String> {
         ));
     }
     let kts = &group["ktsConfiguration"];
-    if kts["hashAlg"] != "SHA2-512" {
+    if kts["hashAlg"] != "SHA2-512" && kts["hashAlg"] != "SHA-1" {
         return Some(format!("OAEP under {}", kts["hashAlg"]));
     }
     if group["modulo"] != 2048 {
@@ -82,6 +84,16 @@ fn label(group: &Value, t: &Value) -> Vec<u8> {
     out.extend_from_slice(&hex(v));
     out.extend_from_slice(&hex(&t["ktsParameter"]["label"]));
     out
+}
+
+fn decrypt<H: Hash>(
+    key: &Rsa2048PrivateKey,
+    label: &[u8],
+    ciphertext: &[u8; 256],
+    out: &mut [u8; 256],
+) -> usize {
+    key.decrypt_oaep::<H>(label, ciphertext, out)
+        .expect("decrypt")
 }
 
 /// Runs the suite; a no-op without the vendored vectors.
@@ -124,9 +136,11 @@ pub fn run() {
 
             let label = label(group, t);
             let mut out = [0u8; 256];
-            let len = key
-                .decrypt_oaep::<Sha512>(&label, &ciphertext, &mut out)
-                .expect("decrypt");
+            let len = if group["ktsConfiguration"]["hashAlg"] == "SHA-1" {
+                decrypt::<Sha1>(&key, &label, &ciphertext, &mut out)
+            } else {
+                decrypt::<Sha512>(&key, &label, &ciphertext, &mut out)
+            };
             assert_eq!(len * 8, bits, "{tag} length");
             assert_eq!(out[..len], hex(&t[expected])[..], "{tag}");
             // With no derivation step the transported key is the

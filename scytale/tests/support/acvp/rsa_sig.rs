@@ -9,10 +9,11 @@
 //!
 //! The 186-4 file is worth running beside 186-5 for its 1024-bit
 //! groups, a width 186-5 no longer offers. Its ANSI X9.31 groups are
-//! skipped, that encoding not being implemented, as are its SHA-1
+//! skipped, that encoding not being implemented, as are its SHAKE
 //! groups.
 
 use super::{hex, load};
+use scytale::hash::sha1::Sha1;
 use scytale::hash::sha2::{Sha224, Sha256, Sha384, Sha512};
 use scytale::hash::sha2::{Sha512_224, Sha512_256};
 use scytale::hash::sha3::{Sha3_224, Sha3_256, Sha3_384, Sha3_512};
@@ -35,7 +36,8 @@ macro_rules! dispatch_hash {
             "SHA3-384" => Some($run::<Sha3_384>($($arg),*)),
             "SHA3-512" => Some($run::<Sha3_512>($($arg),*)),
             // SHA-1 appears only in the 186-4 file.
-            "SHAKE-128" | "SHAKE-256" | "SHA-1" => None,
+            "SHA-1" => Some($run::<Sha1>($($arg),*)),
+            "SHAKE-128" | "SHAKE-256" => None,
             other => panic!("unknown hash {other}"),
         }
     };
@@ -142,7 +144,7 @@ fn run(
                 other => panic!("unknown modulus {other}"),
             };
             let Some(accepted) = accepted else {
-                continue; // a SHAKE or SHA-1 group
+                continue; // a SHAKE group
             };
             let should_pass = if has_verdicts {
                 t["testPassed"].as_bool().expect("testPassed")

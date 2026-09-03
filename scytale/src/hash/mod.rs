@@ -54,6 +54,11 @@
 //! when the length is the caller's to decide. Without hardware for
 //! it (only AArch64 has any) SHA-3 costs more per byte than SHA-2.
 //!
+//! [`sha1`] is not a choice at all. It is broken for collisions and
+//! is here only so that the protocols and formats that still name it
+//! can be spoken: HMAC-SHA-1, HKDF over it, OAEP's default mask
+//! function. Its own documentation says why at greater length.
+//!
 //! # Not a MAC
 //!
 //! Hashing a secret key followed by a message does not make a message
@@ -63,6 +68,7 @@
 //! but a construction that is only safe with one family is a trap
 //! for the next reader. Use HMAC.
 
+pub mod sha1;
 pub mod sha2;
 pub mod sha3;
 

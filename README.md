@@ -11,7 +11,7 @@ encryption, Ed25519 and RSA signatures, and random numbers.
 
 **Correct.** Every implementation is checked against the standard
 test vectors and against the NIST Automated Cryptographic Validation
-Program (ACVP) vectors: 54,939 one-shot cases and 3600 Monte Carlo
+Program (ACVP) vectors: 56,078 one-shot cases and 3600 Monte Carlo
 steps, the latter being 3.6 million chained cipher calls with the key
 re-derived at each step. Each case runs against every implementation
 the processor supports, not just one. Every implementation is also
@@ -47,7 +47,7 @@ the machinery behind it:
 | Module | Job | Algorithms |
 | --- | --- | --- |
 | `cipher` | encryption | AES, ChaCha20, and the modes built on them |
-| `hash` | digests | SHA-2, SHA-3, SHAKE |
+| `hash` | digests | SHA-2, SHA-3, SHAKE; SHA-1 for what still names it |
 | `mac` | message authentication | HMAC, Poly1305 |
 | `kdf` | key derivation | HKDF, PBKDF2 |
 | `kem` | key encapsulation | ML-KEM-512, -768 and -1024 |
@@ -114,6 +114,7 @@ too.
 | SHA-512/224, SHA-512/256 | 28, 32 bytes | truncated; no length extension |
 | SHA3-224 to SHA3-512 (FIPS 202) | 28 to 64 bytes | no length extension |
 | SHAKE128, SHAKE256 | any length | extendable output |
+| SHA-1 (FIPS 180-4) | 20 bytes | broken for collisions; for HMAC, HKDF and OAEP in old protocols only |
 
 All of them take bit strings as well as bytes, as the standards
 define them.

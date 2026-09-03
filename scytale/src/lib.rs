@@ -11,7 +11,7 @@
 //! | Module | What is in it |
 //! | --- | --- |
 //! | [`cipher`] | AES, ChaCha20, and the modes built on them |
-//! | [`hash`] | the SHA-2 and SHA-3 families, and SHAKE |
+//! | [`hash`] | the SHA-2 and SHA-3 families, SHAKE, and SHA-1 for old protocols |
 //! | [`mac`] | HMAC over any hash, and Poly1305 |
 //! | [`kdf`] | HKDF and PBKDF2 |
 //! | [`kem`] | ML-KEM key encapsulation |
