@@ -32,7 +32,7 @@ const ALPHABET: &[u8; 64] =
 
 /// The length [`encode`] writes for a DER of `der_len` bytes under
 /// `label`.
-pub(crate) fn encoded_len(label: &str, der_len: usize) -> usize {
+pub(crate) const fn encoded_len(label: &str, der_len: usize) -> usize {
     let base64 = der_len.div_ceil(3) * 4;
     let lines = base64.div_ceil(LINE);
     BEGIN.len()

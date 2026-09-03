@@ -1,9 +1,9 @@
 //! Signatures: made with a secret key, checked with a public one.
 //!
 //! A signature binds a message to the holder of a key. [`ed25519`]
-//! is the scheme to pick unless a protocol names another; [`rsa`]
-//! covers the protocols and certificates that ask for it by name,
-//! with PSS and PKCS#1 v1.5 padding.
+//! is the scheme to pick unless a protocol names another; [`ecdsa`]
+//! over P-256 and P-384 and [`rsa`] with PSS and PKCS#1 v1.5 padding
+//! cover the protocols and certificates that ask for them by name.
 //!
 //! ```
 //! use scytale::random::{Random, Rng, System};
@@ -27,5 +27,6 @@
 //! # }
 //! ```
 
+pub mod ecdsa;
 pub mod ed25519;
 pub mod rsa;

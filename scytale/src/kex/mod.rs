@@ -1,8 +1,11 @@
 //! Key agreement: both parties contribute a key pair and derive the
 //! same secret, one that neither of them chose.
 //!
-//! The scheme here is [`x25519`]. When one side must instead pick
-//! the secret and encrypt it to the other, that is public-key
+//! [`x25519`] is the scheme to pick unless a protocol names another;
+//! [`ecdh`] over P-256 and P-384 covers the protocols and
+//! certificates that ask for the NIST curves by name. When one side
+//! must instead pick the secret and encrypt it to the other, that is
+//! public-key
 //! encryption, under [`pke`](crate::pke); when the post-quantum
 //! encapsulation schemes land they will sit beside these in a
 //! module of their own.
@@ -31,4 +34,5 @@
 //! # }
 //! ```
 
+pub mod ecdh;
 pub mod x25519;

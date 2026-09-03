@@ -859,12 +859,20 @@ mod chacha20_poly1305 {
 }
 
 /// Key agreement: X25519, through ACVP's shared-secret and key
-/// generation suites and Project Wycheproof's edge cases.
+/// generation suites and Project Wycheproof's edge cases, and ECDH,
+/// through Wycheproof alone: ACVP's KAS-ECC sample files hold only
+/// the binary curves, and the ECDSA keyGen and keyVer suites cover
+/// the same key handling.
 ///
 /// ACVP's XECDH keyVer suite is not here; [`support::acvp::xecdh`]
 /// says why.
 mod kex {
     use super::*;
+
+    #[test]
+    fn wycheproof_ecdh() {
+        support::wycheproof::ecdh::run();
+    }
 
     #[test]
     fn wycheproof_x25519() {
@@ -899,7 +907,8 @@ mod pke {
     }
 }
 
-/// Signatures: Ed25519 and RSA, through ACVP and Project Wycheproof.
+/// Signatures: ECDSA, Ed25519 and RSA, through ACVP and Project
+/// Wycheproof.
 ///
 /// ACVP RSA keyGen is deliberately absent: its vectors replay a
 /// seeded candidate stream, and `generate` draws from a live random
@@ -908,8 +917,38 @@ mod sig {
     use super::*;
 
     #[test]
+    fn wycheproof_ecdsa() {
+        support::wycheproof::ecdsa::run();
+    }
+
+    #[test]
     fn wycheproof_ed25519() {
         support::wycheproof::ed25519::run();
+    }
+
+    #[test]
+    fn acvp_ecdsa_key_gen() {
+        support::acvp::ecdsa::run_key_gen();
+    }
+
+    #[test]
+    fn acvp_ecdsa_key_ver() {
+        support::acvp::ecdsa::run_key_ver();
+    }
+
+    #[test]
+    fn acvp_ecdsa_sig_ver() {
+        support::acvp::ecdsa::run_sig_ver();
+    }
+
+    #[test]
+    fn acvp_ecdsa_sig_gen_answers() {
+        support::acvp::ecdsa::run_sig_gen();
+    }
+
+    #[test]
+    fn acvp_ecdsa_det_sig_gen() {
+        support::acvp::ecdsa::run_det_sig_gen();
     }
 
     #[test]

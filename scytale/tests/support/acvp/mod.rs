@@ -18,6 +18,7 @@ pub mod aes_ofb;
 pub mod aes_xpn;
 pub mod aes_xts;
 pub mod ctr_drbg;
+pub mod ecdsa;
 pub mod eddsa;
 pub mod hmac;
 pub mod kda_hkdf;

@@ -14,10 +14,10 @@
 //! | [`hash`] | the SHA-2 and SHA-3 families, and SHAKE |
 //! | [`mac`] | HMAC over any hash, and Poly1305 |
 //! | [`kdf`] | HKDF and PBKDF2 |
-//! | [`kex`] | X25519 key agreement |
+//! | [`kex`] | X25519 and ECDH key agreement |
 //! | [`pke`] | RSA-OAEP public-key encryption |
 //! | [`random`] | a CTR_DRBG generator and the entropy that seeds it |
-//! | [`sig`] | Ed25519 and RSA signatures |
+//! | [`sig`] | Ed25519, ECDSA and RSA signatures |
 //! | [`Error`] | the one type every fallible call returns |
 //!
 //! # Example
@@ -78,9 +78,10 @@
 //! # Non-goals
 //!
 //! No protocols: TLS, SSH and their kin are built on these pieces,
-//! not in here. No NIST-curve public-key work yet, though X25519,
-//! Ed25519 and RSA have arrived. No allocator, so
-//! every output goes into a buffer the caller supplies. The
+//! not in here. No post-quantum schemes yet; the classical set is
+//! complete, with X25519, Ed25519, RSA and the NIST curves P-256
+//! and P-384. No allocator, so every output goes into a buffer the
+//! caller supplies. The
 //! format-preserving modes, [`Ff1`](cipher::mode::Ff1) and
 //! [`Ff3_1`](cipher::mode::Ff3_1), are not constant time, and say
 //! so. The raw RSA primitives are offered, for building a scheme the

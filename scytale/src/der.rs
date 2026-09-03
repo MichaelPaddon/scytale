@@ -35,7 +35,7 @@ const OBJECT_IDENTIFIER: u8 = 0x06;
 const SEQUENCE: u8 = 0x30;
 
 /// The tag of a constructed context-specific element, `[n]`.
-const fn context(n: u8) -> u8 {
+pub(crate) const fn context(n: u8) -> u8 {
     0xa0 | n
 }
 
@@ -91,7 +91,10 @@ impl<'a> Reader<'a> {
 
     /// [`element`](Self::element) when the next tag is `tag`, and
     /// `None` when it is anything else, for OPTIONAL fields.
-    fn optional(&mut self, tag: u8) -> Result<Option<&'a [u8]>, Error> {
+    pub(crate) fn optional(
+        &mut self,
+        tag: u8,
+    ) -> Result<Option<&'a [u8]>, Error> {
         if self.peek() == Some(tag) {
             self.element(tag).map(Some)
         } else {
@@ -298,6 +301,22 @@ impl Writer<'_> {
         self.primitive(OBJECT_IDENTIFIER, contents);
     }
 
+    pub(crate) fn octet_string(&mut self, contents: &[u8]) {
+        self.primitive(OCTET_STRING, contents);
+    }
+
+    /// A BIT STRING of whole bytes.
+    pub(crate) fn bit_string(&mut self, contents: &[u8]) {
+        self.header(BIT_STRING, contents.len() + 1);
+        self.raw(&[0]);
+        self.raw(contents);
+    }
+
+    /// A constructed `[n]` element around what `body` writes.
+    pub(crate) fn context(&mut self, n: u8, body: impl Fn(&mut Writer)) {
+        self.wrapped(context(n), &[], body);
+    }
+
     pub(crate) fn null(&mut self) {
         self.primitive(NULL, &[]);
     }
@@ -329,13 +348,13 @@ fn algorithm<'a>(reader: &mut Reader<'a>) -> Result<Algorithm<'a>, Error> {
     })
 }
 
+/// The body of an AlgorithmIdentifier that is an OID and, when
+/// `null`, a NULL.
 fn algorithm_identifier(w: &mut Writer, oid: &[u8], null: bool) {
-    w.sequence(|w| {
-        w.oid(oid);
-        if null {
-            w.null();
-        }
-    });
+    w.oid(oid);
+    if null {
+        w.null();
+    }
 }
 
 /// A whole SubjectPublicKeyInfo: its algorithm and the bytes of its
@@ -358,9 +377,20 @@ pub(crate) fn write_spki(
     null: bool,
     key: impl Fn(&mut Writer),
 ) -> Result<usize, Error> {
+    write_spki_with(out, |w| algorithm_identifier(w, oid, null), key)
+}
+
+/// [`write_spki`] with the AlgorithmIdentifier's body written by
+/// `algorithm`, for the algorithms whose parameters are more than
+/// a NULL.
+pub(crate) fn write_spki_with(
+    out: &mut [u8],
+    algorithm: impl Fn(&mut Writer),
+    key: impl Fn(&mut Writer),
+) -> Result<usize, Error> {
     encode(out, |w| {
         w.sequence(|w| {
-            algorithm_identifier(w, oid, null);
+            w.sequence(&algorithm);
             w.bit_string_of(&key);
         })
     })
@@ -414,10 +444,20 @@ pub(crate) fn write_pkcs8(
     null: bool,
     key: impl Fn(&mut Writer),
 ) -> Result<usize, Error> {
+    write_pkcs8_with(out, |w| algorithm_identifier(w, oid, null), key)
+}
+
+/// [`write_pkcs8`] with the AlgorithmIdentifier's body written by
+/// `algorithm`.
+pub(crate) fn write_pkcs8_with(
+    out: &mut [u8],
+    algorithm: impl Fn(&mut Writer),
+    key: impl Fn(&mut Writer),
+) -> Result<usize, Error> {
     encode(out, |w| {
         w.sequence(|w| {
             w.integer(&[0]);
-            algorithm_identifier(w, oid, null);
+            w.sequence(&algorithm);
             w.octet_string_of(&key);
         })
     })
@@ -769,7 +809,7 @@ mod tests {
         let n = encode(&mut out, |w| {
             w.sequence(|w| {
                 w.integer(&[1]);
-                algorithm_identifier(w, &ED25519, false);
+                w.sequence(|w| algorithm_identifier(w, &ED25519, false));
                 w.octet_string_of(|w| {
                     w.wrapped(OCTET_STRING, &[], |w| w.raw(&secret))
                 });

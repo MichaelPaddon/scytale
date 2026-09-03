@@ -3,6 +3,8 @@
 //! inputs, and messages built to trip carries.
 
 pub mod chacha20_poly1305;
+pub mod ecdh;
+pub mod ecdsa;
 pub mod ed25519;
 pub mod rsa;
 pub mod x25519;
