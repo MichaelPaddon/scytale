@@ -35,7 +35,9 @@
 //! part way through a byte. [`Error::InvalidPublicKey`],
 //! [`Error::InvalidPrivateKey`] and [`Error::InvalidSignature`] come
 //! only from the public-key algorithms, and say deliberately
-//! little.
+//! little. [`Error::InvalidEncoding`] comes only from reading a key
+//! in DER or PEM, and says as little: the bytes are not the
+//! structure the call reads.
 
 use core::fmt;
 
@@ -109,6 +111,10 @@ pub enum Error {
     /// Deliberately says no more than that; which check failed would
     /// help an attacker.
     InvalidSignature,
+    /// The bytes are not the DER or PEM structure the call reads:
+    /// malformed, truncated, followed by trailing data, wrongly
+    /// labelled, or encoding a different algorithm.
+    InvalidEncoding,
     /// The processor lacks the instructions this implementation needs.
     NotSupported,
     /// The system would not supply random bytes. The number is the
@@ -182,6 +188,9 @@ impl fmt::Display for Error {
             Error::InvalidSignature => {
                 write!(f, "invalid signature")
             }
+            Error::InvalidEncoding => {
+                write!(f, "invalid encoding")
+            }
             Error::NotSupported => {
                 write!(f, "not supported by this processor")
             }
@@ -245,6 +254,10 @@ mod tests {
         assert_eq!(
             render(Error::DecryptionFailed, &mut buf),
             "decryption failed"
+        );
+        assert_eq!(
+            render(Error::InvalidEncoding, &mut buf),
+            "invalid encoding"
         );
         assert_eq!(
             render(Error::NotSupported, &mut buf),

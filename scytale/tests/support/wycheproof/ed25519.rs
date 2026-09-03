@@ -2,6 +2,9 @@
 //! [`ed25519::verify`]: signature malleability, truncated and
 //! padded signatures, wrong-length keys, and edge-case points. The
 //! valid cases must verify and every other must fail.
+//!
+//! Each group's key also comes in DER and PEM, which is the external
+//! check that the RFC 8410 public key encoding reads and writes.
 
 use super::super::acvp::hex;
 use super::load;
@@ -20,6 +23,12 @@ pub fn run() {
         let key = &group["publicKey"];
         assert_eq!(key["curve"], "edwards25519");
         let public: [u8; 32] = hex(&key["pk"]).try_into().expect("pk");
+        let der = hex(&group["publicKeyDer"]);
+        let pem = group["publicKeyPem"].as_str().expect("publicKeyPem");
+        assert_eq!(ed25519::public_key_from_der(&der), Ok(public));
+        assert_eq!(ed25519::public_key_from_pem(pem.as_bytes()), Ok(public));
+        assert_eq!(ed25519::public_key_der(&public)[..], der[..]);
+        assert_eq!(&ed25519::public_key_pem(&public)[..], pem.as_bytes());
         for t in group["tests"].as_array().expect("tests") {
             let tag = format!("tcId {}: {}", t["tcId"], t["comment"]);
             let message = hex(&t["msg"]);

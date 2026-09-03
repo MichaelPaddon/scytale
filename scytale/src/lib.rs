@@ -102,12 +102,14 @@
 
 mod arch;
 pub mod cipher;
+mod der;
 mod error;
 pub mod hash;
 pub mod kdf;
 pub mod kex;
 pub mod mac;
 mod math;
+mod pem;
 pub mod pke;
 pub mod random;
 pub mod sig;

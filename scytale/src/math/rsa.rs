@@ -9,9 +9,11 @@
 use zeroize::Zeroize;
 
 use crate::cipher::Block;
+use crate::der::{self, Algorithm, Reader, Writer};
 use crate::hash::Hash;
 use crate::math::montgomery::Montgomery;
 use crate::math::uint::Uint;
+use crate::pem;
 use crate::random::Random;
 use crate::Error;
 
@@ -363,6 +365,256 @@ impl<const LIMBS: usize, const BYTES: usize, const HALF: usize>
         crt.dq.to_be_bytes(dq);
         crt.qinv.to_be_bytes(qinv);
         Ok(())
+    }
+}
+
+/// The PEM labels a public key may come under, SubjectPublicKeyInfo
+/// first, then the bare RSAPublicKey; the order is the one the
+/// importers match on.
+const PUBLIC_LABELS: [&str; 2] = ["PUBLIC KEY", "RSA PUBLIC KEY"];
+
+/// The same for a private key: PrivateKeyInfo, then RSAPrivateKey.
+const PRIVATE_LABELS: [&str; 2] = ["PRIVATE KEY", "RSA PRIVATE KEY"];
+
+/// Whether an AlgorithmIdentifier names an RSA key: `rsaEncryption`
+/// with no parameters to speak of, or, when `pss` allows it,
+/// `id-RSASSA-PSS` with whatever it carries, which constrains the
+/// scheme rather than the key and is not read.
+fn rsa_algorithm(algorithm: &Algorithm, pss: bool) -> Result<(), Error> {
+    let ok = (algorithm.oid == der::RSA_ENCRYPTION && algorithm.no_params())
+        || (pss && algorithm.oid == der::RSASSA_PSS);
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::InvalidEncoding)
+    }
+}
+
+/// `der` as a PEM block under `label`, into the front of `out`.
+fn to_pem(label: &str, der: &[u8], out: &mut [u8]) -> Result<usize, Error> {
+    let needed = pem::encoded_len(label, der.len());
+    if out.len() < needed {
+        return Err(Error::OutputTooSmall(needed));
+    }
+    Ok(pem::encode(label, der, out))
+}
+
+impl<const LIMBS: usize, const BYTES: usize> Public<LIMBS, BYTES> {
+    /// The RSAPublicKey structure of RFC 8017 A.1.1.
+    pub(crate) fn from_pkcs1(der: &[u8]) -> Result<Self, Error> {
+        let mut outer = Reader::new(der);
+        let mut key = outer.sequence()?;
+        outer.end()?;
+        let n = key.integer()?;
+        let e = key.integer()?;
+        key.end()?;
+        Self::try_new(n, e)
+    }
+
+    /// A SubjectPublicKeyInfo around one; `pss` says whether the
+    /// PSS-only algorithm is accepted beside `rsaEncryption`.
+    pub(crate) fn from_spki(der: &[u8], pss: bool) -> Result<Self, Error> {
+        let (algorithm, key) = der::read_spki(der)?;
+        rsa_algorithm(&algorithm, pss)?;
+        Self::from_pkcs1(key)
+    }
+
+    fn write_pkcs1(&self, w: &mut Writer) {
+        let n = self.modulus_bytes();
+        let e = self.exponent_bytes();
+        w.sequence(|w| {
+            w.integer(&n);
+            w.integer(&e);
+        });
+    }
+
+    pub(crate) fn pkcs1_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        der::encode(out, |w| self.write_pkcs1(w))
+    }
+
+    pub(crate) fn spki_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        der::write_spki(out, der::RSA_ENCRYPTION, true, |w| self.write_pkcs1(w))
+    }
+
+    /// Either DER form from a PEM block, told apart by its label.
+    pub(crate) fn from_pem(pem: &[u8], pss: bool) -> Result<Self, Error> {
+        // Room for any SubjectPublicKeyInfo of this width.
+        let mut buf = [[0u8; BYTES]; 4];
+        let der = buf.as_flattened_mut();
+        let (form, n) = pem::decode(&PUBLIC_LABELS, pem, der)?;
+        match form {
+            0 => Self::from_spki(&der[..n], pss),
+            _ => Self::from_pkcs1(&der[..n]),
+        }
+    }
+
+    /// The key as a PEM block, around the bare RSAPublicKey when
+    /// `pkcs1` and the SubjectPublicKeyInfo otherwise.
+    pub(crate) fn pem_bytes(
+        &self,
+        out: &mut [u8],
+        pkcs1: bool,
+    ) -> Result<usize, Error> {
+        let mut buf = [[0u8; BYTES]; 4];
+        let der = buf.as_flattened_mut();
+        let (label, n) = if pkcs1 {
+            (PUBLIC_LABELS[1], self.pkcs1_bytes(der)?)
+        } else {
+            (PUBLIC_LABELS[0], self.spki_bytes(der)?)
+        };
+        to_pem(label, &der[..n], out)
+    }
+}
+
+/// Every integer of an RSAPrivateKey as bytes, ready to write. The
+/// Chinese remainder parts use the first half of each row. Wiped
+/// on drop, since all but `n` and `e` are secret.
+#[derive(Zeroize, zeroize::ZeroizeOnDrop)]
+struct Parts<const BYTES: usize> {
+    n: [u8; BYTES],
+    e: [u8; 8],
+    d: [u8; BYTES],
+    crt: [[u8; BYTES]; 5],
+}
+
+impl<const LIMBS: usize, const BYTES: usize, const HALF: usize>
+    Private<LIMBS, BYTES, HALF>
+{
+    /// The RSAPrivateKey structure of RFC 8017 A.1.2, with the
+    /// public half it carries. The structure holds the primes, so
+    /// every key read this way is a CRT key.
+    pub(crate) fn from_pkcs1(
+        der: &[u8],
+    ) -> Result<(Public<LIMBS, BYTES>, Self), Error> {
+        let mut outer = Reader::new(der);
+        let mut key = outer.sequence()?;
+        outer.end()?;
+        // Version 0 is a two-prime key. Version 1 is multi-prime,
+        // which nothing here handles.
+        if key.integer()? != [0] {
+            return Err(Error::InvalidEncoding);
+        }
+        let n = key.integer()?;
+        let e = key.integer()?;
+        let d = key.integer()?;
+        let p = key.integer()?;
+        let q = key.integer()?;
+        let dp = key.integer()?;
+        let dq = key.integer()?;
+        let qinv = key.integer()?;
+        key.end()?;
+        let public = Public::try_new(n, e)?;
+        let private = Self::try_new_crt(&public, d, p, q, dp, dq, qinv)?;
+        Ok((public, private))
+    }
+
+    /// A PKCS#8 PrivateKeyInfo around one; `pss` as for
+    /// [`Public::from_spki`].
+    pub(crate) fn from_pkcs8(
+        der: &[u8],
+        pss: bool,
+    ) -> Result<(Public<LIMBS, BYTES>, Self), Error> {
+        let info = der::read_pkcs8(der)?;
+        rsa_algorithm(&info.algorithm, pss)?;
+        Self::from_pkcs1(info.private_key)
+    }
+
+    /// The integers to write, which needs the CRT parts: the
+    /// structure has no place for their absence.
+    fn parts(
+        &self,
+        public: &Public<LIMBS, BYTES>,
+    ) -> Result<Parts<BYTES>, Error> {
+        let mut parts = Parts {
+            n: public.modulus_bytes(),
+            e: public.exponent_bytes(),
+            d: self.d_bytes(),
+            crt: [[0u8; BYTES]; 5],
+        };
+        let half = BYTES / 2;
+        let [p, q, dp, dq, qinv] = &mut parts.crt;
+        self.crt_bytes(
+            &mut p[..half],
+            &mut q[..half],
+            &mut dp[..half],
+            &mut dq[..half],
+            &mut qinv[..half],
+        )?;
+        Ok(parts)
+    }
+
+    fn write_pkcs1(parts: &Parts<BYTES>, w: &mut Writer) {
+        w.sequence(|w| {
+            w.integer(&[0]);
+            w.integer(&parts.n);
+            w.integer(&parts.e);
+            w.integer(&parts.d);
+            for part in &parts.crt {
+                w.integer(&part[..BYTES / 2]);
+            }
+        });
+    }
+
+    pub(crate) fn pkcs1_bytes(
+        &self,
+        public: &Public<LIMBS, BYTES>,
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        let parts = self.parts(public)?;
+        der::encode(out, |w| Self::write_pkcs1(&parts, w))
+    }
+
+    pub(crate) fn pkcs8_bytes(
+        &self,
+        public: &Public<LIMBS, BYTES>,
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        let parts = self.parts(public)?;
+        der::write_pkcs8(out, der::RSA_ENCRYPTION, true, |w| {
+            Self::write_pkcs1(&parts, w)
+        })
+    }
+
+    /// Either DER form from a PEM block, told apart by its label.
+    pub(crate) fn from_pem(
+        pem: &[u8],
+        pss: bool,
+    ) -> Result<(Public<LIMBS, BYTES>, Self), Error> {
+        // Room for any PrivateKeyInfo of this width.
+        let mut buf = [[0u8; BYTES]; 8];
+        let der = buf.as_flattened_mut();
+        let result =
+            pem::decode(&PRIVATE_LABELS, pem, der).and_then(|(form, n)| {
+                match form {
+                    0 => Self::from_pkcs8(&der[..n], pss),
+                    _ => Self::from_pkcs1(&der[..n]),
+                }
+            });
+        buf.zeroize();
+        result
+    }
+
+    /// The key as a PEM block, around the bare RSAPrivateKey when
+    /// `pkcs1` and the PrivateKeyInfo otherwise.
+    pub(crate) fn pem_bytes(
+        &self,
+        public: &Public<LIMBS, BYTES>,
+        out: &mut [u8],
+        pkcs1: bool,
+    ) -> Result<usize, Error> {
+        let mut buf = [[0u8; BYTES]; 8];
+        let der = buf.as_flattened_mut();
+        let encoded = if pkcs1 {
+            self.pkcs1_bytes(public, der)
+                .map(|n| (PRIVATE_LABELS[1], n))
+        } else {
+            self.pkcs8_bytes(public, der)
+                .map(|n| (PRIVATE_LABELS[0], n))
+        };
+        let result =
+            encoded.and_then(|(label, n)| to_pem(label, &der[..n], out));
+        buf.zeroize();
+        result
     }
 }
 

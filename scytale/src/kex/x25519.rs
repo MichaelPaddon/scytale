@@ -10,6 +10,13 @@
 //! The shared secret is a curve point, not a uniform string: feed it
 //! to [`hkdf`](crate::kdf::hkdf) to make keys, never use it as one.
 //!
+//! Keys are 32 bytes each way, and travel in the RFC 8410 forms
+//! everything else stores them in: a secret key as PKCS#8 through
+//! [`secret_from_der`] and [`secret_der`], a public key as
+//! `SubjectPublicKeyInfo` through [`public_key_from_der`] and
+//! [`public_key_der`], and either in PEM through the `_pem`
+//! functions beside those.
+//!
 //! # Constant time
 //!
 //! The scalar multiplication is a Montgomery ladder: the same two
@@ -28,6 +35,7 @@
 
 use zeroize::Zeroize;
 
+use crate::der;
 use crate::math::fe25519::Fe;
 use crate::Error;
 
@@ -135,6 +143,95 @@ pub fn x25519(k: &[u8; KEY_SIZE], u: &[u8; KEY_SIZE]) -> [u8; KEY_SIZE] {
     x3.zeroize();
     z3.zeroize();
     out
+}
+
+/// The length of a secret key's DER encoding, a PKCS#8
+/// `PrivateKeyInfo` (RFC 8410 section 7).
+pub const DER_SIZE: usize = 48;
+
+/// The length of a public key's DER encoding, a
+/// `SubjectPublicKeyInfo` (RFC 8410 section 4).
+pub const PUBLIC_KEY_DER_SIZE: usize = 44;
+
+/// The length of a secret key's PEM encoding, a `PRIVATE KEY` block.
+pub const PEM_SIZE: usize = 119;
+
+/// The length of a public key's PEM encoding, a `PUBLIC KEY` block.
+pub const PUBLIC_KEY_PEM_SIZE: usize = 113;
+
+/// A secret key from its DER PKCS#8 `PrivateKeyInfo`, the form under
+/// `PRIVATE KEY` in a PEM file, which RFC 8410 fixes for X25519: the
+/// 32 bytes in an OCTET STRING of their own inside the one PKCS#8
+/// provides. A version 1 structure that also carries the public key
+/// is read, and refused when that key is not the secret's, since a
+/// pair that disagrees has been corrupted. Anything else that is not
+/// this structure under `id-X25519`, the other curve's key
+/// included, is [`Error::InvalidEncoding`].
+pub fn secret_from_der(der: &[u8]) -> Result<[u8; KEY_SIZE], Error> {
+    let (secret, carried) = der::curve_secret_from_der(&der::X25519, der)?;
+    checked(secret, carried)
+}
+
+/// The secret a structure carried, once the public key it may
+/// have carried beside it is checked to be the secret's own: a pair
+/// that disagrees has been corrupted, and neither half is returned.
+fn checked(
+    mut secret: [u8; KEY_SIZE],
+    carried: Option<[u8; KEY_SIZE]>,
+) -> Result<[u8; KEY_SIZE], Error> {
+    if let Some(carried) = carried {
+        if carried != public_key(&secret) {
+            secret.zeroize();
+            return Err(Error::InvalidEncoding);
+        }
+    }
+    Ok(secret)
+}
+
+/// The secret key's DER encoding, a version 0 `PrivateKeyInfo`. The
+/// output is a secret, to be wiped when done.
+pub fn secret_der(secret: &[u8; KEY_SIZE]) -> [u8; DER_SIZE] {
+    der::curve_secret_der(&der::X25519, secret)
+}
+
+/// A public key from its DER `SubjectPublicKeyInfo`, the form under
+/// `PUBLIC KEY`. The bytes are not checked to be a point here, any
+/// more than the argument type of the functions that take them
+/// checks; those refuse one that is not.
+pub fn public_key_from_der(der: &[u8]) -> Result<[u8; KEY_SIZE], Error> {
+    der::curve_public_from_der(&der::X25519, der)
+}
+
+/// The public key's DER encoding.
+pub fn public_key_der(public: &[u8; KEY_SIZE]) -> [u8; PUBLIC_KEY_DER_SIZE] {
+    der::curve_public_der(&der::X25519, public)
+}
+
+/// A secret key from a `PRIVATE KEY` PEM block (RFC 7468) around
+/// [`secret_der`]'s bytes. Whitespace and line ends are read
+/// leniently; anything else that is not exactly one well-formed
+/// block, an encrypted key included, is [`Error::InvalidEncoding`].
+pub fn secret_from_pem(pem: &[u8]) -> Result<[u8; KEY_SIZE], Error> {
+    let (secret, carried) = der::curve_secret_from_pem(&der::X25519, pem)?;
+    checked(secret, carried)
+}
+
+/// The secret key as a `PRIVATE KEY` PEM block: ASCII with LF line
+/// ends, always [`PEM_SIZE`] bytes. A secret, to be wiped when done.
+pub fn secret_pem(secret: &[u8; KEY_SIZE]) -> [u8; PEM_SIZE] {
+    der::curve_secret_pem(&der::X25519, secret)
+}
+
+/// A public key from a `PUBLIC KEY` PEM block, read as
+/// [`secret_from_pem`] reads its block.
+pub fn public_key_from_pem(pem: &[u8]) -> Result<[u8; KEY_SIZE], Error> {
+    der::curve_public_from_pem(&der::X25519, pem)
+}
+
+/// The public key as a `PUBLIC KEY` PEM block, always
+/// [`PUBLIC_KEY_PEM_SIZE`] bytes.
+pub fn public_key_pem(public: &[u8; KEY_SIZE]) -> [u8; PUBLIC_KEY_PEM_SIZE] {
+    der::curve_public_pem(&der::X25519, public)
 }
 
 #[cfg(test)]
@@ -306,5 +403,70 @@ mod tests {
         clamped[31] &= 127;
         clamped[31] |= 64;
         assert_eq!(public_key(&raw), public_key(&clamped));
+    }
+
+    /// What OpenSSL 3.5 writes for a fresh key, from
+    /// `openssl genpkey -algorithm X25519` and `openssl pkey`, with
+    /// and without `-pubout`, in DER and PEM.
+    #[test]
+    fn openssl_encodings() {
+        let secret = unhex(
+            "78c179133120e7cb303d50493d8531b1\
+             7b6f1b1ffb9fe5ed30c36fc30d6d2075",
+        );
+        let public = unhex(
+            "4a98fc0bb6a135d01c8465380a18ff93\
+             d9e5790bbef9f51d636167b95ce9bd27",
+        );
+        let mut secret_der_bytes = [0u8; DER_SIZE];
+        secret_der_bytes[..16].copy_from_slice(&[
+            0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65,
+            0x6e, 0x04, 0x22, 0x04, 0x20,
+        ]);
+        secret_der_bytes[16..].copy_from_slice(&secret);
+        let mut public_der_bytes = [0u8; PUBLIC_KEY_DER_SIZE];
+        public_der_bytes[..12].copy_from_slice(&[
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x6e, 0x03, 0x21,
+            0x00,
+        ]);
+        public_der_bytes[12..].copy_from_slice(&public);
+        let secret_pem_text = b"-----BEGIN PRIVATE KEY-----\n\
+            MC4CAQAwBQYDK2VuBCIEIHjBeRMxIOfLMD1QST2FMbF7bxsf+5/l7TDDb8MNbSB1\n\
+            -----END PRIVATE KEY-----\n";
+        let public_pem_text = b"-----BEGIN PUBLIC KEY-----\n\
+            MCowBQYDK2VuAyEASpj8C7ahNdAchGU4Chj/k9nleQu++fUdY2FnuVzpvSc=\n\
+            -----END PUBLIC KEY-----\n";
+
+        assert_eq!(public_key(&secret), public);
+        assert_eq!(secret_from_der(&secret_der_bytes), Ok(secret));
+        assert_eq!(public_key_from_der(&public_der_bytes), Ok(public));
+        assert_eq!(secret_der(&secret), secret_der_bytes);
+        assert_eq!(public_key_der(&public), public_der_bytes);
+        assert_eq!(secret_from_pem(secret_pem_text), Ok(secret));
+        assert_eq!(public_key_from_pem(public_pem_text), Ok(public));
+        assert_eq!(secret_pem(&secret)[..], secret_pem_text[..]);
+        assert_eq!(public_key_pem(&public)[..], public_pem_text[..]);
+
+        // An Ed25519 key is not an X25519 key.
+        let mut e = secret_der_bytes;
+        e[11] = 0x70;
+        assert_eq!(secret_from_der(&e), Err(Error::InvalidEncoding));
+        let mut e = public_der_bytes;
+        e[8] = 0x70;
+        assert_eq!(public_key_from_der(&e), Err(Error::InvalidEncoding));
+
+        // A version 1 structure carrying the public key reads when
+        // the pair agrees and is refused when it does not.
+        let mut v1 = [0u8; 83];
+        v1[..16].copy_from_slice(&[
+            0x30, 0x51, 0x02, 0x01, 0x01, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65,
+            0x6e, 0x04, 0x22, 0x04, 0x20,
+        ]);
+        v1[16..48].copy_from_slice(&secret);
+        v1[48..51].copy_from_slice(&[0x81, 0x21, 0x00]);
+        v1[51..].copy_from_slice(&public);
+        assert_eq!(secret_from_der(&v1), Ok(secret));
+        v1[82] ^= 1;
+        assert_eq!(secret_from_der(&v1), Err(Error::InvalidEncoding));
     }
 }

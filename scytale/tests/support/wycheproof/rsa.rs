@@ -3,6 +3,12 @@
 //! are the point: signatures altered every way the encoding can
 //! bend, and OAEP ciphertexts built to tease apart the error paths,
 //! which must all come out as the same rejection.
+//!
+//! Every group also carries its key in DER and PEM, which is the
+//! external check on the key formats: each is imported and compared
+//! with the key built from the raw parts, and exported back to the
+//! same bytes. The OAEP suites then run under the key read from
+//! PKCS#8 rather than from the parts.
 
 use super::super::acvp::hex;
 use super::load;
@@ -79,7 +85,36 @@ fn public_key<const L: usize, const B: usize>(
 ) -> PublicKey<L, B> {
     let n = padded(&group["publicKey"]["modulus"], B);
     let e = hex(&group["publicKey"]["publicExponent"]);
-    PublicKey::try_new(&n, &e).expect("public key")
+    let key = PublicKey::try_new(&n, &e).expect("public key");
+    check_public_formats(group, &key);
+    key
+}
+
+/// The group's SubjectPublicKeyInfo, bare RSAPublicKey and PEM all
+/// name the same key as the raw parts, and come back out unchanged.
+fn check_public_formats<const L: usize, const B: usize>(
+    group: &Value,
+    key: &PublicKey<L, B>,
+) {
+    let der = hex(&group["publicKeyDer"]);
+    let asn = hex(&group["publicKeyAsn"]);
+    let pem = group["publicKeyPem"].as_str().expect("publicKeyPem");
+    let n = key.modulus_bytes();
+    let e = key.exponent_bytes();
+    let same = |other: &PublicKey<L, B>| {
+        other.modulus_bytes() == n && other.exponent_bytes() == e
+    };
+    assert!(same(&PublicKey::try_from_der(&der).expect("der")));
+    assert!(same(&PublicKey::try_from_pkcs1(&asn).expect("asn")));
+    assert!(same(&PublicKey::try_from_pem(pem.as_bytes()).expect("pem")));
+
+    let mut out = vec![0u8; 3 * B];
+    let m = key.der_bytes(&mut out).expect("export der");
+    assert_eq!(out[..m], der[..], "SubjectPublicKeyInfo");
+    let m = key.pkcs1_bytes(&mut out).expect("export pkcs1");
+    assert_eq!(out[..m], asn[..], "RSAPublicKey");
+    let m = key.pem_bytes(&mut out).expect("export pem");
+    assert_eq!(&out[..m], pem.as_bytes(), "PEM");
 }
 
 fn pkcs1<H: DigestInfo, const L: usize, const B: usize>(
@@ -135,7 +170,7 @@ fn oaep<H: Hash, const L: usize, const B: usize, const HF: usize>(
     };
     counts.files += 1;
     for group in doc["testGroups"].as_array().expect("testGroups") {
-        let key = private_key::<L, B, HF>(&group["privateKey"]);
+        let key = private_key::<L, B, HF>(group);
         for t in group["tests"].as_array().expect("tests") {
             let tag = format!("tcId {}: {}", t["tcId"], t["comment"]);
             let label = hex(&t["label"]);
@@ -159,10 +194,19 @@ fn oaep<H: Hash, const L: usize, const B: usize, const HF: usize>(
     }
 }
 
+/// The group's key, read from its PKCS#8, after checking that the
+/// PEM and the raw parts agree with it, and that both forms come
+/// back out unchanged.
 fn private_key<const L: usize, const B: usize, const H: usize>(
-    sk: &Value,
+    group: &Value,
 ) -> PrivateKey<L, B, H> {
-    PrivateKey::try_new_crt(
+    let sk = &group["privateKey"];
+    let der = hex(&group["privateKeyPkcs8"]);
+    let pem = group["privateKeyPem"].as_str().expect("privateKeyPem");
+    let key = PrivateKey::<L, B, H>::try_from_der(&der).expect("pkcs8");
+    let from_pem =
+        PrivateKey::<L, B, H>::try_from_pem(pem.as_bytes()).expect("pem");
+    let from_parts = PrivateKey::<L, B, H>::try_new_crt(
         &padded(&sk["modulus"], B),
         &hex(&sk["publicExponent"]),
         &padded(&sk["privateExponent"], B),
@@ -172,7 +216,21 @@ fn private_key<const L: usize, const B: usize, const H: usize>(
         &padded(&sk["exponent2"], B / 2),
         &padded(&sk["coefficient"], B / 2),
     )
-    .expect("private key")
+    .expect("private key");
+    for other in [&from_pem, &from_parts] {
+        assert_eq!(other.d_bytes(), key.d_bytes());
+        assert_eq!(
+            other.public_key().modulus_bytes(),
+            key.public_key().modulus_bytes()
+        );
+    }
+
+    let mut out = vec![0u8; 8 * B];
+    let m = key.der_bytes(&mut out).expect("export der");
+    assert_eq!(out[..m], der[..], "PrivateKeyInfo");
+    let m = key.pem_bytes(&mut out).expect("export pem");
+    assert_eq!(&out[..m], pem.as_bytes(), "PEM");
+    key
 }
 
 /// Compares an outcome with the file's verdict. An `acceptable`

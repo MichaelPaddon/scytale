@@ -14,6 +14,13 @@
 //! string, no pre-hashing. Ed25519ctx and Ed25519ph can be added if
 //! a protocol requires them.
 //!
+//! Keys are 32 bytes each way, and travel in the RFC 8410 forms
+//! everything else stores them in: a secret key as PKCS#8 through
+//! [`secret_from_der`] and [`secret_der`], a public key as
+//! `SubjectPublicKeyInfo` through [`public_key_from_der`] and
+//! [`public_key_der`], and either in PEM through the `_pem`
+//! functions beside those.
+//!
 //! # Constant time
 //!
 //! Signing performs the same sequence of field and scalar operations
@@ -32,6 +39,7 @@
 
 use zeroize::Zeroize;
 
+use crate::der;
 use crate::hash::sha2::Sha512;
 use crate::hash::Hash;
 use crate::math::fe25519::Fe;
@@ -136,6 +144,100 @@ pub fn verify(
     } else {
         Err(Error::InvalidSignature)
     }
+}
+
+/// The length of a secret key's DER encoding, a PKCS#8
+/// `PrivateKeyInfo` (RFC 8410 section 7).
+pub const DER_SIZE: usize = 48;
+
+/// The length of a public key's DER encoding, a
+/// `SubjectPublicKeyInfo` (RFC 8410 section 4).
+pub const PUBLIC_KEY_DER_SIZE: usize = 44;
+
+/// The length of a secret key's PEM encoding, a `PRIVATE KEY` block.
+pub const PEM_SIZE: usize = 119;
+
+/// The length of a public key's PEM encoding, a `PUBLIC KEY` block.
+pub const PUBLIC_KEY_PEM_SIZE: usize = 113;
+
+/// A secret key from its DER PKCS#8 `PrivateKeyInfo`, the form under
+/// `PRIVATE KEY` in a PEM file, which RFC 8410 fixes for Ed25519: the
+/// 32 bytes in an OCTET STRING of their own inside the one PKCS#8
+/// provides. A version 1 structure that also carries the public key
+/// is read, and refused when that key is not the secret's, since a
+/// pair that disagrees has been corrupted. Anything else that is not
+/// this structure under `id-Ed25519`, the other curve's key
+/// included, is [`Error::InvalidEncoding`].
+pub fn secret_from_der(der: &[u8]) -> Result<[u8; KEY_SIZE], Error> {
+    let (secret, carried) = der::curve_secret_from_der(&der::ED25519, der)?;
+    checked(secret, carried)
+}
+
+/// The secret a structure carried, once the public key it may
+/// have carried beside it is checked to be the secret's own: a pair
+/// that disagrees has been corrupted, and neither half is returned.
+fn checked(
+    mut secret: [u8; KEY_SIZE],
+    carried: Option<[u8; PUBLIC_KEY_SIZE]>,
+) -> Result<[u8; KEY_SIZE], Error> {
+    if let Some(carried) = carried {
+        let derived = public_key(&secret);
+        if derived != Ok(carried) {
+            secret.zeroize();
+            return derived.and(Err(Error::InvalidEncoding));
+        }
+    }
+    Ok(secret)
+}
+
+/// The secret key's DER encoding, a version 0 `PrivateKeyInfo`. The
+/// output is a secret, to be wiped when done.
+pub fn secret_der(secret: &[u8; KEY_SIZE]) -> [u8; DER_SIZE] {
+    der::curve_secret_der(&der::ED25519, secret)
+}
+
+/// A public key from its DER `SubjectPublicKeyInfo`, the form under
+/// `PUBLIC KEY`. The bytes are not checked to be a point here, any
+/// more than the argument type of the functions that take them
+/// checks; those refuse one that is not.
+pub fn public_key_from_der(der: &[u8]) -> Result<[u8; PUBLIC_KEY_SIZE], Error> {
+    der::curve_public_from_der(&der::ED25519, der)
+}
+
+/// The public key's DER encoding.
+pub fn public_key_der(
+    public: &[u8; PUBLIC_KEY_SIZE],
+) -> [u8; PUBLIC_KEY_DER_SIZE] {
+    der::curve_public_der(&der::ED25519, public)
+}
+
+/// A secret key from a `PRIVATE KEY` PEM block (RFC 7468) around
+/// [`secret_der`]'s bytes. Whitespace and line ends are read
+/// leniently; anything else that is not exactly one well-formed
+/// block, an encrypted key included, is [`Error::InvalidEncoding`].
+pub fn secret_from_pem(pem: &[u8]) -> Result<[u8; KEY_SIZE], Error> {
+    let (secret, carried) = der::curve_secret_from_pem(&der::ED25519, pem)?;
+    checked(secret, carried)
+}
+
+/// The secret key as a `PRIVATE KEY` PEM block: ASCII with LF line
+/// ends, always [`PEM_SIZE`] bytes. A secret, to be wiped when done.
+pub fn secret_pem(secret: &[u8; KEY_SIZE]) -> [u8; PEM_SIZE] {
+    der::curve_secret_pem(&der::ED25519, secret)
+}
+
+/// A public key from a `PUBLIC KEY` PEM block, read as
+/// [`secret_from_pem`] reads its block.
+pub fn public_key_from_pem(pem: &[u8]) -> Result<[u8; PUBLIC_KEY_SIZE], Error> {
+    der::curve_public_from_pem(&der::ED25519, pem)
+}
+
+/// The public key as a `PUBLIC KEY` PEM block, always
+/// [`PUBLIC_KEY_PEM_SIZE`] bytes.
+pub fn public_key_pem(
+    public: &[u8; PUBLIC_KEY_SIZE],
+) -> [u8; PUBLIC_KEY_PEM_SIZE] {
+    der::curve_public_pem(&der::ED25519, public)
 }
 
 /// The secret scalar: the low half of the expanded secret, clamped
@@ -827,5 +929,81 @@ mod tests {
         let zero = Scalar([0; 4]);
         let identity = Point::BASE.scalar_mul(&zero);
         assert_eq!(identity.compress(), Point::IDENTITY.compress());
+    }
+
+    /// RFC 8410 section 10: the example private key in both its
+    /// version 0 and version 1 forms, with the attributes the second
+    /// carries, and the matching public key from section 10.1.
+    #[test]
+    fn rfc8410_examples() {
+        let v0 = b"-----BEGIN PRIVATE KEY-----\n\
+            MC4CAQAwBQYDK2VwBCIEINTuctv5E1hK1bbY8fdp+K06/nwoy/HU++CXqI9EdVhC\n\
+            -----END PRIVATE KEY-----\n";
+        let v1 = b"-----BEGIN PRIVATE KEY-----\n\
+            MHICAQEwBQYDK2VwBCIEINTuctv5E1hK1bbY8fdp+K06/nwoy/HU++CXqI9EdVhC\n\
+            oB8wHQYKKoZIhvcNAQkJFDEPDA1DdXJkbGUgQ2hhaXJzgSEAGb9ECWmEzf6FQbrB\n\
+            Z9w7lshQhqowtrbLDFw4rXAxZuE=\n\
+            -----END PRIVATE KEY-----\n";
+        let public = b"-----BEGIN PUBLIC KEY-----\n\
+            MCowBQYDK2VwAyEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE=\n\
+            -----END PUBLIC KEY-----\n";
+        let secret = secret_from_pem(v0).unwrap();
+        assert_eq!(
+            secret,
+            unhex32(
+                "d4ee72dbf913584ad5b6d8f1f769f8ad\
+                 3afe7c28cbf1d4fbe097a88f44755842"
+            )
+        );
+        assert_eq!(secret_from_pem(v1), Ok(secret));
+        let pk = public_key_from_pem(public).unwrap();
+        assert_eq!(public_key(&secret), Ok(pk));
+        assert_eq!(secret_pem(&secret)[..], v0[..]);
+        assert_eq!(public_key_pem(&pk)[..], public[..]);
+
+        // The version 1 form with its public key altered is a pair
+        // that disagrees.
+        let mut wrong = *v1;
+        let i = wrong.iter().rposition(|&c| c == b'=').unwrap() - 1;
+        wrong[i] = if wrong[i] == b'E' { b'F' } else { b'E' };
+        assert_eq!(secret_from_pem(&wrong), Err(Error::InvalidEncoding));
+    }
+
+    /// What OpenSSL 3.5 writes for a fresh key, from
+    /// `openssl genpkey -algorithm Ed25519` and `openssl pkey
+    /// -outform DER`, with and without `-pubout`.
+    #[test]
+    fn openssl_encodings() {
+        let mut secret_der_buf = [0u8; DER_SIZE];
+        let secret_der_bytes = unhex(
+            "302e020100300506032b657004220420\
+             c22c00218a30664a9ca527dfcda3ab36\
+             4ba3ac80a1960cc83dbc021e1557dcce",
+            &mut secret_der_buf,
+        );
+        let mut public_der_buf = [0u8; PUBLIC_KEY_DER_SIZE];
+        let public_der_bytes = unhex(
+            "302a300506032b6570032100\
+             52d3bd217410a127c572f332899e23ff\
+             149fc234df6d9a86f24e4aeeb86c7b91",
+            &mut public_der_buf,
+        );
+        let secret = secret_from_der(secret_der_bytes).unwrap();
+        let public = public_key_from_der(public_der_bytes).unwrap();
+        assert_eq!(public_key(&secret), Ok(public));
+        assert_eq!(secret_der(&secret)[..], secret_der_bytes[..]);
+        assert_eq!(public_key_der(&public)[..], public_der_bytes[..]);
+        assert_eq!(secret_from_pem(&secret_pem(&secret)), Ok(secret));
+        assert_eq!(public_key_from_pem(&public_key_pem(&public)), Ok(public));
+
+        // An X25519 key is not an Ed25519 key.
+        let mut x = *secret_der_bytes.first_chunk::<DER_SIZE>().unwrap();
+        x[11] = 0x6e;
+        assert_eq!(secret_from_der(&x), Err(Error::InvalidEncoding));
+        let mut x = *public_der_bytes
+            .first_chunk::<PUBLIC_KEY_DER_SIZE>()
+            .unwrap();
+        x[8] = 0x6e;
+        assert_eq!(public_key_from_der(&x), Err(Error::InvalidEncoding));
     }
 }

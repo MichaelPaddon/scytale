@@ -19,6 +19,10 @@
 //! let signature = ed25519::sign(&secret, b"release v1.2")?;
 //! ed25519::verify(&public, b"release v1.2", &signature)?;
 //! assert!(ed25519::verify(&public, b"release v1.3", &signature).is_err());
+//!
+//! // The public key in the form other software reads.
+//! let pem = ed25519::public_key_pem(&public);
+//! assert_eq!(ed25519::public_key_from_pem(&pem)?, public);
 //! # Ok(())
 //! # }
 //! ```

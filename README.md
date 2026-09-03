@@ -144,6 +144,11 @@ encryption keys are distinct types: a key does one job.
 | RSA-PSS, RSA PKCS#1 v1.5 (RFC 8017) | `sig` | any width; CRT signing and key generation |
 | RSA primitives (RFC 8017) | `sig`, `pke` | raw, unpadded; for building schemes and for validation |
 
+Every key reads and writes the formats other software stores it in:
+a public key as a DER `SubjectPublicKeyInfo`, a private key as
+PKCS#8, RSA keys in the bare PKCS#1 forms too, and any of them in
+PEM. Encrypted keys are not read.
+
 ## Random numbers
 
 Keys and initialisation vectors need randomness, so `scytale::random`

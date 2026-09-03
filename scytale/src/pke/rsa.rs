@@ -28,7 +28,12 @@
 //! the limb and byte counts for any other width, with no ceiling.
 //! Keys are imported from their integer parts, or generated fresh by
 //! [`PrivateKey::generate`]; the accessors on both key types hand
-//! the parts back for storage. A key imported with its primes,
+//! the parts back for storage, and [`der_bytes`](PrivateKey::der_bytes)
+//! and [`pem_bytes`](PrivateKey::pem_bytes) write the key as PKCS#8,
+//! which [`try_from_der`](PrivateKey::try_from_der) and
+//! [`try_from_pem`](PrivateKey::try_from_pem) read back; the public
+//! half has the same four for `SubjectPublicKeyInfo`, and both have
+//! the bare PKCS#1 forms as well. A key imported with its primes,
 //! through [`PrivateKey::try_new_crt`], decrypts by the Chinese
 //! remainder theorem, roughly three times faster, and every CRT
 //! result is checked with the public exponent before use, because
@@ -54,6 +59,11 @@
 //! let mut out = [0u8; 256];
 //! let n = key.decrypt_oaep::<Sha256>(b"", &sealed, &mut out)?;
 //! assert_eq!(&out[..n], &session_key);
+//!
+//! // Stored as PKCS#8 in PEM, the way OpenSSL writes it.
+//! let mut pem = [0u8; 8 * 256];
+//! let n = key.pem_bytes(&mut pem)?;
+//! let key = Rsa2048PrivateKey::try_from_pem(&pem[..n])?;
 //! # Ok(())
 //! # }
 //! ```
@@ -208,6 +218,66 @@ impl<const LIMBS: usize, const BYTES: usize> PublicKey<LIMBS, BYTES> {
     pub fn exponent_bytes(&self) -> [u8; 8] {
         self.raw.exponent_bytes()
     }
+
+    /// An encryption key from its DER `SubjectPublicKeyInfo` (RFC
+    /// 5280), the form under `PUBLIC KEY` in a PEM file. The algorithm must be
+    /// `rsaEncryption`: a key marked `id-RSASSA-PSS` is a signing
+    /// key, and is refused.
+    ///
+    /// The modulus must be the type's width, as with
+    /// [`try_new`](Self::try_new); anything else wrong with the
+    /// bytes is [`Error::InvalidEncoding`].
+    pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
+        Ok(PublicKey {
+            raw: Public::from_spki(der, false)?,
+        })
+    }
+
+    /// Writes the key as a `SubjectPublicKeyInfo` under
+    /// `rsaEncryption` into the front of `out`, returning the
+    /// length. `2 * BYTES` always suffices; a buffer too small gets
+    /// [`Error::OutputTooSmall`] with the exact need.
+    pub fn der_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.raw.spki_bytes(out)
+    }
+
+    /// An encryption key from the bare PKCS#1 `RSAPublicKey` (RFC 8017
+    /// A.1.1), the form under `RSA PUBLIC KEY`, which is what the
+    /// `SubjectPublicKeyInfo` wraps.
+    pub fn try_from_pkcs1(der: &[u8]) -> Result<Self, Error> {
+        Ok(PublicKey {
+            raw: Public::from_pkcs1(der)?,
+        })
+    }
+
+    /// Writes the bare `RSAPublicKey`, as [`der_bytes`](Self::der_bytes)
+    /// does the wrapped one.
+    pub fn pkcs1_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.raw.pkcs1_bytes(out)
+    }
+
+    /// An encryption key from a PEM block (RFC 7468) labelled `PUBLIC KEY`
+    /// or `RSA PUBLIC KEY`, holding the matching DER form above.
+    /// Whitespace and line ends are read leniently; anything else
+    /// that is not exactly one well-formed block is
+    /// [`Error::InvalidEncoding`].
+    pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
+        Ok(PublicKey {
+            raw: Public::from_pem(pem, false)?,
+        })
+    }
+
+    /// Writes the key as a `PUBLIC KEY` PEM block, ASCII with LF line
+    /// ends, into the front of `out`, returning the length.
+    /// `3 * BYTES` always suffices.
+    pub fn pem_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.raw.pem_bytes(out, false)
+    }
+
+    /// The same as an `RSA PUBLIC KEY` block, around the PKCS#1 form.
+    pub fn pkcs1_pem_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.raw.pem_bytes(out, true)
+    }
 }
 
 impl<const LIMBS: usize, const BYTES: usize, const HALF: usize>
@@ -293,6 +363,83 @@ impl<const LIMBS: usize, const BYTES: usize, const HALF: usize>
         qinv: &mut [u8],
     ) -> Result<(), Error> {
         self.raw.crt_bytes(p, q, dp, dq, qinv)
+    }
+
+    /// A decryption key from its DER PKCS#8 `PrivateKeyInfo` (RFC 5208;
+    /// the RFC 5958 form with a public key attached reads too), the
+    /// form under `PRIVATE KEY` in a PEM file. The algorithm must be
+    /// `rsaEncryption`, as for [`PublicKey::try_from_der`].
+    ///
+    /// The `RSAPrivateKey` inside carries the primes, so the key
+    /// comes in as if through [`try_new_crt`](Self::try_new_crt),
+    /// with the same checks. A multi-prime key, or anything else
+    /// wrong with the bytes, is [`Error::InvalidEncoding`]; a
+    /// modulus of another width is [`Error::InvalidKeyLength`].
+    pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
+        let (public, raw) = Private::from_pkcs8(der, false)?;
+        Ok(PrivateKey {
+            public: PublicKey { raw: public },
+            raw,
+        })
+    }
+
+    /// Writes the key as a `PrivateKeyInfo` under `rsaEncryption`
+    /// into the front of `out`, returning the length. `5 * BYTES`
+    /// suffices for any key of 1024 bits or more; a buffer too
+    /// small gets [`Error::OutputTooSmall`] with the exact need.
+    ///
+    /// Fails with [`Error::InvalidPrivateKey`] on a key imported
+    /// without its primes, as [`crt_bytes`](Self::crt_bytes) does:
+    /// the structure has no place for their absence. The output is
+    /// a secret, and the caller should wipe it when done.
+    pub fn der_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.raw.pkcs8_bytes(&self.public.raw, out)
+    }
+
+    /// A decryption key from the bare PKCS#1 `RSAPrivateKey` (RFC 8017
+    /// A.1.2), the form under `RSA PRIVATE KEY`, which is what the
+    /// `PrivateKeyInfo` wraps.
+    pub fn try_from_pkcs1(der: &[u8]) -> Result<Self, Error> {
+        let (public, raw) = Private::from_pkcs1(der)?;
+        Ok(PrivateKey {
+            public: PublicKey { raw: public },
+            raw,
+        })
+    }
+
+    /// Writes the bare `RSAPrivateKey`, as [`der_bytes`](Self::der_bytes)
+    /// does the wrapped one, with the same needs and the same
+    /// refusal.
+    pub fn pkcs1_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.raw.pkcs1_bytes(&self.public.raw, out)
+    }
+
+    /// A decryption key from a PEM block (RFC 7468) labelled `PRIVATE KEY`
+    /// or `RSA PRIVATE KEY`, holding the matching DER form above.
+    /// Whitespace and line ends are read leniently; anything else
+    /// that is not exactly one well-formed block, an encrypted key
+    /// included, is [`Error::InvalidEncoding`].
+    pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
+        let (public, raw) = Private::from_pem(pem, false)?;
+        Ok(PrivateKey {
+            public: PublicKey { raw: public },
+            raw,
+        })
+    }
+
+    /// Writes the key as a `PRIVATE KEY` PEM block, ASCII with LF
+    /// line ends, into the front of `out`, returning the length.
+    /// `8 * BYTES` suffices for any key of 1024 bits or more. The
+    /// same refusal as [`der_bytes`](Self::der_bytes), and the same
+    /// secret to wipe.
+    pub fn pem_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.raw.pem_bytes(&self.public.raw, out, false)
+    }
+
+    /// The same as an `RSA PRIVATE KEY` block, around the PKCS#1
+    /// form.
+    pub fn pkcs1_pem_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.raw.pem_bytes(&self.public.raw, out, true)
     }
 
     /// The RSA decryption primitive, RSADP of RFC 8017: raises
@@ -701,5 +848,110 @@ mod tests {
         let em = key.decrypt_primitive(&sealed).unwrap();
         // OAEP's encoded message always has a zero leading byte.
         assert_eq!(em[0], 0);
+    }
+
+    /// A key goes through both containers and both PEM labels and
+    /// decrypts what the original's public half encrypted; the
+    /// public half round-trips too.
+    #[test]
+    fn formats_round_trip() {
+        let mut rng = crate::random::Rng::try_new(
+            crate::random::System::try_new().unwrap(),
+        )
+        .unwrap();
+        let key = Rsa1024PrivateKey::generate(&mut rng).unwrap();
+        let sealed = key
+            .public_key()
+            .encrypt_oaep::<Sha256, _>(&mut rng, b"", b"session key")
+            .unwrap();
+        let mut out = [0u8; 8 * 128];
+        let mut msg = [0u8; 128];
+
+        let n = key.der_bytes(&mut out).unwrap();
+        let backs = [
+            Rsa1024PrivateKey::try_from_der(&out[..n]).unwrap(),
+            {
+                let n = key.pkcs1_bytes(&mut out).unwrap();
+                Rsa1024PrivateKey::try_from_pkcs1(&out[..n]).unwrap()
+            },
+            {
+                let n = key.pem_bytes(&mut out).unwrap();
+                Rsa1024PrivateKey::try_from_pem(&out[..n]).unwrap()
+            },
+            {
+                let n = key.pkcs1_pem_bytes(&mut out).unwrap();
+                Rsa1024PrivateKey::try_from_pem(&out[..n]).unwrap()
+            },
+        ];
+        for back in &backs {
+            assert_eq!(back.d_bytes(), key.d_bytes());
+            let n =
+                back.decrypt_oaep::<Sha256>(b"", &sealed, &mut msg).unwrap();
+            assert_eq!(&msg[..n], b"session key");
+        }
+
+        let public = key.public_key();
+        let n = public.der_bytes(&mut out).unwrap();
+        let backs = [
+            Rsa1024PublicKey::try_from_der(&out[..n]).unwrap(),
+            {
+                let n = public.pkcs1_bytes(&mut out).unwrap();
+                Rsa1024PublicKey::try_from_pkcs1(&out[..n]).unwrap()
+            },
+            {
+                let n = public.pem_bytes(&mut out).unwrap();
+                Rsa1024PublicKey::try_from_pem(&out[..n]).unwrap()
+            },
+            {
+                let n = public.pkcs1_pem_bytes(&mut out).unwrap();
+                Rsa1024PublicKey::try_from_pem(&out[..n]).unwrap()
+            },
+        ];
+        for back in &backs {
+            assert_eq!(back.modulus_bytes(), public.modulus_bytes());
+            let sealed = back
+                .encrypt_oaep::<Sha256, _>(&mut rng, b"", b"again")
+                .unwrap();
+            let n = key.decrypt_oaep::<Sha256>(b"", &sealed, &mut msg).unwrap();
+            assert_eq!(&msg[..n], b"again");
+        }
+    }
+
+    /// A key marked for PSS signing is not a decryption key, and a
+    /// key without its primes cannot be written.
+    #[test]
+    fn pss_keys_and_plain_keys_are_refused() {
+        let mut rng = crate::random::Rng::try_new(
+            crate::random::System::try_new().unwrap(),
+        )
+        .unwrap();
+        let key = Rsa1024PrivateKey::generate(&mut rng).unwrap();
+        let mut out = [0u8; 8 * 128];
+        let n = key.der_bytes(&mut out).unwrap();
+        let oid_end = out[..n]
+            .windows(9)
+            .position(|w| w == crate::der::RSA_ENCRYPTION)
+            .unwrap()
+            + 8;
+        out[oid_end] = 0x0a;
+        assert_eq!(
+            Rsa1024PrivateKey::try_from_der(&out[..n]).err(),
+            Some(Error::InvalidEncoding)
+        );
+        let n = key.public_key().der_bytes(&mut out).unwrap();
+        let oid_end = out[..n]
+            .windows(9)
+            .position(|w| w == crate::der::RSA_ENCRYPTION)
+            .unwrap()
+            + 8;
+        out[oid_end] = 0x0a;
+        assert_eq!(
+            Rsa1024PublicKey::try_from_der(&out[..n]).err(),
+            Some(Error::InvalidEncoding)
+        );
+
+        let plain = key1024();
+        assert_eq!(plain.der_bytes(&mut out), Err(Error::InvalidPrivateKey));
+        assert_eq!(plain.pem_bytes(&mut out), Err(Error::InvalidPrivateKey));
     }
 }
