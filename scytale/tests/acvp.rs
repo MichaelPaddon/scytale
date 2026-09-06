@@ -1,11 +1,18 @@
 //! NIST ACVP vector suites, and the Wycheproof suites for what ACVP
 //! does not cover.
 //!
-//! One test binary covers every primitive and every implementation of
-//! it, so `cargo test -- --list` shows the whole inventory in one
-//! place. Test names read `primitive::implementation::suite`.
-//! Implementations that do not exist on this architecture are left
-//! out, rather than appearing as empty test binaries.
+//! One test binary covers every primitive, so `cargo test -- --list`
+//! shows the whole inventory in one place. Test names read
+//! `primitive::implementation::suite`. Implementations that do not
+//! exist on this architecture are left out, rather than appearing as
+//! empty test binaries; [`inventory`] prints the ones that do and
+//! says which of them this processor can run.
+//!
+//! An implementation is validated by the suite for the primitive it
+//! implements, at every key size: AES by `aes_ecb`, each hash by its
+//! own suites. What is built on top of a primitive is tested once,
+//! on the implementation the processor picks, since a mode, a MAC or
+//! a KDF does not vary with the code underneath it.
 
 mod support;
 
@@ -127,9 +134,37 @@ macro_rules! hardware_widths {
     };
 }
 
+/// Runs one mode's suite against the dispatching AES, at every key
+/// width. A mode's logic does not vary with the implementation
+/// beneath it, and `aes_ecb` validates each implementation in turn
+/// against the vectors for it; running the mode on the dispatched
+/// cipher covers the selector as well, and takes the fastest code
+/// the processor has. Suites with a Monte Carlo test take no second
+/// argument.
+macro_rules! modes {
+    ($suite:ident) => {
+        modes!($suite, both);
+    };
+    ($suite:ident, $kind:ident) => {
+        use super::*;
+        use scytale::cipher::aes;
+
+        widths!(
+            automatic_128,
+            automatic_192,
+            automatic_256,
+            aes::Aes,
+            $suite,
+            $kind
+        );
+    };
+}
+
 /// Runs one suite against every AES implementation this architecture
-/// has, at every key width. Suites with a Monte Carlo test take no
-/// second argument.
+/// has, at every key width. Used by `aes_ecb`, which is where an
+/// implementation is validated: its one-shot cases drive whole
+/// buffers through `encrypt_blocks` and `decrypt_blocks`, and its
+/// Monte Carlo cases chain 600,000 single-block calls.
 macro_rules! every_aes {
     ($suite:ident) => {
         every_aes!($suite, both);
@@ -220,91 +255,91 @@ macro_rules! every_aes {
     };
 }
 
-/// AES (FIPS 197) with each block encrypted independently.
+/// AES (FIPS 197) with each block encrypted independently, and so
+/// the suite that validates each implementation of the cipher.
 mod aes_ecb {
     every_aes!(ecb);
 }
 
 /// AES in cipher block chaining mode (SP 800-38A).
 mod aes_cbc {
-    every_aes!(cbc);
+    modes!(cbc);
 }
 
 /// AES in cipher feedback mode with full-block segments.
 mod aes_cfb128 {
-    every_aes!(cfb128);
+    modes!(cfb128);
 }
 
 /// AES in cipher feedback mode with 8-bit segments.
 mod aes_cfb8 {
-    every_aes!(cfb8);
+    modes!(cfb8);
 }
 
 /// AES in cipher feedback mode with 1-bit segments.
 mod aes_cfb1 {
-    every_aes!(cfb1);
+    modes!(cfb1);
 }
 
 /// AES in output feedback mode (SP 800-38A).
 mod aes_ofb {
-    every_aes!(ofb);
+    modes!(ofb);
 }
 
 /// AES in counter mode (SP 800-38A). This suite has no Monte Carlo
 /// test.
 mod aes_ctr {
-    every_aes!(ctr, aft_only);
+    modes!(ctr, aft_only);
 }
 
 /// AES in Galois/Counter Mode (SP 800-38D), the first authenticated
 /// mode. This suite has no Monte Carlo test.
 mod aes_gcm {
-    every_aes!(gcm, aft_only);
+    modes!(gcm, aft_only);
 }
 
 /// AES-GCM-SIV (RFC 8452), which survives a repeated nonce.
 mod aes_gcm_siv {
-    every_aes!(gcm_siv, aft_only);
+    modes!(gcm_siv, aft_only);
 }
 
 /// ACVP-AES-GMAC: GCM with no plaintext, which is how the crate
-/// offers GMAC. Run across every implementation, as the other modes
-/// are, because the tag is the cipher's work.
+/// offers GMAC.
 mod aes_gmac {
-    every_aes!(gmac, aft_only);
+    modes!(gmac, aft_only);
 }
 
 /// AES in XTS mode (SP 800-38E), the mode used for storage.
 mod aes_xts {
-    every_aes!(xts, aft_only);
+    modes!(xts, aft_only);
 }
 
 /// AES-FF1, format-preserving encryption (SP 800-38G).
 mod aes_ff1 {
-    every_aes!(ff1, aft_only);
+    modes!(ff1, aft_only);
 }
 
 /// AES-FF3-1, format-preserving encryption (SP 800-38G revision 1).
 mod aes_ff3_1 {
-    every_aes!(ff3_1, aft_only);
+    modes!(ff3_1, aft_only);
 }
 
 /// AES-GCM with extended packet numbering, as MACsec uses it.
 mod aes_xpn {
-    every_aes!(xpn, aft_only);
+    modes!(xpn, aft_only);
 }
 
 /// AES key wrapping without padding (SP 800-38F). Deterministic and
 /// nonce-free, and the only mode here whose output is longer than its
 /// input. This suite has no Monte Carlo test.
 mod aes_kw {
-    every_aes!(kw, aft_only);
+    modes!(kw, aft_only);
 }
 
 /// AES key wrapping with padding (SP 800-38F), which takes any length
 /// from one byte up. This suite has no Monte Carlo test.
 mod aes_kwp {
-    every_aes!(kwp, aft_only);
+    modes!(kwp, aft_only);
 }
 
 /// The CTR_DRBG random number generator (SP 800-90A). Not generic
@@ -365,21 +400,15 @@ macro_rules! sha2_suites {
     };
 }
 
-/// Runs one SHA-2 variant's suites against every implementation
-/// this architecture has.
+/// Runs one SHA-2 variant's suites against each implementation this
+/// architecture has. The dispatching type is not among them: it is
+/// one of these at run time, and the HMAC suites below run on it.
 macro_rules! every_sha2 {
     ($variant:ident, $file:literal, $algorithm:literal) => {
         use super::*;
         use scytale::hash::sha2;
         use support::acvp::sha::Family;
 
-        sha2_suites!(
-            automatic,
-            sha2::$variant,
-            $file,
-            $algorithm,
-            Family::Sha2
-        );
         sha2_suites!(
             portable,
             sha2::portable::$variant,
@@ -410,21 +439,14 @@ macro_rules! every_sha2 {
     };
 }
 
-/// Runs one SHA-3 digest's suites against every implementation
-/// this architecture has.
+/// Runs one SHA-3 digest's suites against each implementation this
+/// architecture has, as `every_sha2!` does.
 macro_rules! every_sha3 {
     ($variant:ident, $file:literal, $algorithm:literal) => {
         use super::*;
         use scytale::hash::sha3;
         use support::acvp::sha::Family;
 
-        sha2_suites!(
-            automatic,
-            sha3::$variant,
-            $file,
-            $algorithm,
-            Family::Sha3
-        );
         sha2_suites!(
             portable,
             sha3::portable::$variant,
@@ -597,14 +619,13 @@ macro_rules! shake_suites {
     };
 }
 
-/// Runs one SHAKE function's suites against every implementation
-/// this architecture has.
+/// Runs one SHAKE function's suites against each implementation
+/// this architecture has, as `every_sha2!` does.
 macro_rules! every_shake {
     ($variant:ident, $file:literal, $algorithm:literal) => {
         use super::*;
         use scytale::hash::sha3;
 
-        shake_suites!(automatic, sha3::$variant, $file, $algorithm);
         shake_suites!(portable, sha3::portable::$variant, $file, $algorithm);
 
         #[cfg(target_arch = "aarch64")]
@@ -684,8 +705,11 @@ mod sha_ldt {
     }
 }
 
-/// Defines the HMAC suite for one hash implementation. The hardware
-/// ones skip, saying so, when the processor cannot.
+/// Defines the HMAC suite for one hash. HMAC's own work does not
+/// vary with the hash beneath it, and each hash has its own suites
+/// above, so this runs on the dispatching type: the fastest the
+/// processor has, and a check that the dispatch is sound. It skips,
+/// saying so, where a hash has no implementation at all.
 macro_rules! hmac_suite {
     ($name:ident, $hash:ty, $file:literal, $algorithm:literal) => {
         hmac_suite!($name, $hash, $file, $algorithm, "portable code");
@@ -713,58 +737,7 @@ macro_rules! hmac_suite {
     };
 }
 
-/// Runs one variant's HMAC suite against every implementation this
-/// architecture has.
-/// The same for HMAC over a SHA-3 digest, whose backends differ from
-/// the SHA-2 ones: only AArch64 has instructions for Keccak.
-macro_rules! every_hmac_sha3 {
-    ($variant:ident, $file:literal, $algorithm:literal) => {
-        use super::*;
-        use scytale::hash::sha3;
-
-        hmac_suite!(automatic, sha3::$variant, $file, $algorithm);
-        hmac_suite!(portable, sha3::portable::$variant, $file, $algorithm);
-
-        #[cfg(target_arch = "aarch64")]
-        hmac_suite!(
-            armv8,
-            sha3::aarch64::$variant,
-            $file,
-            $algorithm,
-            "ARMv8 SHA3"
-        );
-    };
-}
-
-macro_rules! every_hmac {
-    ($variant:ident, $file:literal, $algorithm:literal) => {
-        use super::*;
-        use scytale::hash::sha2;
-
-        hmac_suite!(automatic, sha2::$variant, $file, $algorithm);
-        hmac_suite!(portable, sha2::portable::$variant, $file, $algorithm);
-
-        #[cfg(target_arch = "aarch64")]
-        hmac_suite!(
-            armv8,
-            sha2::aarch64::$variant,
-            $file,
-            $algorithm,
-            "ARMv8 SHA2"
-        );
-
-        #[cfg(target_arch = "riscv64")]
-        hmac_suite!(
-            zknh,
-            sha2::riscv64::$variant,
-            $file,
-            $algorithm,
-            "RISC-V Zknh"
-        );
-    };
-}
-
-/// HMAC (FIPS 198-1) over SHA-1, which has one implementation.
+/// HMAC (FIPS 198-1) over SHA-1.
 mod hmac_sha1 {
     use super::*;
     use scytale::hash::sha1;
@@ -779,99 +752,122 @@ mod hmac_sha1 {
 
 /// HMAC (FIPS 198-1) over each SHA-2 variant.
 mod hmac_sha2_224 {
-    every_hmac!(
-        Sha224,
+    use super::*;
+    use scytale::hash::sha2;
+
+    hmac_suite!(
+        automatic,
+        sha2::Sha224,
         "ACVP-HMAC-SHA2-224-1.0/internalProjection.json",
         "HMAC-SHA2-224"
-    );
-
-    #[cfg(target_arch = "x86_64")]
-    hmac_suite!(
-        shani,
-        sha2::x86_64::Sha224,
-        "ACVP-HMAC-SHA2-224-1.0/internalProjection.json",
-        "HMAC-SHA2-224",
-        "SHA-NI"
     );
 }
 
 mod hmac_sha2_256 {
-    every_hmac!(
-        Sha256,
+    use super::*;
+    use scytale::hash::sha2;
+
+    hmac_suite!(
+        automatic,
+        sha2::Sha256,
         "ACVP-HMAC-SHA2-256-1.0/internalProjection.json",
         "HMAC-SHA2-256"
-    );
-
-    #[cfg(target_arch = "x86_64")]
-    hmac_suite!(
-        shani,
-        sha2::x86_64::Sha256,
-        "ACVP-HMAC-SHA2-256-1.0/internalProjection.json",
-        "HMAC-SHA2-256",
-        "SHA-NI"
     );
 }
 
 mod hmac_sha2_384 {
-    every_hmac!(
-        Sha384,
+    use super::*;
+    use scytale::hash::sha2;
+
+    hmac_suite!(
+        automatic,
+        sha2::Sha384,
         "ACVP-HMAC-SHA2-384-1.0/internalProjection.json",
         "HMAC-SHA2-384"
     );
 }
 
 mod hmac_sha2_512 {
-    every_hmac!(
-        Sha512,
+    use super::*;
+    use scytale::hash::sha2;
+
+    hmac_suite!(
+        automatic,
+        sha2::Sha512,
         "ACVP-HMAC-SHA2-512-1.0/internalProjection.json",
         "HMAC-SHA2-512"
     );
 }
 
 mod hmac_sha2_512_224 {
-    every_hmac!(
-        Sha512_224,
+    use super::*;
+    use scytale::hash::sha2;
+
+    hmac_suite!(
+        automatic,
+        sha2::Sha512_224,
         "ACVP-HMAC-SHA2-512-224-1.0/internalProjection.json",
         "HMAC-SHA2-512/224"
     );
 }
 
 mod hmac_sha2_512_256 {
-    every_hmac!(
-        Sha512_256,
+    use super::*;
+    use scytale::hash::sha2;
+
+    hmac_suite!(
+        automatic,
+        sha2::Sha512_256,
         "ACVP-HMAC-SHA2-512-256-1.0/internalProjection.json",
         "HMAC-SHA2-512/256"
     );
 }
 
-/// HMAC over each SHA-3 digest, whose rates exceed any SHA-2 block.
+/// HMAC over each SHA-3 digest, whose rates exceed any SHA-2 block,
+/// which is the case the key canonicalisation has to get right.
 mod hmac_sha3_224 {
-    every_hmac_sha3!(
-        Sha3_224,
+    use super::*;
+    use scytale::hash::sha3;
+
+    hmac_suite!(
+        automatic,
+        sha3::Sha3_224,
         "ACVP-HMAC-SHA3-224-1.0/internalProjection.json",
         "HMAC-SHA3-224"
     );
 }
 
 mod hmac_sha3_256 {
-    every_hmac_sha3!(
-        Sha3_256,
+    use super::*;
+    use scytale::hash::sha3;
+
+    hmac_suite!(
+        automatic,
+        sha3::Sha3_256,
         "ACVP-HMAC-SHA3-256-1.0/internalProjection.json",
         "HMAC-SHA3-256"
     );
 }
 
 mod hmac_sha3_384 {
-    every_hmac_sha3!(
-        Sha3_384,
+    use super::*;
+    use scytale::hash::sha3;
+
+    hmac_suite!(
+        automatic,
+        sha3::Sha3_384,
         "ACVP-HMAC-SHA3-384-1.0/internalProjection.json",
         "HMAC-SHA3-384"
     );
 }
 
 mod hmac_sha3_512 {
-    every_hmac_sha3!(
-        Sha3_512,
+    use super::*;
+    use scytale::hash::sha3;
+
+    hmac_suite!(
+        automatic,
+        sha3::Sha3_512,
         "ACVP-HMAC-SHA3-512-1.0/internalProjection.json",
         "HMAC-SHA3-512"
     );
@@ -1140,5 +1136,135 @@ mod hkdf {
     #[test]
     fn acvp_kda_hkdf() {
         support::acvp::kda_hkdf::run();
+    }
+}
+
+/// Every implementation this build holds, and whether this processor
+/// can run it. A suite whose implementation is absent skips, and a
+/// skip reads as a pass, so this is where a log says what was
+/// actually exercised:
+///
+/// ```text
+/// cargo test --test acvp inventory -- --nocapture
+/// ```
+mod inventory {
+    use scytale::cipher::chacha20::Backend;
+    use scytale::cipher::{aes, chacha20, BlockCipher};
+    use scytale::hash::{sha2, sha3, Hash};
+    use scytale::Error;
+
+    /// Whether a block cipher can be built on this processor.
+    fn cipher<C: BlockCipher>() -> bool {
+        available(C::try_new(&C::zero_key()).map(|_| ()))
+    }
+
+    /// Whether a hash can be built on this processor.
+    fn hash<H: Hash>() -> bool {
+        available(H::try_new().map(|_| ()))
+    }
+
+    /// `NotSupported` is the absence of instructions; anything else
+    /// is a fault worth failing for.
+    fn available(result: Result<(), Error>) -> bool {
+        match result {
+            Ok(()) => true,
+            Err(Error::NotSupported) => false,
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    fn report(name: &str, available: bool) {
+        let state = if available { "run" } else { "not available" };
+        println!("  {name:<32} {state}");
+    }
+
+    #[test]
+    fn implementations() {
+        println!("\nAES");
+        report("aes::Aes", cipher::<aes::Aes<16>>());
+        report("aes::portable::Aes", cipher::<aes::portable::Aes<16>>());
+        report(
+            "aes::portable::bitsliced::Aes",
+            cipher::<aes::portable::bitsliced::Aes<16>>(),
+        );
+        #[cfg(target_arch = "x86_64")]
+        {
+            report(
+                "aes::x86_64::aesni::Aes",
+                cipher::<aes::x86_64::aesni::Aes<16>>(),
+            );
+            report(
+                "aes::x86_64::vaes::Aes",
+                cipher::<aes::x86_64::vaes::Aes<16>>(),
+            );
+        }
+        #[cfg(target_arch = "aarch64")]
+        report(
+            "aes::aarch64::armv8::Aes",
+            cipher::<aes::aarch64::armv8::Aes<16>>(),
+        );
+        #[cfg(target_arch = "riscv64")]
+        {
+            report(
+                "aes::riscv64::zkn::Aes",
+                cipher::<aes::riscv64::zkn::Aes<16>>(),
+            );
+            report(
+                "aes::riscv64::zvkned::Aes",
+                cipher::<aes::riscv64::zvkned::Aes<16>>(),
+            );
+        }
+
+        // SHA-256 and SHA-512 are listed apart: they are different
+        // instructions, and a processor can have one without the
+        // other.
+        println!("SHA-2");
+        report("sha2::Sha256", hash::<sha2::Sha256>());
+        report("sha2::Sha512", hash::<sha2::Sha512>());
+        report("sha2::portable::Sha256", hash::<sha2::portable::Sha256>());
+        report("sha2::portable::Sha512", hash::<sha2::portable::Sha512>());
+        #[cfg(target_arch = "x86_64")]
+        report("sha2::x86_64::Sha256", hash::<sha2::x86_64::Sha256>());
+        #[cfg(target_arch = "aarch64")]
+        {
+            report("sha2::aarch64::Sha256", hash::<sha2::aarch64::Sha256>());
+            report("sha2::aarch64::Sha512", hash::<sha2::aarch64::Sha512>());
+        }
+        #[cfg(target_arch = "riscv64")]
+        {
+            report("sha2::riscv64::Sha256", hash::<sha2::riscv64::Sha256>());
+            report("sha2::riscv64::Sha512", hash::<sha2::riscv64::Sha512>());
+        }
+
+        println!("SHA-3");
+        report("sha3::Sha3_256", hash::<sha3::Sha3_256>());
+        report(
+            "sha3::portable::Sha3_256",
+            hash::<sha3::portable::Sha3_256>(),
+        );
+        #[cfg(target_arch = "aarch64")]
+        report("sha3::aarch64::Sha3_256", hash::<sha3::aarch64::Sha3_256>());
+
+        println!("ChaCha20");
+        report(
+            "chacha20::portable::Portable",
+            chacha20::portable::Portable::supported(),
+        );
+        #[cfg(target_arch = "x86_64")]
+        report(
+            "chacha20::x86_64::Avx2",
+            chacha20::x86_64::Avx2::supported(),
+        );
+        #[cfg(target_arch = "aarch64")]
+        report(
+            "chacha20::aarch64::Neon",
+            chacha20::aarch64::Neon::supported(),
+        );
+        #[cfg(target_arch = "riscv64")]
+        report(
+            "chacha20::riscv64::Zvbb",
+            chacha20::riscv64::Zvbb::supported(),
+        );
+        println!();
     }
 }

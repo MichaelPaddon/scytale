@@ -18,6 +18,11 @@ license = "BSD-2-Clause"
 # wrappers still fire.
 [profile.test]
 opt-level = 2
+# Nothing reads a debugger here: a failure names its file and line
+# from the panic itself. Generating and linking full debug info for
+# binaries this size is pure cost. Ask for it when it is wanted:
+# RUSTFLAGS="-C debuginfo=2" cargo test.
+debug = false
 
 [profile.release]
 opt-level = 3

@@ -8,6 +8,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # A CI build is built once and thrown away, so the incremental
+  # artifacts are written and never read.
+  CARGO_INCREMENTAL: 0
 
 jobs:
   # Every architecture runs its own tests natively: no emulation, so
@@ -49,14 +52,26 @@ jobs:
           uname -m
           cargo --version
           rustc --version --verbose
+          # The extensions the run-time probes look for: `isa` on
+          # RISC-V, `Features` on AArch64, `flags` on x86-64.
+          grep -m1 -E '^(isa|Features|flags)' /proc/cpuinfo || true
 
       - name: Test
         # The alias in .cargo/config.toml; includes the slow Monte
         # Carlo suites, which are quick enough on real hardware.
         run: cargo test-extended
 
+      - name: Implementations tested
+        # The binary is built by now, so this costs a second and
+        # says which implementations this processor could run.
+        run: cargo test --test acvp inventory -- --nocapture
+
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        # The same profile as the tests, so this analyses the code
+        # rather than building a second tree of it.
+        run: |
+          cargo clippy --workspace --all-targets --profile test \
+              -- -D warnings
 
       - name: Docs
         run: cargo doc --workspace --no-deps

@@ -13,11 +13,13 @@ encryption, Ed25519 and RSA signatures, and random numbers.
 test vectors and against the NIST Automated Cryptographic Validation
 Program (ACVP) vectors: 56,078 one-shot cases and 3600 Monte Carlo
 steps, the latter being 3.6 million chained cipher calls with the key
-re-derived at each step. Each case runs against every implementation
-the processor supports, not just one. Every implementation is also
-compared byte for byte against the portable one across a range of
-buffer lengths, so the paths that only some processors take get the
-same scrutiny as the rest.
+re-derived at each step. Every implementation of a primitive is put
+through the whole vector set for it, at every key size; the modes and
+constructions built on top run once each, on the implementation the
+processor picks. Every implementation is also compared byte for byte
+against the portable one across a range of buffer lengths, so the
+paths that only some processors take get the same scrutiny as the
+rest.
 
 **Fast.** Where a processor has instructions for a primitive, scytale
 uses them, through hand-written assembly rather than compiler
