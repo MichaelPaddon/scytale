@@ -1,25 +1,118 @@
 # scytale
 
-Cryptographic primitives in Rust.
+Cryptographic primitives in Rust: ciphers and the modes over them,
+hashes, message authentication, key derivation, key agreement,
+signatures, post-quantum key encapsulation and signatures, and random
+numbers. It is `no_std`, has two dependencies, needs no C compiler
+and no build script, and has no feature flags to get wrong.
 
-This is early work. It has AES and the block cipher modes built on
-it, ChaCha20 and ChaCha20-Poly1305, the SHA-2 and SHA-3 hashes and
-SHAKE, HMAC, HKDF and PBKDF2 over them, X25519 key agreement, RSA-OAEP
-encryption, Ed25519 and RSA signatures, and random numbers.
+## The name
+
+A [scytale][wiki] is a rod. The Spartans wound a strip of leather
+around one and wrote the message along the rod, so that unwound the
+strip carries a column of unrelated letters and reads again only when
+it is wound on a rod of the same diameter. The key is a physical
+dimension, and the ciphertext is a strip of leather a courier can
+wear.
+
+Whether it was ever really used to keep a secret is disputed: the
+surviving accounts fit a device for proving that a message came from
+whoever held the matching rod at least as well as they fit a cipher.
+The earliest cryptographic instrument we have a name for may have
+been a message authentication code.
+
+Say it SKIT-uh-lee, to rhyme with Italy: that is what the
+dictionaries give and what the author says.
+
+The Greek is σκυτάλη, skutale, a staff or a baton, from σκύταλον,
+skutalon, the same thing. An Athenian would have said it about
+sku-TA-leh: the first vowel is the rounded one English lacks and
+French writes as the u of tu, the last is a long open e, and the mark
+over the alpha was a rise in pitch rather than a stress, so the word
+lifted in the middle instead of leaning on it. It is still a living
+word. In modern Greek, said skee-TAH-lee, a skutale is the baton a
+relay runner hands to the next, which is very nearly where the
+English ended up.
+
+[wiki]: https://en.wikipedia.org/wiki/Scytale
+
+## Status
+
+The algorithm set is complete enough to build serious applications
+on: encryption and authenticated encryption, hashes and MACs, key
+derivation, key agreement, public-key encryption, signatures, the
+three post-quantum families, a validated random generator, and the
+key formats other software stores keys in.
+
+It is tested to the same extent. The standards' own vectors are built
+into the unit tests, and on top of them run the NIST ACVP suites and
+the Project Wycheproof files, close to sixty thousand vector cases
+before the Monte Carlo suites add several million chained calls of
+their own. Every implementation of a primitive is put through the
+whole vector set for it, at every key size, and the whole suite runs
+on x86-64, aarch64 and riscv64 rather than on the machine that
+happens to be to hand. The Goals section below says exactly what that
+means.
+
+Work from here goes into speed and into algorithms that are still
+missing, not into rearranging what is already here. API changes will
+be avoided; the version number is below one, but the shape of the
+library is not expected to move.
+
+It builds on stable Rust 1.88 or later, on any architecture,
+with or without an operating system under it.
+
+## Trying it
+
+```sh
+cargo add scytale
+```
+
+```rust
+use scytale::cipher::{aes::Aes256, mode::Gcm};
+use scytale::random::{Random, Rng, System};
+
+let mut rng = Rng::try_new(System::try_new()?)?;
+let mut key = [0u8; 32];
+let mut nonce = [0u8; 12];
+rng.fill(&mut key)?;
+rng.fill(&mut nonce)?;
+
+let gcm = Gcm::try_new(Aes256::try_new(&key)?)?;
+let header = b"to: alice";
+let mut message = *b"attack at dawn";
+let mut tag = [0u8; 16];
+
+gcm.encrypt(&nonce, header, &mut message, &mut tag)?;
+gcm.decrypt(&nonce, header, &mut message, &tag)?;
+assert_eq!(&message, b"attack at dawn");
+```
+
+That is the whole setup: no builder, no context object, no global
+state to initialise, and no choice to make about which implementation
+to run. `Aes256` asks the processor what it can do the first time a
+key is expanded, and every call after that is one predictable branch.
+The same binary does that on a laptop with VAES and on a board with
+no cryptographic instructions at all.
+
+The API documentation is on [docs.rs](https://docs.rs/scytale), and
+`cargo doc --open` builds it locally with your own processor's
+modules in it.
 
 ## Goals
 
 **Correct.** Every implementation is checked against the standard
-test vectors and against the NIST Automated Cryptographic Validation
-Program (ACVP) vectors: 56,078 one-shot cases and 3600 Monte Carlo
-steps, the latter being 3.6 million chained cipher calls with the key
-re-derived at each step. Every implementation of a primitive is put
-through the whole vector set for it, at every key size; the modes and
-constructions built on top run once each, on the implementation the
-processor picks. Every implementation is also compared byte for byte
-against the portable one across a range of buffer lengths, so the
-paths that only some processors take get the same scrutiny as the
-rest.
+test vectors, against the NIST Automated Cryptographic Validation
+Program (ACVP) vectors, and against Project Wycheproof, whose cases
+are chosen to break implementations rather than to exercise them:
+56,078 one-shot cases and 3600 Monte Carlo steps, the latter being
+3.6 million chained cipher calls with the key re-derived at each
+step. Every implementation of a primitive is put through the whole
+vector set for it, at every key size; the modes and constructions
+built on top run once each, on the implementation the processor
+picks. Every implementation is also compared byte for byte against
+the portable one across a range of buffer lengths, so the paths that
+only some processors take get the same scrutiny as the rest.
 
 **Fast.** Where a processor has instructions for a primitive, scytale
 uses them, through hand-written assembly rather than compiler
@@ -351,50 +444,163 @@ first.
 
 ## Speed
 
-Measured on a 13th Gen Intel Core i7-1355U, encrypting 4 KB buffers:
+Measured on a 13th Gen Intel Core i7-1355U, one thread, on mains
+power. The benchmark ships with the library, so these are numbers you
+can reproduce: `cargo bench --bench speed`. Every figure below is a
+row it prints, and it prints rather more than are quoted here. On a
+laptop running on battery, expect about half of each of them.
+
+### The ciphers
+
+AES itself, over 8 KB buffers:
 
 | Implementation | AES-128 | AES-256 |
 | --- | --- | --- |
-| `vaes` | 30 GB/s | 21 GB/s |
-| `aesni` | 15 GB/s | 11 GB/s |
-| `ttable` | 500 MB/s | 360 MB/s |
-| `bitsliced` | 290 MB/s | 210 MB/s |
+| `vaes` | 28 GB/s | 20 GB/s |
+| `aesni` | 14 GB/s | 10 GB/s |
+| `ttable` | 490 MB/s | 360 MB/s |
+| `bitsliced` | 280 MB/s | 210 MB/s |
 
 Short messages are not an afterthought: a buffer of eight blocks or
 fewer costs 8 to 11 ns per call with AES-NI.
 
-The modes, on the same processor with AES-128 and 16 KB buffers.
-Rates are bytes, counted in millions and thousands of millions:
+ChaCha20 needs no cipher instructions, only a vector unit: 2.8 GB/s
+with AVX2 and 790 MB/s portable. On a processor with no AES hardware
+it is several times faster than any AES here, which is what it is
+for.
+
+### The modes
+
+AES-128 over 16 KB buffers, on the implementation the processor
+picks. Rates are bytes, counted in millions and thousands of
+millions:
 
 | Mode | Speed |
 | --- | --- |
-| CBC decrypt | 16 GB/s |
-| CTR | 3.5 GB/s |
-| XTS | 2.6 GB/s |
-| GCM | 2.7 GB/s |
+| CBC encrypt | 1.9 GB/s |
+| CBC decrypt | 15 GB/s |
+| CFB1 | 7.4 MB/s |
+| CFB8 | 83 MB/s |
+| CFB128 | 1.6 GB/s |
+| OFB | 2.0 GB/s |
+| CTR | 12 GB/s |
+| GMAC | 11 GB/s |
+| GCM | 5.9 GB/s |
+| GCM-SIV | 1.3 GB/s |
+| XPN | 5.5 GB/s |
+| XTS | 8.4 GB/s |
+| KW, KWP | 116 MB/s |
+| ChaCha20-Poly1305 | 1.4 GB/s |
 
-CBC encryption, OFB and CFB encryption are serial by definition: each
+CBC encryption, OFB and the CFB modes are serial by definition: each
 block waits for the one before it, so they run at the speed of single
-blocks and no amount of interleaving helps.
+blocks and no amount of interleaving helps. CFB1 is a block operation
+per bit, which is the two orders of magnitude between it and CFB128.
+Key wrapping passes over its input six times, by construction, and is
+meant for keys rather than for messages.
 
-The hashes, on the same processor with 16 KB buffers:
+### Hashes and message authentication
+
+Over 16 KB buffers:
 
 | Function | Implementation | Speed |
 | --- | --- | --- |
-| SHA-256 | `shani` | 1.8 GB/s |
-| SHA-256 | `portable` | 270 MB/s |
-| SHA-512 | `portable` | 430 MB/s |
-| HMAC-SHA-256 | `shani` | 1.8 GB/s |
-| SHA3-256 | `portable` | 450 MB/s |
-| SHA3-512 | `portable` | 240 MB/s |
-| SHAKE128 | `portable` | 550 MB/s |
-| ChaCha20 | `avx2` | 1.2 GB/s |
-| ChaCha20 | `portable` | 400 MB/s |
-| Poly1305 | `portable` | 1.3 GB/s |
-| ChaCha20-Poly1305 | `avx2` | 620 MB/s |
+| SHA-1 | `portable` | 560 MB/s |
+| SHA-256 | `shani` | 2.4 GB/s |
+| SHA-256 | `portable` | 330 MB/s |
+| SHA-512 | `portable` | 520 MB/s |
+| SHA3-256 | `portable` | 540 MB/s |
+| SHA3-512 | `portable` | 270 MB/s |
+| SHAKE128 | `portable` | 640 MB/s |
+| SHAKE256 | `portable` | 520 MB/s |
+| HMAC-SHA-256 | `shani` | 2.3 GB/s |
+| HMAC-SHA-512 | `portable` | 540 MB/s |
+| Poly1305 | `portable` | 3.0 GB/s |
+| CTR_DRBG | `vaes` | 930 MB/s |
 
 SHA-224, SHA-384 and the SHA-512/t pair run at the speed of the
 function whose code they share.
+
+### Key derivation
+
+One derivation of a 32-byte key:
+
+| Function | Time |
+| --- | --- |
+| HKDF-SHA-256 | 0.6 us |
+| HKDF-SHA-512 | 2.6 us |
+| PBKDF2-HMAC-SHA-256, 100,000 iterations | 13 ms |
+| PBKDF2-HMAC-SHA-512, 100,000 iterations | 63 ms |
+
+PBKDF2 is slow on purpose, and its cost is the iteration count and
+nothing else. The two figures are what a login path costs at a round
+number of iterations; choose the count from the time you are willing
+to spend, not from this table.
+
+### Key agreement, signatures and encryption
+
+One operation, in microseconds:
+
+| Operation | Time |
+| --- | --- |
+| X25519 key generation | 29 us |
+| X25519 agreement | 29 us |
+| ECDH P-256 key generation | 40 us |
+| ECDH P-256 agreement | 97 us |
+| ECDH P-384 key generation | 107 us |
+| ECDH P-384 agreement | 290 us |
+| Ed25519 key generation | 57 us |
+| Ed25519 sign | 115 us |
+| Ed25519 verify | 113 us |
+| ECDSA P-256 sign | 50 us |
+| ECDSA P-256 verify | 135 us |
+| ECDSA P-384 sign | 140 us |
+| ECDSA P-384 verify | 393 us |
+| RSA-2048 PSS sign | 910 us |
+| RSA-2048 PSS verify | 158 us |
+| RSA-2048 OAEP encrypt | 159 us |
+| RSA-2048 OAEP decrypt | 915 us |
+
+Signing and key generation on the prime curves multiply the base
+point, which is known in advance and has a table of its multiples
+built in; agreement and verification multiply a point that arrives at
+run time and cannot. That is the whole distance between the 50 us
+ECDSA signature and the 135 us verification of it, and it is why
+Ed25519, which has no such table here yet, signs more slowly than
+P-256 while verifying faster.
+
+### Post-quantum
+
+| Parameter set | Key generation | Encapsulate | Decapsulate |
+| --- | --- | --- | --- |
+| ML-KEM-512 | 23 us | 25 us | 32 us |
+| ML-KEM-768 | 40 us | 40 us | 49 us |
+| ML-KEM-1024 | 60 us | 60 us | 72 us |
+
+| Parameter set | Key generation | Sign | Verify |
+| --- | --- | --- | --- |
+| ML-DSA-44 | 65 us | 607 us | 65 us |
+| ML-DSA-65 | 126 us | 385 us | 105 us |
+| ML-DSA-87 | 182 us | 332 us | 178 us |
+| SLH-DSA-SHA2-128s | 33 ms | 252 ms | 246 us |
+| SLH-DSA-SHA2-128f | 503 us | 11.7 ms | 699 us |
+
+ML-DSA signing repeats until a candidate passes, so its cost depends
+on the message and not only on the parameter set: ML-DSA-44 being the
+slowest to sign here is that, not a mistake. SLH-DSA has twelve
+parameter sets; the two shown are the small and the fast end of the
+128-bit ones, and they are the whole trade the family offers, a
+signature small and slow or large and quick.
+
+### Format-preserving encryption
+
+| Mode | Time |
+| --- | --- |
+| FF1, sixteen digits base 10 | 1.2 ms |
+| FF3-1, sixteen digits base 10 | 362 us |
+
+Both are ten rounds of a Feistel network over the caller's radix, and
+FF1 does more work per round.
 
 The ARM and RISC-V implementations have only been run under
 emulation, so there are no timings for them.
