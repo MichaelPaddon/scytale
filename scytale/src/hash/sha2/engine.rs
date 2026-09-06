@@ -27,9 +27,8 @@ use core::marker::PhantomData;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::cipher::Block;
 use crate::hash::{BitHash, Hash};
-use crate::Error;
+use crate::{BlockType, Error};
 
 /// Keeps the traits here to this crate's own implementations.
 mod sealed {
@@ -68,7 +67,9 @@ pub trait Variant32: Clone + Sealed {
     /// The initial hash value.
     const IV: [u32; 8];
     /// The digest, a prefix of the final state.
-    type Output: Block;
+    type Output: Copy + AsRef<[u8]> + AsMut<[u8]>;
+    /// A digest of zeros, for the engine to fill.
+    fn zero_output() -> Self::Output;
 }
 
 /// A member of the SHA-512 family: SHA-384 or SHA-512. Sealed.
@@ -76,7 +77,9 @@ pub trait Variant64: Clone + Sealed {
     /// The initial hash value.
     const IV: [u64; 8];
     /// The digest, a prefix of the final state.
-    type Output: Block;
+    type Output: Copy + AsRef<[u8]> + AsMut<[u8]>;
+    /// A digest of zeros, for the engine to fill.
+    fn zero_output() -> Self::Output;
 }
 
 /// Checks the bit count `finalize_bits` is given, and builds the
@@ -178,8 +181,8 @@ macro_rules! engine {
                 {
                     chunk.copy_from_slice(&word.to_be_bytes());
                 }
-                let mut out = V::Output::ZERO;
-                let n = V::Output::SIZE;
+                let mut out = V::zero_output();
+                let n = core::mem::size_of::<V::Output>();
                 out.as_mut().copy_from_slice(&full[..n]);
                 out
             }
@@ -198,8 +201,15 @@ macro_rules! engine {
             }
         }
 
+        impl<C: $compress, V: $variant> BlockType for $name<C, V> {
+            type Block = [u8; $block];
+
+            fn zero_block() -> Self::Block {
+                [0; $block]
+            }
+        }
+
         impl<C: $compress, V: $variant> Hash for $name<C, V> {
-            const BLOCK_SIZE: usize = $block;
             type Output = V::Output;
 
             fn try_new() -> Result<Self, Error> {
@@ -233,27 +243,31 @@ macro_rules! engine {
                     self.compress(&[block]);
                     self.used = 0;
                 }
-                let (blocks, rest) = <[u8; $block]>::split(data);
+                let (blocks, rest) = data.as_chunks::<$block>();
                 self.compress(blocks);
                 self.block[..rest.len()].copy_from_slice(rest);
                 self.used = rest.len();
             }
 
-            fn finalize(mut self) -> Self::Output {
+            fn finalize(&mut self) -> Self::Output {
                 self.pad(0x80, 0);
-                self.output()
+                let out = self.output();
+                self.reset();
+                out
             }
         }
 
         impl<C: $compress, V: $variant> BitHash for $name<C, V> {
             fn finalize_bits(
-                mut self,
+                &mut self,
                 last: u8,
                 bits: u32,
             ) -> Result<Self::Output, Error> {
                 let trailer = trailer(last, bits)?;
                 self.pad(trailer, bits as $length);
-                Ok(self.output())
+                let out = self.output();
+                self.reset();
+                Ok(out)
             }
         }
 

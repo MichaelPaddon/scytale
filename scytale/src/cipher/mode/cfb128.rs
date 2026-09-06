@@ -38,8 +38,8 @@
 use core::fmt;
 
 use super::{xor, LANES};
-use crate::cipher::{Block, BlockCipher};
-use crate::Error;
+use crate::cipher::BlockCipher;
+use crate::{ByteArray, Error};
 
 /// CFB with 128-bit segments over a block cipher.
 #[derive(Clone)]
@@ -47,7 +47,10 @@ pub struct Cfb128<C> {
     cipher: C,
 }
 
-impl<C: BlockCipher> Cfb128<C> {
+impl<C: BlockCipher> Cfb128<C>
+where
+    C::Block: ByteArray,
+{
     /// Wraps `cipher`.
     pub fn new(cipher: C) -> Self {
         Cfb128 { cipher }
@@ -93,13 +96,16 @@ pub struct Encryptor<'a, C: BlockCipher> {
     register: C::Block,
 }
 
-impl<C: BlockCipher> Encryptor<'_, C> {
+impl<C: BlockCipher> Encryptor<'_, C>
+where
+    C::Block: ByteArray,
+{
     /// Encrypts the next piece of the message in place.
     ///
     /// The register takes the ciphertext just produced, so this runs
     /// one block at a time and cannot use the cipher's bulk path.
     pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
-        let (blocks, rest) = C::Block::split_mut(data);
+        let (blocks, rest) = <C::Block as ByteArray>::split_mut(data);
         if !rest.is_empty() {
             return Err(Error::NotBlockAligned(data.len()));
         }
@@ -122,7 +128,10 @@ pub struct Decryptor<'a, C: BlockCipher> {
     register: C::Block,
 }
 
-impl<C: BlockCipher> Decryptor<'_, C> {
+impl<C: BlockCipher> Decryptor<'_, C>
+where
+    C::Block: ByteArray,
+{
     /// Decrypts the next piece of the message in place.
     ///
     /// Every register value is known in advance here: the IV, then
@@ -130,12 +139,12 @@ impl<C: BlockCipher> Decryptor<'_, C> {
     /// built first and encrypted in one bulk call, unlike encryption,
     /// which has to wait for its own output.
     pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
-        let (blocks, rest) = C::Block::split_mut(data);
+        let (blocks, rest) = <C::Block as ByteArray>::split_mut(data);
         if !rest.is_empty() {
             return Err(Error::NotBlockAligned(data.len()));
         }
-        let mut seen = [C::Block::ZERO; LANES];
-        let mut keystream = [C::Block::ZERO; LANES];
+        let mut seen = [C::zero_block(); LANES];
+        let mut keystream = [C::zero_block(); LANES];
         for group in blocks.chunks_mut(LANES) {
             let n = group.len();
             let seen = &mut seen[..n];
@@ -191,7 +200,7 @@ mod tests {
         out
     }
 
-    fn cfb(key: &[u8]) -> Cfb128<Aes> {
+    fn cfb<const K: usize>(key: &[u8; K]) -> Cfb128<Aes<K>> {
         Cfb128::new(Aes::try_new(key).unwrap())
     }
 

@@ -64,7 +64,9 @@ the machinery behind it:
 | ChaCha20 (RFC 8439) | 256 | a stream cipher; no tables, no AES needed |
 
 Every mode below is generic: it wraps any block cipher, and AES is
-simply the one there is so far.
+simply the one there is so far. The key width is part of the type,
+`Aes128`, `Aes192` or `Aes256`, so a key of the wrong length is a
+compile error rather than a run-time one.
 
 | Mode | Kind | Notes |
 | --- | --- | --- |
@@ -263,9 +265,9 @@ so that each processor's own modules can be read, is at
 ## Using it
 
 ```rust
-use scytale::cipher::aes::Aes;
+use scytale::cipher::aes::Aes128;
 
-let aes = Aes::try_new(&key)?;
+let aes = Aes128::try_new(&key)?; // key: [u8; 16]
 
 let mut block = [0u8; 16];
 aes.encrypt_block(&mut block);
@@ -279,9 +281,9 @@ A mode wraps the cipher. Authenticated encryption returns a tag, and
 decryption checks it before the plaintext is worth anything:
 
 ```rust
-use scytale::cipher::{aes::Aes, mode::Gcm};
+use scytale::cipher::{aes::Aes128, mode::Gcm};
 
-let gcm = Gcm::try_new(Aes::try_new(&key)?)?;
+let gcm = Gcm::try_new(Aes128::try_new(&key)?)?;
 
 let mut tag = [0u8; 16];
 gcm.encrypt(&nonce, associated_data, &mut buffer, &mut tag)?;
@@ -312,19 +314,21 @@ mac.verify(&tag)?;
 supports, as `Aes` does, and each implementation is reachable by name
 under `hash::sha2::portable`, `x86_64`, `aarch64` and `riscv64`.
 
-`Aes` picks the best implementation the processor supports, probing
-once on first use. Each implementation can also be named directly:
+`Aes<K>` picks the best implementation the processor supports,
+probing once on first use; `K` is the key width in bytes, and
+`Aes128`, `Aes192` and `Aes256` name the three. Each implementation
+can also be named directly, with the same width parameter:
 
 | Type | Uses |
 | --- | --- |
-| `cipher::aes::Aes` | the best of the below for this processor |
-| `aes::x86_64::vaes::Aes` | VAES |
-| `aes::x86_64::aesni::Aes` | AES-NI |
-| `aes::aarch64::armv8::Aes` | ARMv8 cryptography extension |
-| `aes::riscv64::zvkned::Aes` | RISC-V vector cryptography |
-| `aes::riscv64::zkn::Aes` | RISC-V scalar cryptography |
-| `aes::portable::bitsliced::Aes` | portable, constant time |
-| `aes::portable::Aes` | portable, table driven; see below |
+| `cipher::aes::Aes<K>` | the best of the below for this processor |
+| `aes::x86_64::vaes::Aes<K>` | VAES |
+| `aes::x86_64::aesni::Aes<K>` | AES-NI |
+| `aes::aarch64::armv8::Aes<K>` | ARMv8 cryptography extension |
+| `aes::riscv64::zvkned::Aes<K>` | RISC-V vector cryptography |
+| `aes::riscv64::zkn::Aes<K>` | RISC-V scalar cryptography |
+| `aes::portable::bitsliced::Aes<K>` | portable, constant time |
+| `aes::portable::Aes<K>` | portable, table driven; see below |
 
 The architecture-specific types exist only on their architecture, and
 their `try_new` returns `Error::NotSupported` when the processor

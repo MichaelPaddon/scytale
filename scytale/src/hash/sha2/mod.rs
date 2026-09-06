@@ -73,7 +73,7 @@ use engine::Compress64;
 use engine::{Compress32, Engine32, Engine64, Variant32, Variant64};
 
 use crate::hash::{BitHash, Hash};
-use crate::Error;
+use crate::{BlockType, Error};
 
 /// The members of the family, as markers the engines are generic
 /// over. Each says only where the hash starts and how much of the
@@ -120,6 +120,10 @@ pub mod variant {
             0x68581511, 0x64f98fa7, 0xbefa4fa4,
         ];
         type Output = [u8; 28];
+
+        fn zero_output() -> Self::Output {
+            [0; 28]
+        }
     }
 
     impl Variant32 for Sha256 {
@@ -130,6 +134,10 @@ pub mod variant {
             0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
         ];
         type Output = [u8; 32];
+
+        fn zero_output() -> Self::Output {
+            [0; 32]
+        }
     }
 
     impl Variant64 for Sha384 {
@@ -145,6 +153,10 @@ pub mod variant {
             0x47b5481dbefa4fa4,
         ];
         type Output = [u8; 48];
+
+        fn zero_output() -> Self::Output {
+            [0; 48]
+        }
     }
 
     impl Variant64 for Sha512 {
@@ -159,6 +171,10 @@ pub mod variant {
             0x5be0cd19137e2179,
         ];
         type Output = [u8; 64];
+
+        fn zero_output() -> Self::Output {
+            [0; 64]
+        }
     }
 
     // The SHA-512/t values are SHA-512 of the string "SHA-512/t",
@@ -176,6 +192,10 @@ pub mod variant {
             0x1112e6ad91d692a1,
         ];
         type Output = [u8; 28];
+
+        fn zero_output() -> Self::Output {
+            [0; 28]
+        }
     }
 
     impl Variant64 for Sha512_256 {
@@ -190,6 +210,10 @@ pub mod variant {
             0x0eb72ddc81c52ca2,
         ];
         type Output = [u8; 32];
+
+        fn zero_output() -> Self::Output {
+            [0; 32]
+        }
     }
 }
 
@@ -342,8 +366,15 @@ macro_rules! automatic {
             }
         }
 
+        impl<V: $variant> BlockType for $name<V> {
+            type Block = [u8; $block];
+
+            fn zero_block() -> Self::Block {
+                [0; $block]
+            }
+        }
+
         impl<V: $variant> Hash for $name<V> {
-            const BLOCK_SIZE: usize = $block;
             type Output = V::Output;
 
             fn try_new() -> Result<Self, Error> {
@@ -371,8 +402,8 @@ macro_rules! automatic {
                 }
             }
 
-            fn finalize(self) -> Self::Output {
-                match self.0 {
+            fn finalize(&mut self) -> Self::Output {
+                match &mut self.0 {
                     $(
                         #[cfg(target_arch = $arch)]
                         $inner::$choice(engine) => engine.finalize(),
@@ -384,11 +415,11 @@ macro_rules! automatic {
 
         impl<V: $variant> BitHash for $name<V> {
             fn finalize_bits(
-                self,
+                &mut self,
                 last: u8,
                 bits: u32,
             ) -> Result<Self::Output, Error> {
-                match self.0 {
+                match &mut self.0 {
                     $(
                         #[cfg(target_arch = $arch)]
                         $inner::$choice(engine) => {
@@ -653,7 +684,7 @@ pub(crate) mod tests {
     fn clone_forks_the_state() {
         let mut hash = Sha256::new();
         hash.update(b"ab");
-        let fork = hash.clone();
+        let mut fork = hash.clone();
         hash.update(b"c");
         assert_eq!(hash.finalize(), Sha256::digest(b"abc").unwrap());
         assert_eq!(fork.finalize(), Sha256::digest(b"ab").unwrap());
@@ -663,7 +694,7 @@ pub(crate) mod tests {
     /// seven-bit message 1110 010.
     #[test]
     fn bit_strings() {
-        let hash = Sha256::new();
+        let mut hash = Sha256::new();
         assert_eq!(
             hash.finalize_bits(0x00, 1).unwrap(),
             hex(

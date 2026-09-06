@@ -52,8 +52,8 @@ pub(crate) mod tables;
 use core::fmt;
 
 use crate::cipher::aes::{expand_words, KeySize, BLOCK_SIZE, MAX_WORDS};
-use crate::cipher::{Block, BlockCipher};
-use crate::Error;
+use crate::cipher::BlockCipher;
+use crate::{BlockType, Error, KeyType};
 use tables::{INV_SBOX, SBOX, TD, TE};
 use zeroize::ZeroizeOnDrop;
 
@@ -63,14 +63,14 @@ use zeroize::ZeroizeOnDrop;
 /// [`Aes::try_new`]; encryption and decryption then operate on single
 /// 16 byte blocks.
 #[derive(Clone, ZeroizeOnDrop)]
-pub struct Aes {
+pub struct Aes<const K: usize> {
     enc: [u32; MAX_WORDS],
     dec: [u32; MAX_WORDS],
     #[zeroize(skip)]
     size: KeySize,
 }
 
-impl fmt::Debug for Aes {
+impl<const K: usize> fmt::Debug for Aes<K> {
     /// Deliberately omits the key material.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Aes")
@@ -79,9 +79,15 @@ impl fmt::Debug for Aes {
     }
 }
 
-impl Aes {
+impl<const K: usize> Aes<K> {
     /// Expands `key`, which must be 16, 24 or 32 bytes long.
-    pub fn try_new(key: &[u8]) -> Result<Self, Error> {
+    pub fn try_new(key: &[u8; K]) -> Result<Self, Error> {
+        const {
+            assert!(
+                K == 16 || K == 24 || K == 32,
+                "AES keys are 16, 24 or 32 bytes"
+            )
+        };
         let size = KeySize::for_key(key)?;
         let rounds = size.rounds();
 
@@ -143,7 +149,7 @@ impl Aes {
 
     /// Encrypts every block in place, independently (ECB).
     pub fn encrypt_blocks(&self, blocks: &mut [[u8; BLOCK_SIZE]]) {
-        let data = Block::flatten_mut(blocks);
+        let data = blocks.as_flattened_mut();
         match self.size {
             KeySize::Aes128 => encrypt_many::<10>(&self.enc, data),
             KeySize::Aes192 => encrypt_many::<12>(&self.enc, data),
@@ -153,7 +159,7 @@ impl Aes {
 
     /// Decrypts every block in place, independently (ECB).
     pub fn decrypt_blocks(&self, blocks: &mut [[u8; BLOCK_SIZE]]) {
-        let data = Block::flatten_mut(blocks);
+        let data = blocks.as_flattened_mut();
         match self.size {
             KeySize::Aes128 => decrypt_many::<10>(&self.dec, data),
             KeySize::Aes192 => decrypt_many::<12>(&self.dec, data),
@@ -162,10 +168,24 @@ impl Aes {
     }
 }
 
-impl BlockCipher for Aes {
+impl<const K: usize> BlockType for Aes<K> {
     type Block = [u8; BLOCK_SIZE];
 
-    fn try_new(key: &[u8]) -> Result<Self, Error> {
+    fn zero_block() -> Self::Block {
+        [0; BLOCK_SIZE]
+    }
+}
+
+impl<const K: usize> KeyType for Aes<K> {
+    type Key = [u8; K];
+
+    fn zero_key() -> Self::Key {
+        [0; K]
+    }
+}
+
+impl<const K: usize> BlockCipher for Aes<K> {
+    fn try_new(key: &Self::Key) -> Result<Self, Error> {
         Aes::try_new(key)
     }
 
@@ -332,11 +352,11 @@ mod tests {
         out
     }
 
-    fn check(key: &str, plain: &str, cipher: &str) {
-        let key = &unhex(key)[..key.len() / 2];
+    fn check<const K: usize>(key: &str, plain: &str, cipher: &str) {
+        let key: [u8; K] = unhex(key)[..K].try_into().unwrap();
         let plain: [u8; 16] = unhex(plain)[..16].try_into().unwrap();
         let cipher: [u8; 16] = unhex(cipher)[..16].try_into().unwrap();
-        let aes = Aes::try_new(key).unwrap();
+        let aes = Aes::try_new(&key).unwrap();
 
         let mut block = plain;
         aes.encrypt_block(&mut block);
@@ -348,7 +368,7 @@ mod tests {
     // FIPS 197 Appendix C.
     #[test]
     fn fips197_aes128() {
-        check(
+        check::<16>(
             "000102030405060708090a0b0c0d0e0f",
             "00112233445566778899aabbccddeeff",
             "69c4e0d86a7b0430d8cdb78070b4c55a",
@@ -357,7 +377,7 @@ mod tests {
 
     #[test]
     fn fips197_aes192() {
-        check(
+        check::<24>(
             "000102030405060708090a0b0c0d0e0f1011121314151617",
             "00112233445566778899aabbccddeeff",
             "dda97ca4864cdfe06eaf70a0ec0d7191",
@@ -366,7 +386,7 @@ mod tests {
 
     #[test]
     fn fips197_aes256() {
-        check(
+        check::<32>(
             "000102030405060708090a0b0c0d0e0f\
              101112131415161718191a1b1c1d1e1f",
             "00112233445566778899aabbccddeeff",
@@ -377,7 +397,7 @@ mod tests {
     // FIPS 197 Appendix B.
     #[test]
     fn fips197_appendix_b() {
-        check(
+        check::<16>(
             "2b7e151628aed2a6abf7158809cf4f3c",
             "3243f6a8885a308d313198a2e0370734",
             "3925841d02dc09fbdc118597196a0b32",
@@ -388,17 +408,17 @@ mod tests {
     #[test]
     fn sp800_38a_ecb() {
         let plain = "6bc1bee22e409f96e93d7e117393172a";
-        check(
+        check::<16>(
             "2b7e151628aed2a6abf7158809cf4f3c",
             plain,
             "3ad77bb40d7a3660a89ecaf32466ef97",
         );
-        check(
+        check::<24>(
             "8e73b0f7da0e6452c810f32b809079e562f8ead2522c6b7b",
             plain,
             "bd334f1d6e45f25ff712a214571fa5cc",
         );
-        check(
+        check::<32>(
             "603deb1015ca71be2b73aef0857d7781\
              1f352c073b6108d72d9810a30914dff4",
             plain,
@@ -408,8 +428,15 @@ mod tests {
 
     #[test]
     fn blocks_match_single_block_path() {
-        for klen in [16, 24, 32] {
-            let aes = Aes::try_new(&[0x5a; 32][..klen]).unwrap();
+        blocks_match_for::<16>();
+        blocks_match_for::<24>();
+        blocks_match_for::<32>();
+    }
+
+    fn blocks_match_for<const K: usize>() {
+        let klen = K;
+        {
+            let aes = Aes::try_new(&[0x5a; K]).unwrap();
             // Lengths cover zero, one lane group, leftovers and more.
             for nblocks in 0..9 {
                 let mut data = [[0u8; BLOCK_SIZE]; 8];
@@ -436,12 +463,8 @@ mod tests {
 
     #[test]
     fn trait_construction() {
-        let a = <Aes as BlockCipher>::try_new(&[1; 24]).unwrap();
+        let a = <Aes<24> as BlockCipher>::try_new(&[1; 24]).unwrap();
         assert_eq!(a.rounds(), 12);
-        assert_eq!(
-            <Aes as BlockCipher>::try_new(&[1; 20]).unwrap_err(),
-            Error::InvalidKeyLength(20)
-        );
         let mut data = [[7u8; BLOCK_SIZE]; 3];
         BlockCipher::encrypt_blocks(&a, &mut data);
         assert_ne!(data, [[7u8; BLOCK_SIZE]; 3]);
@@ -454,16 +477,6 @@ mod tests {
         assert_eq!(Aes::try_new(&[0; 16]).unwrap().rounds(), 10);
         assert_eq!(Aes::try_new(&[0; 24]).unwrap().rounds(), 12);
         assert_eq!(Aes::try_new(&[0; 32]).unwrap().rounds(), 14);
-    }
-
-    #[test]
-    fn rejects_bad_key_lengths() {
-        for n in [0, 1, 15, 17, 23, 25, 31, 33, 64] {
-            assert_eq!(
-                Aes::try_new(&[0; 64][..n]).unwrap_err(),
-                Error::InvalidKeyLength(n)
-            );
-        }
     }
 
     #[test]

@@ -13,6 +13,7 @@ use scytale::hash::sha2::{Sha512_224, Sha512_256};
 use scytale::hash::sha3::{Sha3_224, Sha3_256, Sha3_384, Sha3_512};
 use scytale::hash::Hash;
 use scytale::kdf::hkdf;
+use scytale::BlockType;
 use serde_json::Value;
 
 /// Runs the suite; a no-op without the vendored vectors.
@@ -60,7 +61,7 @@ pub fn run() {
 }
 
 /// One derivation compared against the file's key material.
-fn case<H: Hash>(t: &Value) -> bool {
+fn case<H: Hash + Clone + BlockType>(t: &Value) -> bool {
     let param = &t["kdfParameter"];
     let salt = hex(&param["salt"]);
     // The hybrid shared secret: the classical part then the

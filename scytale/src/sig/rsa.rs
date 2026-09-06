@@ -106,7 +106,6 @@
 //! whose reads never depend on `d` or the primes. Verification, and
 //! the padding checks on both sides, handle only public values.
 
-use crate::cipher::Block;
 use crate::hash::Hash;
 use crate::math::rsa::{mgf1_xor, Private, Public};
 use crate::random::Random;
@@ -283,7 +282,7 @@ impl<const LIMBS: usize, const BYTES: usize> PublicKey<LIMBS, BYTES> {
     ) -> Result<(), Error> {
         let mut em =
             self.raw.apply(signature).ok_or(Error::InvalidSignature)?;
-        let h_len = H::Output::SIZE;
+        let h_len = size_of::<H::Output>();
         if BYTES < h_len + salt_len + 2 {
             return Err(Error::InvalidSignature);
         }
@@ -489,7 +488,7 @@ impl<const LIMBS: usize, const BYTES: usize, const HALF: usize>
         message: &[u8],
         salt: &[u8],
     ) -> Result<[u8; BYTES], Error> {
-        let h_len = H::Output::SIZE;
+        let h_len = size_of::<H::Output>();
         if BYTES < h_len + salt.len() + 2 {
             return Err(Error::InvalidLength(salt.len()));
         }
@@ -641,7 +640,7 @@ fn encode_pkcs1<H: DigestInfo, const BYTES: usize>(
     em: &mut [u8; BYTES],
 ) -> Result<(), Error> {
     let digest = H::digest(message)?;
-    let t_len = H::PREFIX.len() + H::Output::SIZE;
+    let t_len = H::PREFIX.len() + size_of::<H::Output>();
     if BYTES < t_len + 11 {
         // The key is too narrow for this digest.
         return Err(Error::InvalidKeyLength(BYTES));
@@ -650,8 +649,9 @@ fn encode_pkcs1<H: DigestInfo, const BYTES: usize>(
     em[1] = 0x01;
     em[2..BYTES - t_len - 1].fill(0xff);
     em[BYTES - t_len - 1] = 0x00;
-    em[BYTES - t_len..BYTES - H::Output::SIZE].copy_from_slice(H::PREFIX);
-    em[BYTES - H::Output::SIZE..].copy_from_slice(digest.as_ref());
+    em[BYTES - t_len..BYTES - size_of::<H::Output>()]
+        .copy_from_slice(H::PREFIX);
+    em[BYTES - size_of::<H::Output>()..].copy_from_slice(digest.as_ref());
     Ok(())
 }
 

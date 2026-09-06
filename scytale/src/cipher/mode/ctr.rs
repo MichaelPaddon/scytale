@@ -55,8 +55,8 @@
 use core::fmt;
 
 use super::{xor, LANES};
-use crate::cipher::{Block, BlockCipher};
-use crate::Error;
+use crate::cipher::BlockCipher;
+use crate::{ByteArray, Error};
 
 /// Counter mode over a block cipher.
 #[derive(Clone)]
@@ -64,7 +64,10 @@ pub struct Ctr<C> {
     cipher: C,
 }
 
-impl<C: BlockCipher> Ctr<C> {
+impl<C: BlockCipher> Ctr<C>
+where
+    C::Block: ByteArray,
+{
     /// Wraps `cipher`.
     pub fn new(cipher: C) -> Self {
         Ctr { cipher }
@@ -98,8 +101,8 @@ impl<C: BlockCipher> Ctr<C> {
         Stream {
             cipher: &self.cipher,
             counter: *counter,
-            keystream: C::Block::ZERO,
-            used: C::Block::SIZE,
+            keystream: C::zero_block(),
+            used: size_of::<C::Block>(),
         }
     }
 }
@@ -111,7 +114,7 @@ impl<C: BlockCipher> Ctr<C> {
 /// width through a slice and unrolls the carry into a branch for
 /// every byte, so the common case says its size out loud.
 #[inline]
-pub(crate) fn increment<B: Block>(counter: &mut B) {
+pub(crate) fn increment<B: ByteArray>(counter: &mut B) {
     if let Ok(block) = <&mut [u8; 16]>::try_from(counter.as_mut()) {
         *block = u128::from_be_bytes(*block).wrapping_add(1).to_be_bytes();
         return;
@@ -135,7 +138,7 @@ pub(crate) fn increment<B: Block>(counter: &mut B) {
 /// must wait out: about a dozen cycles for every block, which was
 /// most of what counter mode cost.
 #[inline]
-fn counters<B: Block>(counter: &mut B, blocks: &mut [B]) {
+fn counters<B: ByteArray>(counter: &mut B, blocks: &mut [B]) {
     let Ok(start) = <[u8; 16]>::try_from(counter.as_ref()) else {
         // Some other block size, which no cipher here has.
         for block in blocks.iter_mut() {
@@ -167,10 +170,13 @@ pub struct Stream<'a, C: BlockCipher> {
     used: usize,
 }
 
-impl<C: BlockCipher> Stream<'_, C> {
+impl<C: BlockCipher> Stream<'_, C>
+where
+    C::Block: ByteArray,
+{
     /// Applies the keystream to the next piece of the message.
     pub fn update(&mut self, mut data: &mut [u8]) -> Result<(), Error> {
-        let size = C::Block::SIZE;
+        let size = size_of::<C::Block>();
 
         // Finish the block a previous piece stopped inside.
         if self.used < size {
@@ -183,8 +189,8 @@ impl<C: BlockCipher> Stream<'_, C> {
 
         // Whole blocks, in groups: their counters are known in
         // advance, so the cipher sees them all at once.
-        let (whole, tail) = C::Block::split_mut(data);
-        let mut keystream = [C::Block::ZERO; LANES];
+        let (whole, tail) = <C::Block as ByteArray>::split_mut(data);
+        let mut keystream = [C::zero_block(); LANES];
         for group in whole.chunks_mut(LANES) {
             let keystream = &mut keystream[..group.len()];
             counters(&mut self.counter, keystream);
@@ -237,7 +243,7 @@ mod tests {
         out
     }
 
-    fn ctr(key: &[u8]) -> Ctr<Aes> {
+    fn ctr<const K: usize>(key: &[u8; K]) -> Ctr<Aes<K>> {
         Ctr::new(Aes::try_new(key).unwrap())
     }
 

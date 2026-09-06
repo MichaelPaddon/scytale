@@ -159,11 +159,16 @@ impl<'a> Core<'a> {
         nonce: &[u8; NONCE_SIZE],
     ) -> Result<Self, Error> {
         let mut block = cipher.keystream_block(nonce, 0);
-        let mac = Poly1305::try_new(&block[..32]);
+        // The first half of the first keystream block is the one-time
+        // key; the block is a whole one, so the split cannot fail.
+        let (key, _) = block
+            .split_first_chunk::<32>()
+            .ok_or(Error::InvalidKeyLength(block.len()))?;
+        let mac = Poly1305::new(key);
         block.zeroize();
         Ok(Core {
             stream: cipher.stream(nonce, 1),
-            mac: mac?,
+            mac,
             aad_bytes: 0,
             message_bytes: 0,
             started: false,

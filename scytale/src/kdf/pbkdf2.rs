@@ -39,18 +39,17 @@
 //! as processors get faster; it is stored beside the salt, so old
 //! keys keep working.
 
-use crate::cipher::Block;
 use crate::hash::Hash;
 use crate::mac::hmac::Hmac;
 use crate::mac::Mac;
-use crate::Error;
+use crate::{BlockType, Error};
 
 /// Fills `key` from `password` and `salt` with `iterations` rounds.
 ///
 /// Returns [`Error::InvalidIterations`] for zero iterations, and
 /// [`Error::InvalidLength`] if `key` is longer than the construction
 /// can number, which no real key is.
-pub fn pbkdf2<H: Hash>(
+pub fn pbkdf2<H: Hash + Clone + BlockType>(
     password: &[u8],
     salt: &[u8],
     iterations: u32,
@@ -59,23 +58,21 @@ pub fn pbkdf2<H: Hash>(
     if iterations == 0 {
         return Err(Error::InvalidIterations);
     }
-    if key.len().div_ceil(H::Output::SIZE) > u32::MAX as usize {
+    if key.len().div_ceil(size_of::<H::Output>()) > u32::MAX as usize {
         return Err(Error::InvalidLength(key.len()));
     }
     // The password is the HMAC key, processed once here rather than
     // once per iteration.
     let mut mac = Hmac::<H>::try_new(password)?;
-    for (i, chunk) in key.chunks_mut(H::Output::SIZE).enumerate() {
+    for (i, chunk) in key.chunks_mut(size_of::<H::Output>()).enumerate() {
         // U_1 = PRF(P, S || INT(i)), then U_j = PRF(P, U_{j-1}).
-        mac.reset();
         mac.update(salt);
         mac.update(&(i as u32 + 1).to_be_bytes());
-        let mut u = mac.clone().finalize();
+        let mut u = mac.finalize();
         let mut t = u;
         for _ in 1..iterations {
-            mac.reset();
             mac.update(u.as_ref());
-            u = mac.clone().finalize();
+            u = mac.finalize();
             for (t, u) in t.as_mut().iter_mut().zip(u.as_ref()) {
                 *t ^= u;
             }

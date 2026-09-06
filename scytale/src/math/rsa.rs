@@ -8,7 +8,6 @@
 
 use zeroize::Zeroize;
 
-use crate::cipher::Block;
 use crate::der::{self, Algorithm, Reader, Writer};
 use crate::hash::Hash;
 use crate::math::montgomery::Montgomery;
@@ -777,7 +776,8 @@ pub(crate) fn mgf1_xor<H: Hash>(
     seed: &[u8],
     out: &mut [u8],
 ) -> Result<(), Error> {
-    for (counter, chunk) in (0u32..).zip(out.chunks_mut(H::Output::SIZE)) {
+    for (counter, chunk) in (0u32..).zip(out.chunks_mut(size_of::<H::Output>()))
+    {
         let mut hasher = H::try_new()?;
         hasher.update(seed);
         hasher.update(&counter.to_be_bytes());

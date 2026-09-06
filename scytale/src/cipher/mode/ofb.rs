@@ -41,7 +41,7 @@
 use core::fmt;
 
 use super::xor;
-use crate::cipher::{Block, BlockCipher};
+use crate::cipher::BlockCipher;
 use crate::Error;
 
 /// OFB over a block cipher.
@@ -79,7 +79,7 @@ impl<C: BlockCipher> Ofb<C> {
         Stream {
             cipher: &self.cipher,
             register: *iv,
-            used: C::Block::SIZE,
+            used: size_of::<C::Block>(),
         }
     }
 }
@@ -105,7 +105,7 @@ impl<C: BlockCipher> Stream<'_, C> {
     /// Each keystream block is the encryption of the one before it,
     /// so this cannot use the cipher's bulk path.
     pub fn update(&mut self, mut data: &mut [u8]) -> Result<(), Error> {
-        let size = C::Block::SIZE;
+        let size = size_of::<C::Block>();
         while !data.is_empty() {
             if self.used == size {
                 self.cipher.encrypt_block(&mut self.register);
@@ -151,7 +151,7 @@ mod tests {
         out
     }
 
-    fn ofb(key: &[u8]) -> Ofb<Aes> {
+    fn ofb<const K: usize>(key: &[u8; K]) -> Ofb<Aes<K>> {
         Ofb::new(Aes::try_new(key).unwrap())
     }
 

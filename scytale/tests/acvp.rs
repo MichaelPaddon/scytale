@@ -62,7 +62,7 @@ macro_rules! hardware_suites {
             /// Whether to run, reporting a skip when the processor
             /// cannot. A silent skip would look like a pass.
             fn supported() -> bool {
-                match <$ty>::try_new(&[0u8; 16]) {
+                match <$ty>::try_new(&<$ty as scytale::KeyType>::zero_key()) {
                     Ok(_) => true,
                     Err(Error::NotSupported) => {
                         eprintln!(concat!($what, " not available; skipping"));
@@ -106,8 +106,30 @@ macro_rules! hardware_tests {
     };
 }
 
+/// Defines the suites for one implementation at each of the three
+/// key widths, which are three types.
+macro_rules! widths {
+    ($n128:ident, $n192:ident, $n256:ident, $($p:ident)::+,
+     $suite:ident, $kind:ident) => {
+        suites!($n128, $($p)::+<16>, $suite, $kind);
+        suites!($n192, $($p)::+<24>, $suite, $kind);
+        suites!($n256, $($p)::+<32>, $suite, $kind);
+    };
+}
+
+/// As `widths!`, for a hardware implementation.
+macro_rules! hardware_widths {
+    ($n128:ident, $n192:ident, $n256:ident, $($p:ident)::+,
+     $suite:ident, $what:literal, $kind:ident) => {
+        hardware_suites!($n128, $($p)::+<16>, $suite, $what, $kind);
+        hardware_suites!($n192, $($p)::+<24>, $suite, $what, $kind);
+        hardware_suites!($n256, $($p)::+<32>, $suite, $what, $kind);
+    };
+}
+
 /// Runs one suite against every AES implementation this architecture
-/// has. Suites with a Monte Carlo test take no second argument.
+/// has, at every key width. Suites with a Monte Carlo test take no
+/// second argument.
 macro_rules! every_aes {
     ($suite:ident) => {
         every_aes!($suite, both);
@@ -116,13 +138,36 @@ macro_rules! every_aes {
         use super::*;
         use scytale::cipher::aes;
 
-        suites!(automatic, aes::Aes, $suite, $kind);
-        suites!(portable, aes::portable::Aes, $suite, $kind);
-        suites!(bitsliced, aes::portable::bitsliced::Aes, $suite, $kind);
+        widths!(
+            automatic_128,
+            automatic_192,
+            automatic_256,
+            aes::Aes,
+            $suite,
+            $kind
+        );
+        widths!(
+            portable_128,
+            portable_192,
+            portable_256,
+            aes::portable::Aes,
+            $suite,
+            $kind
+        );
+        widths!(
+            bitsliced_128,
+            bitsliced_192,
+            bitsliced_256,
+            aes::portable::bitsliced::Aes,
+            $suite,
+            $kind
+        );
 
         #[cfg(target_arch = "x86_64")]
-        hardware_suites!(
-            aesni,
+        hardware_widths!(
+            aesni_128,
+            aesni_192,
+            aesni_256,
             aes::x86_64::aesni::Aes,
             $suite,
             "AES-NI",
@@ -130,11 +175,21 @@ macro_rules! every_aes {
         );
 
         #[cfg(target_arch = "x86_64")]
-        hardware_suites!(vaes, aes::x86_64::vaes::Aes, $suite, "VAES", $kind);
+        hardware_widths!(
+            vaes_128,
+            vaes_192,
+            vaes_256,
+            aes::x86_64::vaes::Aes,
+            $suite,
+            "VAES",
+            $kind
+        );
 
         #[cfg(target_arch = "aarch64")]
-        hardware_suites!(
-            armv8,
+        hardware_widths!(
+            armv8_128,
+            armv8_192,
+            armv8_256,
             aes::aarch64::armv8::Aes,
             $suite,
             "ARMv8 AES",
@@ -142,8 +197,10 @@ macro_rules! every_aes {
         );
 
         #[cfg(target_arch = "riscv64")]
-        hardware_suites!(
-            zkn,
+        hardware_widths!(
+            zkn_128,
+            zkn_192,
+            zkn_256,
             aes::riscv64::zkn::Aes,
             $suite,
             "RISC-V scalar AES",
@@ -151,8 +208,10 @@ macro_rules! every_aes {
         );
 
         #[cfg(target_arch = "riscv64")]
-        hardware_suites!(
-            zvkned,
+        hardware_widths!(
+            zvkned_128,
+            zvkned_192,
+            zvkned_256,
             aes::riscv64::zvkned::Aes,
             $suite,
             "RISC-V vector AES",
@@ -648,7 +707,7 @@ macro_rules! hmac_suite {
                     }
                     Err(e) => panic!("{e}"),
                 }
-                hmac_vectors::run_aft::<Hmac<$hash>>($file, $algorithm);
+                hmac_vectors::run_aft::<$hash>($file, $algorithm);
             }
         }
     };

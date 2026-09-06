@@ -18,6 +18,7 @@ use scytale::hash::sha2::{
 use scytale::hash::sha3::{Sha3_224, Sha3_256, Sha3_384, Sha3_512};
 use scytale::hash::Hash;
 use scytale::sig::ecdsa::{p256, p384};
+use scytale::BlockType;
 use scytale::Error;
 use serde_json::Value;
 
@@ -30,8 +31,15 @@ pub trait Curve {
     fn private(d: &[u8]) -> Result<Self::Private, Error>;
     fn public(sec1: &[u8]) -> Result<Self::Public, Error>;
     fn public_of(key: &Self::Private) -> Vec<u8>;
-    fn sign<H: Hash>(key: &Self::Private, message: &[u8]) -> Vec<u8>;
-    fn verify<H: Hash>(key: &Self::Public, message: &[u8], sig: &[u8]) -> bool;
+    fn sign<H: Hash + Clone + BlockType>(
+        key: &Self::Private,
+        message: &[u8],
+    ) -> Vec<u8>;
+    fn verify<H: Hash + Clone + BlockType>(
+        key: &Self::Public,
+        message: &[u8],
+        sig: &[u8],
+    ) -> bool;
 }
 
 macro_rules! curve {
@@ -52,10 +60,13 @@ macro_rules! curve {
             fn public_of(key: &Self::Private) -> Vec<u8> {
                 key.public_key().sec1_bytes().to_vec()
             }
-            fn sign<H: Hash>(key: &Self::Private, message: &[u8]) -> Vec<u8> {
+            fn sign<H: Hash + Clone + BlockType>(
+                key: &Self::Private,
+                message: &[u8],
+            ) -> Vec<u8> {
                 key.sign::<H>(message).expect("sign").to_vec()
             }
-            fn verify<H: Hash>(
+            fn verify<H: Hash + Clone + BlockType>(
                 key: &Self::Public,
                 message: &[u8],
                 sig: &[u8],
@@ -217,7 +228,7 @@ pub fn run_sig_ver() {
     assert!(rejections >= 40, "only {rejections} rejections");
 }
 
-fn sig_ver<C: Curve, H: Hash>(t: &Value) -> bool {
+fn sig_ver<C: Curve, H: Hash + Clone + BlockType>(t: &Value) -> bool {
     let Some(q) = sec1(t, C::WIDTH) else {
         return false;
     };
@@ -279,7 +290,10 @@ pub fn run_det_sig_gen() {
 /// One sigGen group: the key from `d` must give the group's `q`,
 /// and each case's signature must verify; when `exact`, it must be
 /// the one this crate makes. Returns the cases run.
-fn sig_gen<C: Curve, H: Hash>(group: &Value, exact: bool) -> usize {
+fn sig_gen<C: Curve, H: Hash + Clone + BlockType>(
+    group: &Value,
+    exact: bool,
+) -> usize {
     let d = padded(&group["d"], C::WIDTH).expect("d");
     let key = C::private(&d).expect("private key");
     let q = sec1(group, C::WIDTH).expect("q");

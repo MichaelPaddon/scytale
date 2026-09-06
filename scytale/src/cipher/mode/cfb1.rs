@@ -193,7 +193,7 @@ mod tests {
         out
     }
 
-    fn cfb(key: &[u8]) -> Cfb1<Aes> {
+    fn cfb<const K: usize>(key: &[u8; K]) -> Cfb1<Aes<K>> {
         Cfb1::new(Aes::try_new(key).unwrap())
     }
 

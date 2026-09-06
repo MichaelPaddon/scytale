@@ -11,7 +11,7 @@
 //! | Module | What is in it |
 //! | --- | --- |
 //! | [`cipher`] | AES, ChaCha20, and the modes built on them |
-//! | [`hash`] | the SHA-2 and SHA-3 families, SHAKE, and SHA-1 for old protocols |
+//! | [`hash`] | SHA-2, SHA-3, SHAKE, and SHA-1 for old protocols |
 //! | [`mac`] | HMAC over any hash, and Poly1305 |
 //! | [`kdf`] | HKDF and PBKDF2 |
 //! | [`kem`] | ML-KEM key encapsulation |
@@ -28,18 +28,19 @@
 //! use scytale::hash::Hash;
 //! use scytale::kdf::hkdf;
 //! use scytale::mac::hmac::Hmac;
-//! use scytale::cipher::aes::Aes;
+//! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::{Gcm, Nonces};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! // A session key, and keys for each job derived from it.
+//! // A session key, and a key for each job derived from it.
 //! let secret = [0x42u8; 32];
-//! let mut keys = [0u8; 48];
-//! hkdf::derive::<Sha256>(b"salt", &secret, b"example", &mut keys)?;
-//! let (cipher_key, mac_key) = keys.split_at(16);
+//! let mut cipher_key = [0u8; 16];
+//! let mut mac_key = [0u8; 32];
+//! hkdf::derive::<Sha256>(b"salt", &secret, b"cipher", &mut cipher_key)?;
+//! hkdf::derive::<Sha256>(b"salt", &secret, b"mac", &mut mac_key)?;
 //!
 //! // Authenticated encryption, with nonces that cannot repeat.
-//! let gcm = Gcm::try_new(Aes::try_new(cipher_key)?)?;
+//! let gcm = Gcm::try_new(Aes128::try_new(&cipher_key)?)?;
 //! let mut nonces = Nonces::new(7, 0);
 //! let nonce = nonces.take()?;
 //! let mut message = *b"attack at dawn";
@@ -50,7 +51,7 @@
 //!
 //! // A digest, and a tag over the same bytes.
 //! let digest = Sha256::digest(&message)?;
-//! let mac = Hmac::<Sha256>::mac(mac_key, &message)?;
+//! let mac = Hmac::<Sha256>::mac(&mac_key, &message)?;
 //! assert_ne!(digest, mac);
 //! # Ok(())
 //! # }
@@ -75,6 +76,12 @@
 //!   for by name.
 //! - `Debug` output never contains key material, so a state can be
 //!   logged.
+//! - A trait describing a value you hold, a hash, a MAC or a cipher,
+//!   has no associated constants and is usable as a trait object once
+//!   its types are named: `&mut dyn Hash<Output = [u8; 32]>`. Sizes
+//!   are types, [`Block`](BlockType::Block) and [`Key`](KeyType::Key)
+//!   among them, so a wrong length is a compile error. Only
+//!   construction needs the concrete type.
 //!
 //! # Non-goals
 //!
@@ -115,6 +122,8 @@ pub mod pke;
 pub mod random;
 pub mod sig;
 
+mod traits;
 mod util;
 
 pub use error::Error;
+pub use traits::{BlockType, ByteArray, KeyType};

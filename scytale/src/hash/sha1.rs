@@ -38,7 +38,7 @@ use core::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::hash::{BitHash, Hash};
-use crate::Error;
+use crate::{BlockType, Error};
 
 /// A SHA-1 computation in progress.
 pub struct Sha1 {
@@ -160,8 +160,15 @@ impl Clone for Sha1 {
     }
 }
 
+impl BlockType for Sha1 {
+    type Block = [u8; 64];
+
+    fn zero_block() -> Self::Block {
+        [0; 64]
+    }
+}
+
 impl Hash for Sha1 {
-    const BLOCK_SIZE: usize = 64;
     type Output = [u8; 20];
 
     fn try_new() -> Result<Self, Error> {
@@ -196,15 +203,17 @@ impl Hash for Sha1 {
         self.used = rest.len();
     }
 
-    fn finalize(mut self) -> Self::Output {
+    fn finalize(&mut self) -> Self::Output {
         self.pad(0x80, 0);
-        self.output()
+        let out = self.output();
+        self.reset();
+        out
     }
 }
 
 impl BitHash for Sha1 {
     fn finalize_bits(
-        mut self,
+        &mut self,
         last: u8,
         bits: u32,
     ) -> Result<Self::Output, Error> {
@@ -216,7 +225,9 @@ impl BitHash for Sha1 {
         let keep = 0xffu8 << (8 - bits);
         let trailer = (last & keep) | (0x80 >> bits);
         self.pad(trailer, u64::from(bits));
-        Ok(self.output())
+        let out = self.output();
+        self.reset();
+        Ok(out)
     }
 }
 

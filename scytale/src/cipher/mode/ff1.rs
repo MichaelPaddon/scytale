@@ -377,7 +377,7 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Chain<'a, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cipher::aes::Aes;
+    use crate::cipher::aes::{Aes, Aes128};
 
     fn unhex<const N: usize>(text: &str) -> [u8; N] {
         let mut out = [0u8; N];
@@ -389,7 +389,7 @@ mod tests {
         out
     }
 
-    fn ff1(radix: u32) -> Ff1<Aes> {
+    fn ff1(radix: u32) -> Ff1<Aes128> {
         let key: [u8; 16] = unhex("2b7e151628aed2a6abf7158809cf4f3c");
         Ff1::try_new(Aes::try_new(&key).unwrap(), radix).unwrap()
     }

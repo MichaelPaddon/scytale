@@ -39,8 +39,8 @@
 use core::fmt;
 
 use super::{xor, LANES};
-use crate::cipher::{Block, BlockCipher};
-use crate::Error;
+use crate::cipher::BlockCipher;
+use crate::{ByteArray, Error};
 
 /// CBC over a block cipher.
 #[derive(Clone)]
@@ -48,7 +48,10 @@ pub struct Cbc<C> {
     cipher: C,
 }
 
-impl<C: BlockCipher> Cbc<C> {
+impl<C: BlockCipher> Cbc<C>
+where
+    C::Block: ByteArray,
+{
     /// Wraps `cipher`.
     pub fn new(cipher: C) -> Self {
         Cbc { cipher }
@@ -95,13 +98,16 @@ pub struct Encryptor<'a, C: BlockCipher> {
     chain: C::Block,
 }
 
-impl<C: BlockCipher> Encryptor<'_, C> {
+impl<C: BlockCipher> Encryptor<'_, C>
+where
+    C::Block: ByteArray,
+{
     /// Encrypts the next piece of the message in place.
     ///
     /// Encryption chains, so this runs one block at a time and cannot
     /// use the cipher's bulk path.
     pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
-        let (blocks, rest) = C::Block::split_mut(data);
+        let (blocks, rest) = <C::Block as ByteArray>::split_mut(data);
         if !rest.is_empty() {
             return Err(Error::NotBlockAligned(data.len()));
         }
@@ -123,7 +129,10 @@ pub struct Decryptor<'a, C: BlockCipher> {
     chain: C::Block,
 }
 
-impl<C: BlockCipher> Decryptor<'_, C> {
+impl<C: BlockCipher> Decryptor<'_, C>
+where
+    C::Block: ByteArray,
+{
     /// Decrypts the next piece of the message in place.
     ///
     /// Decryption does not chain through the cipher, so blocks go
@@ -131,11 +140,11 @@ impl<C: BlockCipher> Decryptor<'_, C> {
     /// kept first, because decrypting in place overwrites the very
     /// bytes the next block needs.
     pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
-        let (blocks, rest) = C::Block::split_mut(data);
+        let (blocks, rest) = <C::Block as ByteArray>::split_mut(data);
         if !rest.is_empty() {
             return Err(Error::NotBlockAligned(data.len()));
         }
-        let mut seen = [C::Block::ZERO; LANES];
+        let mut seen = [C::zero_block(); LANES];
         for group in blocks.chunks_mut(LANES) {
             let seen = &mut seen[..group.len()];
             seen.copy_from_slice(group);
@@ -188,7 +197,7 @@ mod tests {
         out
     }
 
-    fn cbc(key: &[u8]) -> Cbc<Aes> {
+    fn cbc<const K: usize>(key: &[u8; K]) -> Cbc<Aes<K>> {
         Cbc::new(Aes::try_new(key).unwrap())
     }
 

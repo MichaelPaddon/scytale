@@ -14,7 +14,9 @@
 //! why it is nearly always derived afresh per message from a stream
 //! cipher, as ChaCha20-Poly1305 does; reach it that way unless a
 //! protocol says otherwise. [`reset`](Mac::reset) exists for that
-//! caller, not for a second message.
+//! caller, not for a second message, and neither does the keyed
+//! state that [`finalize`](Mac::finalize) leaves behind: a second
+//! message under the same key is a misuse the type does not prevent.
 //!
 //! # Constant time
 //!
@@ -27,7 +29,7 @@ use core::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::Mac;
-use crate::Error;
+use crate::{Error, KeyType};
 
 /// The key length in bytes: `r` then `s`.
 pub const KEY_SIZE: usize = 32;
@@ -64,12 +66,8 @@ pub struct Poly1305 {
 }
 
 impl Poly1305 {
-    /// Starts an authenticator under `key`, which must be 32 bytes:
-    /// `r` then `s`.
-    pub fn try_new(key: &[u8]) -> Result<Self, Error> {
-        if key.len() != KEY_SIZE {
-            return Err(Error::InvalidKeyLength(key.len()));
-        }
+    /// Starts an authenticator under `key`: `r` then `s`.
+    pub fn new(key: &[u8; KEY_SIZE]) -> Self {
         let word = |at: usize| {
             let mut bytes = [0u8; 8];
             bytes.copy_from_slice(&key[at..at + 8]);
@@ -85,14 +83,14 @@ impl Poly1305 {
             ((t0 >> 44) | (t1 << 20)) & MASK44,
             (t1 >> 24) & MASK42,
         ];
-        Ok(Poly1305 {
+        Poly1305 {
             r,
             r20: [r[1] * 20, r[2] * 20],
             s: [word(16), word(24)],
             h: [0; 3],
             block: [0; BLOCK],
             used: 0,
-        })
+        }
     }
 
     /// Adds one block, with `high` as the bit above its top byte,
@@ -182,11 +180,19 @@ impl Poly1305 {
     }
 }
 
+impl KeyType for Poly1305 {
+    type Key = [u8; KEY_SIZE];
+
+    fn zero_key() -> Self::Key {
+        [0; KEY_SIZE]
+    }
+}
+
 impl Mac for Poly1305 {
     type Tag = [u8; BLOCK];
 
-    fn try_new(key: &[u8]) -> Result<Self, Error> {
-        Poly1305::try_new(key)
+    fn try_new(key: &Self::Key) -> Result<Self, Error> {
+        Ok(Poly1305::new(key))
     }
 
     fn reset(&mut self) {
@@ -217,7 +223,7 @@ impl Mac for Poly1305 {
         self.used = rest.len();
     }
 
-    fn finalize(mut self) -> Self::Tag {
+    fn finalize(&mut self) -> Self::Tag {
         if self.used > 0 {
             // The one that marks the end goes just past the message;
             // the standard's 2^128 for a whole block is the same rule.
@@ -226,7 +232,9 @@ impl Mac for Poly1305 {
             block[self.used + 1..].fill(0);
             self.absorb(&block, 0);
         }
-        self.tag()
+        let tag = self.tag();
+        self.reset();
+        tag
     }
 }
 
@@ -280,8 +288,8 @@ mod tests {
         (out, s.len() / 2)
     }
 
-    fn tag_of(key: &[u8], message: &[u8]) -> [u8; 16] {
-        let mut mac = Poly1305::try_new(key).unwrap();
+    fn tag_of(key: &[u8; 32], message: &[u8]) -> [u8; 16] {
+        let mut mac = Poly1305::new(key);
         mac.update(message);
         mac.finalize()
     }
@@ -289,7 +297,7 @@ mod tests {
     fn check(key: &str, message: &[u8], expected: &str) {
         let (k, _) = hex(key);
         let (t, _) = hex(expected);
-        assert_eq!(tag_of(&k[..32], message), t[..16]);
+        assert_eq!(tag_of(k[..32].try_into().unwrap(), message), t[..16]);
     }
 
     /// RFC 8439 section 2.5.2.
@@ -411,17 +419,17 @@ mod tests {
             "85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f5\
              1b",
         );
-        let key = &key[..32];
+        let key: &[u8; 32] = key[..32].try_into().unwrap();
         let message: [u8; 101] = core::array::from_fn(|i| (i * 13) as u8);
         let expected = tag_of(key, &message);
         for chunk in [1, 3, 15, 16, 17, 40] {
-            let mut mac = Poly1305::try_new(key).unwrap();
+            let mut mac = Poly1305::new(key);
             for piece in message.chunks(chunk) {
                 mac.update(piece);
             }
             assert_eq!(mac.finalize(), expected, "chunk {chunk}");
         }
-        let mut mac = Poly1305::try_new(key).unwrap();
+        let mut mac = Poly1305::new(key);
         mac.update(b"not this");
         mac.reset();
         mac.update(&message);
@@ -432,7 +440,7 @@ mod tests {
     fn verify_accepts_and_rejects() {
         let key = [7u8; 32];
         let tag = tag_of(&key, b"message");
-        let mut mac = Poly1305::try_new(&key).unwrap();
+        let mut mac = Poly1305::new(&key);
         mac.update(b"message");
         assert_eq!(mac.clone().verify(&tag), Ok(()));
         let mut wrong = tag;
@@ -442,14 +450,6 @@ mod tests {
             Err(Error::AuthenticationFailed)
         );
         assert_eq!(mac.verify(&tag[..15]), Err(Error::AuthenticationFailed));
-    }
-
-    #[test]
-    fn key_length_is_checked() {
-        assert_eq!(
-            Poly1305::try_new(&[0u8; 31]).err(),
-            Some(Error::InvalidKeyLength(31))
-        );
     }
 
     #[test]
@@ -464,7 +464,7 @@ mod tests {
             }
         }
         let key = [0x5a; 32];
-        let mut mac = Poly1305::try_new(&key).unwrap();
+        let mut mac = Poly1305::new(&key);
         mac.update(b"abc");
         let mut buffer = Buffer([0; 128], 0);
         fmt::write(&mut buffer, format_args!("{mac:?}")).unwrap();

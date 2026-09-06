@@ -1,7 +1,8 @@
 //! ACVP-AES-ECB 1.0, run through the [`BlockCipher`] trait.
 
-use super::{groups as suite_groups, hex};
-use scytale::cipher::{Block, BlockCipher};
+use super::{cipher_of, groups as suite_groups, hex, key_of};
+use scytale::cipher::BlockCipher;
+use scytale::KeyType;
 use serde_json::Value;
 
 const FILE: &str = "ACVP-AES-ECB-1.0/internalProjection.json";
@@ -11,34 +12,42 @@ const MCT_ITERATIONS: usize = 1000;
 
 /// Runs the one-shot (AFT) groups against `C`; a no-op without the
 /// vendored vectors.
-pub fn run_aft<C: BlockCipher>() {
-    let Some(groups) = groups("AFT") else { return };
+pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
+    let Some(groups) = groups::<C>("AFT") else {
+        return;
+    };
     let count: usize = groups
         .iter()
         .map(|(group, encrypt)| aft::<C>(group, *encrypt))
         .sum();
     // Guard against a truncated or wrong file passing vacuously.
-    assert!(count >= 1000, "only {count} AFT cases");
+    assert!(count >= 333, "only {count} AFT cases");
 }
 
 /// Runs the Monte Carlo (MCT) groups against `C`; a no-op without the
 /// vendored vectors. Slow: 600,000 cipher calls.
-pub fn run_mct<C: BlockCipher>() {
-    let Some(groups) = groups("MCT") else { return };
+pub fn run_mct<C: BlockCipher<Block = [u8; 16]>>() {
+    let Some(groups) = groups::<C>("MCT") else {
+        return;
+    };
     let count: usize = groups
         .iter()
         .map(|(group, encrypt)| mct::<C>(group, *encrypt))
         .sum();
-    assert!(count >= 600, "only {count} MCT steps");
+    assert!(count >= 200, "only {count} MCT steps");
 }
 
 /// The groups of one test type; `None` without the vectors.
-fn groups(test_type: &str) -> Option<Vec<(Value, bool)>> {
-    suite_groups(FILE, "ACVP-AES-ECB", "1.0", test_type)
+fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
+    suite_groups::<C>(FILE, "ACVP-AES-ECB", "1.0", test_type)
 }
 
-fn apply<C: BlockCipher>(cipher: &C, encrypt: bool, data: &mut [u8]) {
-    let (blocks, rest) = C::Block::split_mut(data);
+fn apply<C: BlockCipher<Block = [u8; 16]>>(
+    cipher: &C,
+    encrypt: bool,
+    data: &mut [u8],
+) {
+    let (blocks, rest) = data.as_chunks_mut::<16>();
     assert!(rest.is_empty(), "whole blocks");
     if encrypt {
         cipher.encrypt_blocks(blocks);
@@ -48,10 +57,15 @@ fn apply<C: BlockCipher>(cipher: &C, encrypt: bool, data: &mut [u8]) {
 }
 
 /// Algorithm Functional Test: one-shot, possibly several blocks.
-fn aft<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
+fn aft<C: BlockCipher<Block = [u8; 16]>>(
+    group: &Value,
+    encrypt: bool,
+) -> usize {
     let mut count = 0;
     for t in group["tests"].as_array().expect("tests") {
-        let cipher = C::try_new(&hex(&t["key"])).expect("key");
+        let Some(cipher) = cipher_of::<C>(&hex(&t["key"])) else {
+            continue;
+        };
         let (input, expected) = if encrypt {
             (hex(&t["pt"]), hex(&t["ct"]))
         } else {
@@ -69,13 +83,19 @@ fn aft<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
 /// runs 1000 chained cipher calls, then derives the next key from the
 /// last outputs. The vectors give the key and input of each step, and
 /// the output of its final call.
-fn mct<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
+fn mct<C: BlockCipher<Block = [u8; 16]>>(
+    group: &Value,
+    encrypt: bool,
+) -> usize {
     let (input_name, output_name) =
         if encrypt { ("pt", "ct") } else { ("ct", "pt") };
     let mut count = 0;
     for t in group["tests"].as_array().expect("tests") {
         let steps = t["resultsArray"].as_array().expect("resultsArray");
         let mut key = hex(&t["key"]);
+        if key_of::<C>(&key).is_none() {
+            continue;
+        }
         let mut data = hex(&t[input_name]);
         for (i, step) in steps.iter().enumerate() {
             let tag =
@@ -83,7 +103,7 @@ fn mct<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
             assert_eq!(key, hex(&step["key"]), "{tag} key");
             assert_eq!(data, hex(&step[input_name]), "{tag} input");
 
-            let cipher = C::try_new(&key).expect("key");
+            let cipher = cipher_of::<C>(&key).expect("width");
             let mut previous = data.clone();
             for _ in 0..MCT_ITERATIONS {
                 previous.copy_from_slice(&data);

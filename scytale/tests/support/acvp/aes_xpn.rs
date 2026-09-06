@@ -4,10 +4,11 @@
 //! separately, which is how the mode takes them. Twelve of the
 //! decryption cases carry a tag that must be rejected.
 
-use super::{groups as suite_groups, hex};
+use super::{cipher_of, groups as suite_groups, hex};
 use scytale::cipher::mode::Xpn;
 use scytale::cipher::BlockCipher;
 use scytale::Error;
+use scytale::KeyType;
 use serde_json::Value;
 
 const FILE: &str = "ACVP-AES-XPN-1.0/internalProjection.json";
@@ -15,7 +16,9 @@ const FILE: &str = "ACVP-AES-XPN-1.0/internalProjection.json";
 /// Runs the one-shot (AFT) groups against `C`; a no-op without the
 /// vendored vectors.
 pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
-    let Some(groups) = groups("AFT") else { return };
+    let Some(groups) = groups::<C>("AFT") else {
+        return;
+    };
     let mut cases = 0;
     let mut rejections = 0;
     for (group, encrypt) in &groups {
@@ -23,15 +26,15 @@ pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
         cases += n;
         rejections += r;
     }
-    assert!(cases >= 100, "only {cases} AFT cases");
+    assert!(cases >= 33, "only {cases} AFT cases");
     assert!(
-        rejections >= 5,
+        rejections >= 1,
         "only {rejections} cases had to be rejected"
     );
 }
 
-fn groups(test_type: &str) -> Option<Vec<(Value, bool)>> {
-    suite_groups(FILE, "ACVP-AES-XPN", "1.0", test_type)
+fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
+    suite_groups::<C>(FILE, "ACVP-AES-XPN", "1.0", test_type)
 }
 
 /// Returns the cases run and, of those, the ones that had to fail.
@@ -45,7 +48,9 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
 
     for t in group["tests"].as_array().expect("tests") {
         let label = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
-        let cipher = C::try_new(&hex(&t["key"])).expect("key");
+        let Some(cipher) = cipher_of::<C>(&hex(&t["key"])) else {
+            continue;
+        };
         let xpn = Xpn::try_new(cipher).expect("xpn");
         let salt: [u8; 12] = hex(&t["salt"]).try_into().expect("salt");
         let frame: [u8; 12] = hex(&t["iv"]).try_into().expect("iv");

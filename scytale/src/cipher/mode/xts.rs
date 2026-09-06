@@ -43,14 +43,12 @@
 //! whole number of bytes while the byte methods run as before.
 //!
 //! ```
-//! use scytale::cipher::aes::Aes;
+//! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Xts;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! // Two 128-bit keys, joined.
-//! let mut key = [0u8; 32];
-//! key[16..].copy_from_slice(&[1u8; 16]);
-//! let xts: Xts<Aes> = Xts::try_new(&key)?;
+//! // Two 128-bit keys: one for the data, one for the tweak.
+//! let xts: Xts<Aes128> = Xts::try_new(&[0u8; 16], &[1u8; 16])?;
 //!
 //! // Sector 7, as a little-endian integer.
 //! let mut tweak = [0u8; 16];
@@ -68,7 +66,7 @@ use core::fmt;
 
 use super::ghash::BLOCK;
 use super::{xor, LANES};
-use crate::cipher::{Block, BlockCipher};
+use crate::cipher::BlockCipher;
 use crate::util;
 use crate::Error;
 
@@ -90,18 +88,14 @@ impl<C> fmt::Debug for Xts<C> {
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
-    /// Takes the two keys joined together, the first half for the
-    /// data and the second for the tweak.
+    /// Takes the two keys: one for the data and one for the tweak.
     ///
-    /// The halves must differ: XTS with one key repeated is a weaker
-    /// construction, and the standard forbids it.
-    pub fn try_new(key: &[u8]) -> Result<Self, Error> {
-        if !key.len().is_multiple_of(2) {
-            return Err(Error::InvalidKeyLength(key.len()));
-        }
-        let (data, tweak) = key.split_at(key.len() / 2);
-        if util::equal(data, tweak) {
-            return Err(Error::InvalidKeyLength(key.len()));
+    /// They must differ: XTS with one key repeated is a weaker
+    /// construction, and the standard forbids it. That is reported
+    /// as [`Error::InvalidKeyLength`] with the length of the pair.
+    pub fn try_new(data: &C::Key, tweak: &C::Key) -> Result<Self, Error> {
+        if util::equal(data.as_ref(), tweak.as_ref()) {
+            return Err(Error::InvalidKeyLength(2 * data.as_ref().len()));
         }
         Ok(Xts {
             data: C::try_new(data)?,
@@ -283,7 +277,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
     /// Runs the blocks that need no stealing, in groups, advancing
     /// the tweak as it goes.
     fn bulk(&self, data: &mut [u8], t: &mut [u8; BLOCK], encrypt: bool) {
-        let (whole, _) = <[u8; BLOCK]>::split_mut(data);
+        let (whole, _) = data.as_chunks_mut::<BLOCK>();
         let mut tweaks = [[0u8; BLOCK]; LANES];
         for group in whole.chunks_mut(LANES) {
             let tweaks = &mut tweaks[..group.len()];
@@ -331,7 +325,7 @@ fn alpha(tweak: u128) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cipher::aes::Aes;
+    use crate::cipher::aes::Aes128;
 
     const MAX: usize = 80;
 
@@ -344,7 +338,7 @@ mod tests {
         &buffer[..n]
     }
 
-    fn xts() -> Xts<Aes> {
+    fn xts() -> Xts<Aes128> {
         let mut key = [0u8; 32];
         let mut buffer = [0u8; 32];
         key.copy_from_slice(unhex(
@@ -352,7 +346,9 @@ mod tests {
              7627",
             &mut buffer,
         ));
-        Xts::try_new(&key).unwrap()
+        let (data, tweak) = key.split_at(16);
+        Xts::try_new(data.try_into().unwrap(), tweak.try_into().unwrap())
+            .unwrap()
     }
 
     /// A whole number of blocks: no stealing involved.
@@ -441,16 +437,11 @@ mod tests {
 
     #[test]
     fn rejects_bad_lengths() {
-        // The halves must differ.
+        // The two keys must differ.
         assert_eq!(
-            Xts::<Aes>::try_new(&[0x11; 32]).unwrap_err(),
+            Xts::<Aes128>::try_new(&[0x11; 16], &[0x11; 16]).unwrap_err(),
             Error::InvalidKeyLength(32)
         );
-        // And the key must split evenly into two the cipher accepts.
-        for n in [0, 15, 17, 31, 33] {
-            let source = [0u8; 64];
-            assert!(Xts::<Aes>::try_new(&source[..n]).is_err(), "{n} bytes");
-        }
 
         let xts = xts();
         // A data unit must be at least one block.

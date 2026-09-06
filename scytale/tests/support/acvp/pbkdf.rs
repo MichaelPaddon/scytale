@@ -5,12 +5,13 @@
 use super::{hex, load};
 use scytale::hash::Hash;
 use scytale::kdf::pbkdf2::pbkdf2;
+use scytale::BlockType;
 
 const FILE: &str = "ACVP-PBKDF-1.0/internalProjection.json";
 
 /// Runs the groups whose `hmacAlg` is `hmac_alg` against `H`; a
 /// no-op without the vendored vectors.
-pub fn run_aft<H: Hash>(hmac_alg: &str) {
+pub fn run_aft<H: Hash + Clone + BlockType>(hmac_alg: &str) {
     let Some(doc) = load(FILE, "PBKDF", "1.0") else {
         return;
     };

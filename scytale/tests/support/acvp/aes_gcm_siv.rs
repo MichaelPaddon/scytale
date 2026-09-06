@@ -4,10 +4,11 @@
 //! than as separate fields, and includes thirteen decryption cases
 //! whose tags must be rejected.
 
-use super::{groups as suite_groups, hex};
+use super::{groups as suite_groups, hex, key_of};
 use scytale::cipher::mode::GcmSiv;
 use scytale::cipher::BlockCipher;
 use scytale::Error;
+use scytale::KeyType;
 use serde_json::Value;
 
 const FILE: &str = "ACVP-AES-GCM-SIV-1.0/internalProjection.json";
@@ -18,7 +19,9 @@ const TAG: usize = 16;
 /// Runs the one-shot (AFT) groups against `C`; a no-op without the
 /// vendored vectors.
 pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
-    let Some(groups) = groups("AFT") else { return };
+    let Some(groups) = groups::<C>("AFT") else {
+        return;
+    };
     let mut cases = 0;
     let mut rejections = 0;
     for (group, encrypt) in &groups {
@@ -26,15 +29,15 @@ pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
         cases += n;
         rejections += r;
     }
-    assert!(cases >= 100, "only {cases} AFT cases");
+    assert!(cases >= 33, "only {cases} AFT cases");
     assert!(
-        rejections >= 5,
+        rejections >= 1,
         "only {rejections} cases had to be rejected"
     );
 }
 
-fn groups(test_type: &str) -> Option<Vec<(Value, bool)>> {
-    suite_groups(FILE, "ACVP-AES-GCM-SIV", "1.0", test_type)
+fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
+    suite_groups::<C>(FILE, "ACVP-AES-GCM-SIV", "1.0", test_type)
 }
 
 /// Returns the cases run and, of those, the ones that had to fail.
@@ -47,7 +50,10 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
 
     for t in group["tests"].as_array().expect("tests") {
         let label = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
-        let siv = GcmSiv::<C>::try_new(&hex(&t["key"])).expect("key");
+        let Some(key) = key_of::<C>(&hex(&t["key"])) else {
+            continue;
+        };
+        let siv = GcmSiv::<C>::try_new(&key).expect("key");
         let nonce: [u8; 12] = hex(&t["iv"]).try_into().expect("nonce");
         let aad = hex(&t["aad"]);
         let sealed = hex(&t["ct"]);

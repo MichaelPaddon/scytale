@@ -7,10 +7,11 @@
 //! reach down to a single byte, so the single-block case the
 //! standard handles separately is covered too.
 
-use super::{groups as suite_groups, hex};
+use super::{cipher_of, groups as suite_groups, hex};
 use scytale::cipher::mode::Kwp;
 use scytale::cipher::BlockCipher;
 use scytale::Error;
+use scytale::KeyType;
 use serde_json::Value;
 
 const FILE: &str = "ACVP-AES-KWP-1.0/internalProjection.json";
@@ -18,7 +19,9 @@ const FILE: &str = "ACVP-AES-KWP-1.0/internalProjection.json";
 /// Runs the one-shot (AFT) groups against `C`; a no-op without the
 /// vendored vectors.
 pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
-    let Some(groups) = groups("AFT") else { return };
+    let Some(groups) = groups::<C>("AFT") else {
+        return;
+    };
     let mut cases = 0;
     let mut rejections = 0;
     for (group, encrypt) in &groups {
@@ -28,12 +31,12 @@ pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
     }
     // Guard against a truncated or wrong file passing vacuously, and
     // against the rejection cases quietly disappearing.
-    assert!(cases >= 5000, "only {cases} AFT cases");
-    assert!(rejections >= 100, "only {rejections} had to be rejected");
+    assert!(cases >= 1666, "only {cases} AFT cases");
+    assert!(rejections >= 33, "only {rejections} had to be rejected");
 }
 
-fn groups(test_type: &str) -> Option<Vec<(Value, bool)>> {
-    suite_groups(FILE, "ACVP-AES-KWP", "1.0", test_type)
+fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
+    suite_groups::<C>(FILE, "ACVP-AES-KWP", "1.0", test_type)
 }
 
 /// Returns the cases run and, of those, the ones that had to fail.
@@ -53,7 +56,9 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
 
     for t in group["tests"].as_array().expect("tests") {
         let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
-        let cipher = C::try_new(&hex(&t["key"])).expect("key");
+        let Some(cipher) = cipher_of::<C>(&hex(&t["key"])) else {
+            continue;
+        };
         let kwp = if forward {
             Kwp::new(cipher)
         } else {

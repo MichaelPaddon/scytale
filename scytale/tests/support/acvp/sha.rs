@@ -213,7 +213,7 @@ where
         }
         hash.reset();
         hash.update(&msg);
-        let digest = hash.clone().finalize().as_ref().to_vec();
+        let digest = hash.finalize().as_ref().to_vec();
         a = b;
         b = c;
         c = digest;
@@ -230,7 +230,7 @@ where
     for _ in 0..1000 {
         hash.reset();
         hash.update(&md);
-        md = hash.clone().finalize().as_ref().to_vec();
+        md = hash.finalize().as_ref().to_vec();
     }
     md
 }

@@ -101,7 +101,7 @@ use core::fmt;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::cipher::aes::{Aes, BLOCK_SIZE};
+use crate::cipher::aes::{Aes256, BLOCK_SIZE};
 use crate::Error;
 
 pub use source::{External, Processor, System};
@@ -277,7 +277,7 @@ impl<S: Entropy> Rng<S> {
     /// replace both the key and the counter block, mixing `provided`
     /// in as it goes.
     fn update(&mut self, provided: &[u8; SEED]) -> Result<(), Error> {
-        let aes = Aes::try_new(&self.key)?;
+        let aes = Aes256::try_new(&self.key)?;
         let mut temp = [0u8; SEED];
         for (chunk, extra) in
             temp.chunks_mut(BLOCK_SIZE).zip(provided.chunks(BLOCK_SIZE))
@@ -325,7 +325,7 @@ impl<S: Entropy> Random for Rng<S> {
         if self.counter > RESEED_INTERVAL {
             self.reseed()?;
         }
-        let aes = Aes::try_new(&self.key)?;
+        let aes = Aes256::try_new(&self.key)?;
         for chunk in out.chunks_mut(BLOCK_SIZE) {
             increment(&mut self.v);
             let mut block = self.v;
@@ -382,7 +382,7 @@ fn derive(input: &[u8], out: &mut [u8; SEED]) -> Result<(), Error> {
     for (i, byte) in fixed.iter_mut().enumerate() {
         *byte = i as u8;
     }
-    let aes = Aes::try_new(&fixed)?;
+    let aes = Aes256::try_new(&fixed)?;
 
     // Each pass differs only in the counter its chain starts from,
     // which is what makes the three blocks differ.
@@ -402,9 +402,13 @@ fn derive(input: &[u8], out: &mut [u8; SEED]) -> Result<(), Error> {
 
     // The second pass runs the block cipher forward under a key made
     // from the first.
-    let aes = Aes::try_new(&temp[..KEY])?;
+    let (key, counter) = temp.split_at(KEY);
+    let mut fixed = [0u8; KEY];
+    fixed.copy_from_slice(key);
+    let aes = Aes256::try_new(&fixed)?;
+    fixed.zeroize();
     let mut block = [0u8; BLOCK_SIZE];
-    block.copy_from_slice(&temp[KEY..]);
+    block.copy_from_slice(counter);
     temp.zeroize();
     for chunk in out.chunks_mut(BLOCK_SIZE) {
         aes.encrypt_block(&mut block);
@@ -421,14 +425,14 @@ fn derive(input: &[u8], out: &mut [u8; SEED]) -> Result<(), Error> {
 /// a buffer as long as the caller's entropy. Chaining it a block at a
 /// time needs sixteen bytes and no assumptions about length.
 struct Chain<'a> {
-    aes: &'a Aes,
+    aes: &'a Aes256,
     chain: [u8; BLOCK_SIZE],
     block: [u8; BLOCK_SIZE],
     used: usize,
 }
 
 impl<'a> Chain<'a> {
-    fn new(aes: &'a Aes) -> Self {
+    fn new(aes: &'a Aes256) -> Self {
         Chain {
             aes,
             chain: [0u8; BLOCK_SIZE],

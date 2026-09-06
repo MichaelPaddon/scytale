@@ -1,21 +1,23 @@
 //! AES (FIPS 197) block cipher.
 //!
-//! [`Aes`] runs the best implementation the processor supports:
-//! hardware instructions where present, otherwise constant-time
-//! portable code. To use a particular one, name it: [`portable::Aes`],
-//! [`portable::bitsliced::Aes`], `x86_64::aesni::Aes`,
-//! `x86_64::vaes::Aes`, `aarch64::armv8::Aes`, `riscv64::zkn::Aes` or
-//! `riscv64::zvkned::Aes` (the hardware ones exist only on their
-//! architecture).
+//! The key width is the type: [`Aes128`], [`Aes192`] and [`Aes256`]
+//! are [`Aes<16>`](Aes), `Aes<24>` and `Aes<32>`, and each takes a key
+//! of exactly its width. [`Aes`] runs the best implementation the
+//! processor supports: hardware instructions where present, otherwise
+//! constant-time portable code. To use a particular one, name it:
+//! [`portable::Aes`], [`portable::bitsliced::Aes`],
+//! `x86_64::aesni::Aes`, `x86_64::vaes::Aes`, `aarch64::armv8::Aes`,
+//! `riscv64::zkn::Aes` or `riscv64::zvkned::Aes` (the hardware ones
+//! exist only on their architecture), with the same width parameter.
 //!
 //! Every implementation wipes its expanded key when dropped.
 //!
 //! ```
-//! use scytale::cipher::aes::{portable, Aes};
+//! use scytale::cipher::aes::{portable, Aes128};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let fastest = Aes::try_new(&[0u8; 16])?;
-//! let portable = portable::Aes::try_new(&[0u8; 16])?;
+//! let fastest = Aes128::try_new(&[0u8; 16])?;
+//! let portable = portable::Aes::<16>::try_new(&[0u8; 16])?;
 //!
 //! let mut a = [0u8; 16];
 //! let mut b = a;
@@ -38,10 +40,17 @@ use core::fmt;
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use crate::cipher::BlockCipher;
-use crate::Error;
+use crate::{BlockType, Error, KeyType};
 
 /// AES block size in bytes.
 pub const BLOCK_SIZE: usize = 16;
+
+/// AES with a 128-bit key.
+pub type Aes128 = Aes<16>;
+/// AES with a 192-bit key.
+pub type Aes192 = Aes<24>;
+/// AES with a 256-bit key.
+pub type Aes256 = Aes<32>;
 
 /// Words in the longest key schedule (AES-256: 15 round keys).
 pub(crate) const MAX_WORDS: usize = 60;
@@ -55,6 +64,8 @@ pub(crate) enum KeySize {
 }
 
 impl KeySize {
+    /// The size of a `key`. A width the type system already fixed
+    /// to 16, 24 or 32 never reaches the error.
     pub(crate) fn for_key(key: &[u8]) -> Result<Self, Error> {
         match key.len() {
             16 => Ok(KeySize::Aes128),
@@ -182,25 +193,28 @@ fn supported(choice: Choice) -> bool {
 /// The processor is probed once, the first time a key is expanded;
 /// every later [`Aes::try_new`] reads the cached answer, and each
 /// call then dispatches with a single predictable branch.
+///
+/// `K` is the key width in bytes: 16, 24 or 32, and nothing else
+/// compiles. [`Aes128`], [`Aes192`] and [`Aes256`] name the three.
 #[derive(Clone)]
-pub struct Aes(Inner);
+pub struct Aes<const K: usize>(Inner<K>);
 
 // Each variant is that implementation's key schedule; the bitsliced
 // one is twice the size of the others and there is no heap to box it.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
-enum Inner {
+enum Inner<const K: usize> {
     #[cfg(target_arch = "x86_64")]
-    Vaes(x86_64::vaes::Aes),
+    Vaes(x86_64::vaes::Aes<K>),
     #[cfg(target_arch = "x86_64")]
-    AesNi(x86_64::aesni::Aes),
+    AesNi(x86_64::aesni::Aes<K>),
     #[cfg(target_arch = "aarch64")]
-    Armv8(aarch64::armv8::Aes),
+    Armv8(aarch64::armv8::Aes<K>),
     #[cfg(target_arch = "riscv64")]
-    Zvkned(riscv64::zvkned::Aes),
+    Zvkned(riscv64::zvkned::Aes<K>),
     #[cfg(target_arch = "riscv64")]
-    Zkn(riscv64::zkn::Aes),
-    Bitsliced(portable::bitsliced::Aes),
+    Zkn(riscv64::zkn::Aes<K>),
+    Bitsliced(portable::bitsliced::Aes<K>),
 }
 
 /// Applies a method to whichever implementation is in use.
@@ -222,7 +236,7 @@ macro_rules! dispatch {
     };
 }
 
-impl fmt::Debug for Aes {
+impl<const K: usize> fmt::Debug for Aes<K> {
     /// Deliberately omits the key material.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Aes")
@@ -231,13 +245,22 @@ impl fmt::Debug for Aes {
     }
 }
 
-impl Aes {
-    /// Expands `key`, which must be 16, 24 or 32 bytes long, with the
-    /// best implementation the processor supports.
+impl<const K: usize> Aes<K> {
+    /// Expands `key` with the best implementation the processor
+    /// supports.
+    ///
+    /// A width other than 16, 24 or 32 is refused when the type is
+    /// instantiated, at compile time.
     // The hardware constructors skip their own processor check because
     // the probe has already made it.
     #[allow(unsafe_code)]
-    pub fn try_new(key: &[u8]) -> Result<Self, Error> {
+    pub fn try_new(key: &[u8; K]) -> Result<Self, Error> {
+        const {
+            assert!(
+                K == 16 || K == 24 || K == 32,
+                "AES keys are 16, 24 or 32 bytes"
+            )
+        };
         // SAFETY: `probe` only names hardware after confirming the
         // processor supports it.
         let inner = unsafe {
@@ -296,10 +319,24 @@ impl Aes {
     }
 }
 
-impl BlockCipher for Aes {
+impl<const K: usize> BlockType for Aes<K> {
     type Block = [u8; BLOCK_SIZE];
 
-    fn try_new(key: &[u8]) -> Result<Self, Error> {
+    fn zero_block() -> Self::Block {
+        [0; BLOCK_SIZE]
+    }
+}
+
+impl<const K: usize> KeyType for Aes<K> {
+    type Key = [u8; K];
+
+    fn zero_key() -> Self::Key {
+        [0; K]
+    }
+}
+
+impl<const K: usize> BlockCipher for Aes<K> {
+    fn try_new(key: &Self::Key) -> Result<Self, Error> {
         Aes::try_new(key)
     }
 
@@ -329,19 +366,19 @@ mod tests {
     #[test]
     fn every_implementation_zeroizes() {
         fn wipes<T: ZeroizeOnDrop>() {}
-        wipes::<portable::Aes>();
-        wipes::<portable::bitsliced::Aes>();
+        wipes::<portable::Aes<16>>();
+        wipes::<portable::bitsliced::Aes<16>>();
         #[cfg(target_arch = "x86_64")]
         {
-            wipes::<x86_64::aesni::Aes>();
-            wipes::<x86_64::vaes::Aes>();
+            wipes::<x86_64::aesni::Aes<16>>();
+            wipes::<x86_64::vaes::Aes<16>>();
         }
         #[cfg(target_arch = "aarch64")]
-        wipes::<aarch64::armv8::Aes>();
+        wipes::<aarch64::armv8::Aes<16>>();
         #[cfg(target_arch = "riscv64")]
         {
-            wipes::<riscv64::zkn::Aes>();
-            wipes::<riscv64::zvkned::Aes>();
+            wipes::<riscv64::zkn::Aes<16>>();
+            wipes::<riscv64::zvkned::Aes<16>>();
         }
     }
 
@@ -399,10 +436,16 @@ mod tests {
 
     #[test]
     fn matches_portable() {
-        let key = [0x5au8; 32];
-        for klen in [16, 24, 32] {
-            let aes = Aes::try_new(&key[..klen]).unwrap();
-            let sw = portable::Aes::try_new(&key[..klen]).unwrap();
+        matches_portable_for::<16>();
+        matches_portable_for::<24>();
+        matches_portable_for::<32>();
+    }
+
+    fn matches_portable_for<const K: usize>() {
+        let key = [0x5au8; K];
+        {
+            let aes = Aes::try_new(&key).unwrap();
+            let sw = portable::Aes::try_new(&key).unwrap();
             assert_eq!(aes.rounds(), sw.rounds());
 
             let mut data = [[0u8; BLOCK_SIZE]; 17];
@@ -423,13 +466,5 @@ mod tests {
             aes.decrypt_block(&mut block);
             assert_eq!(block, [7u8; BLOCK_SIZE]);
         }
-    }
-
-    #[test]
-    fn errors_pass_through() {
-        assert_eq!(
-            Aes::try_new(&[0; 20]).unwrap_err(),
-            Error::InvalidKeyLength(20)
-        );
     }
 }

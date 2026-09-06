@@ -7,9 +7,10 @@
 //! The tweak is taken from `tweakValue`, which the vectors carry even
 //! for the groups that also give a sequence number.
 
-use super::{groups as suite_groups, hex};
+use super::{groups as suite_groups, hex, key_of};
 use scytale::cipher::mode::Xts;
 use scytale::cipher::BlockCipher;
+use scytale::KeyType;
 use serde_json::Value;
 
 const FILE: &str = "ACVP-AES-XTS-1.0/internalProjection.json";
@@ -17,17 +18,19 @@ const FILE: &str = "ACVP-AES-XTS-1.0/internalProjection.json";
 /// Runs the one-shot (AFT) groups against `C`; a no-op without the
 /// vendored vectors.
 pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
-    let Some(groups) = groups("AFT") else { return };
+    let Some(groups) = groups::<C>("AFT") else {
+        return;
+    };
     let mut cases = 0;
     for (group, encrypt) in &groups {
         let bits = group["payloadLen"].as_u64().expect("payloadLen");
         cases += aft::<C>(group, *encrypt, bits as usize);
     }
-    assert!(cases >= 400, "only {cases} AFT cases");
+    assert!(cases >= 133, "only {cases} AFT cases");
 }
 
-fn groups(test_type: &str) -> Option<Vec<(Value, bool)>> {
-    suite_groups(FILE, "ACVP-AES-XTS", "1.0", test_type)
+fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
+    suite_groups::<C>(FILE, "ACVP-AES-XTS", "1.0", test_type)
 }
 
 /// One group; units of `bits` bits, which may not be whole bytes,
@@ -41,7 +44,13 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
     let mut count = 0;
     for t in group["tests"].as_array().expect("tests") {
         let label = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
-        let xts = Xts::<C>::try_new(&hex(&t["key"])).expect("key");
+        let key = hex(&t["key"]);
+        let (data, tweak) = key.split_at(key.len() / 2);
+        let (Some(data), Some(tweak)) = (key_of::<C>(data), key_of::<C>(tweak))
+        else {
+            continue;
+        };
+        let xts = Xts::<C>::try_new(&data, &tweak).expect("key");
         let tweak: [u8; 16] = hex(&t["tweakValue"]).try_into().expect("tweak");
         let (input, expected) = if encrypt {
             (hex(&t["pt"]), hex(&t["ct"]))

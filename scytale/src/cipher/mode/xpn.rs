@@ -158,10 +158,10 @@ fn nonce(salt: &[u8; HALF], frame: &[u8; HALF]) -> [u8; HALF] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cipher::aes::Aes;
+    use crate::cipher::aes::{Aes, Aes128};
     use crate::cipher::mode::Gcm;
 
-    fn xpn() -> Xpn<Aes> {
+    fn xpn() -> Xpn<Aes128> {
         Xpn::try_new(Aes::try_new(&[0x42; 16]).unwrap()).unwrap()
     }
 

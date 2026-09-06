@@ -35,11 +35,11 @@
 //! # Example
 //!
 //! ```
-//! use scytale::cipher::aes::Aes;
+//! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Ff3_1;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let ff3: Ff3_1<Aes> = Ff3_1::try_new(&[0u8; 16], 10)?;
+//! let ff3: Ff3_1<Aes128> = Ff3_1::try_new(&[0u8; 16], 10)?;
 //! let tweak = [0u8; 7];
 //!
 //! let mut account = [0u16, 1, 2, 3, 4, 5, 6, 7, 8, 9];
@@ -58,6 +58,7 @@ use super::ghash::BLOCK;
 use crate::cipher::BlockCipher;
 use crate::math::natural::Natural;
 use crate::Error;
+use zeroize::Zeroize;
 
 /// Rounds of the Feistel network, fixed by the standard.
 const ROUNDS: usize = 8;
@@ -103,7 +104,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ff3_1<C> {
     /// 65536.
     ///
     /// The key is held reversed, as the standard specifies.
-    pub fn try_new(key: &[u8], radix: u32) -> Result<Self, Error> {
+    pub fn try_new(key: &C::Key, radix: u32) -> Result<Self, Error> {
         if !(2..=65536).contains(&radix) {
             return Err(Error::InvalidRadix(radix));
         }
@@ -119,17 +120,13 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ff3_1<C> {
             half += 1;
         }
 
-        let mut reversed = [0u8; 32];
-        let reversed = &mut reversed[..key.len().min(32)];
-        if reversed.len() != key.len() {
-            return Err(Error::InvalidKeyLength(key.len()));
-        }
-        for (slot, byte) in reversed.iter_mut().zip(key.iter().rev()) {
-            *slot = *byte;
-        }
+        let mut reversed = *key;
+        reversed.as_mut().reverse();
+        let cipher = C::try_new(&reversed);
+        reversed.as_mut().zeroize();
 
         Ok(Ff3_1 {
-            cipher: C::try_new(reversed)?,
+            cipher: cipher?,
             radix,
             max_symbols: 2 * half,
         })
@@ -293,7 +290,7 @@ fn subtract_from(half: &mut [u16], step: &[u16; MAX_SYMBOLS], radix: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cipher::aes::Aes;
+    use crate::cipher::aes::Aes128;
 
     fn unhex<const N: usize>(text: &str) -> [u8; N] {
         let mut out = [0u8; N];
@@ -314,7 +311,7 @@ mod tests {
         out
     }
 
-    fn ff3(radix: u32) -> Ff3_1<Aes> {
+    fn ff3(radix: u32) -> Ff3_1<Aes128> {
         let key: [u8; 16] = unhex("44d737102ccc9aec882045c31c08252a");
         Ff3_1::try_new(&key, radix).unwrap()
     }
@@ -395,7 +392,7 @@ mod tests {
         let key: [u8; 16] = unhex("44d737102ccc9aec882045c31c08252a");
         for radix in [0u32, 1, 65537] {
             assert_eq!(
-                Ff3_1::<Aes>::try_new(&key, radix).unwrap_err(),
+                Ff3_1::<Aes128>::try_new(&key, radix).unwrap_err(),
                 Error::InvalidRadix(radix)
             );
         }

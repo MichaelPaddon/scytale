@@ -47,12 +47,16 @@ use scytale::cipher::aes::portable;
 use scytale::cipher::chacha20;
 use scytale::cipher::mode::ChaCha20Poly1305;
 use scytale::cipher::mode::{Cbc, Ctr, Gcm, GcmSiv, Xts};
-use scytale::cipher::{aes, Block, BlockCipher};
+use scytale::cipher::{aes, BlockCipher};
+
+/// The bitsliced AES at a key width; its path alone is too long.
+type Bitsliced<const K: usize> = aes::portable::bitsliced::Aes<K>;
 use scytale::hash::{sha2, sha3};
 use scytale::hash::{Hash, Xof, XofReader};
 use scytale::mac::hmac::Hmac;
 use scytale::mac::poly1305::Poly1305;
 use scytale::mac::Mac;
+use scytale::BlockType;
 use scytale::Error;
 
 /// Buffer sizes reported, the ones `openssl speed` uses.
@@ -199,26 +203,36 @@ fn report(options: &Options) -> ExitCode {
     // that has them; each still checks the processor when its key is
     // expanded, and a section is skipped when it says no.
     let mut ran = false;
-    ran |= section::<aes::Aes>("auto", options);
+    ran |= section::<aes::Aes<16>, aes::Aes<32>>("auto", options);
     #[cfg(target_arch = "x86_64")]
     {
         use scytale::cipher::aes::x86_64;
-        ran |= section::<x86_64::vaes::Aes>("vaes", options);
-        ran |= section::<x86_64::aesni::Aes>("aesni", options);
+        ran |= section::<x86_64::vaes::Aes<16>, x86_64::vaes::Aes<32>>(
+            "vaes", options,
+        );
+        ran |= section::<x86_64::aesni::Aes<16>, x86_64::aesni::Aes<32>>(
+            "aesni", options,
+        );
     }
     #[cfg(target_arch = "aarch64")]
     {
         use scytale::cipher::aes::aarch64;
-        ran |= section::<aarch64::armv8::Aes>("armv8", options);
+        ran |= section::<aarch64::armv8::Aes<16>, aarch64::armv8::Aes<32>>(
+            "armv8", options,
+        );
     }
     #[cfg(target_arch = "riscv64")]
     {
         use scytale::cipher::aes::riscv64;
-        ran |= section::<riscv64::zvkned::Aes>("zvkned", options);
-        ran |= section::<riscv64::zkn::Aes>("zkn", options);
+        ran |= section::<riscv64::zvkned::Aes<16>, riscv64::zvkned::Aes<32>>(
+            "zvkned", options,
+        );
+        ran |= section::<riscv64::zkn::Aes<16>, riscv64::zkn::Aes<32>>(
+            "zkn", options,
+        );
     }
-    ran |= section::<portable::Aes>("ttable", options);
-    ran |= section::<portable::bitsliced::Aes>("bitsliced", options);
+    ran |= section::<portable::Aes<16>, portable::Aes<32>>("ttable", options);
+    ran |= section::<Bitsliced<16>, Bitsliced<32>>("bitsliced", options);
 
     // The hashes, likewise. SHA-224 and SHA-384 cost the same as
     // SHA-256 and SHA-512 and are not measured separately.
@@ -300,10 +314,11 @@ fn report(options: &Options) -> ExitCode {
 ///
 /// An implementation the processor cannot run is left out rather than
 /// reported as nothing, and so is one every filter rejected.
-fn section<C: BlockCipher<Block = [u8; 16]>>(
-    implementation: &str,
-    options: &Options,
-) -> bool {
+fn section<A, B>(implementation: &str, options: &Options) -> bool
+where
+    A: BlockCipher<Block = [u8; 16], Key = [u8; 16]>,
+    B: BlockCipher<Block = [u8; 16], Key = [u8; 32]>,
+{
     let wanted: Vec<&'static str> = ALGORITHMS
         .iter()
         .copied()
@@ -313,7 +328,7 @@ fn section<C: BlockCipher<Block = [u8; 16]>>(
         return false;
     }
 
-    let mut keys = match Keys::<C>::try_new() {
+    let mut keys = match Keys::<A, B>::try_new() {
         Ok(keys) => keys,
         // No such instructions here.
         Err(Error::NotSupported) => return false,
@@ -344,8 +359,8 @@ const HASHES: [&str; 4] =
 /// no instruction for the latter.
 fn hash_section<S256, S512>(implementation: &str, options: &Options) -> bool
 where
-    S256: Hash<Output = [u8; 32]>,
-    S512: Hash<Output = [u8; 64]>,
+    S256: Hash<Output = [u8; 32]> + Clone + BlockType,
+    S512: Hash<Output = [u8; 64]> + Clone + BlockType,
 {
     let wanted: Vec<&'static str> = HASHES
         .iter()
@@ -374,7 +389,7 @@ where
             Box::new(|d: &mut [u8]| {
                 sha256.reset();
                 sha256.update(d);
-                black_box(sha256.clone().finalize());
+                black_box(sha256.finalize());
             }) as Operation<'_>,
         ),
         (
@@ -382,7 +397,7 @@ where
             Box::new(|d: &mut [u8]| {
                 sha512.reset();
                 sha512.update(d);
-                black_box(sha512.clone().finalize());
+                black_box(sha512.finalize());
             }),
         ),
         (
@@ -390,7 +405,7 @@ where
             Box::new(|d: &mut [u8]| {
                 hmac256.reset();
                 hmac256.update(d);
-                black_box(hmac256.clone().finalize());
+                black_box(hmac256.finalize());
             }),
         ),
         (
@@ -398,7 +413,7 @@ where
             Box::new(|d: &mut [u8]| {
                 hmac512.reset();
                 hmac512.update(d);
-                black_box(hmac512.clone().finalize());
+                black_box(hmac512.finalize());
             }),
         ),
     ];
@@ -506,7 +521,7 @@ fn chacha_section<C: StreamCipher>(
             Box::new(|d: &mut [u8]| {
                 mac.reset();
                 mac.update(d);
-                black_box(mac.clone().finalize());
+                black_box(mac.finalize());
             }),
         ),
         (
@@ -577,7 +592,7 @@ where
             Box::new(|d: &mut [u8]| {
                 d256.reset();
                 d256.update(d);
-                black_box(d256.clone().finalize());
+                black_box(d256.finalize());
             }) as Operation<'_>,
         ),
         (
@@ -585,7 +600,7 @@ where
             Box::new(|d: &mut [u8]| {
                 d512.reset();
                 d512.update(d);
-                black_box(d512.clone().finalize());
+                black_box(d512.finalize());
             }),
         ),
         (
@@ -594,7 +609,7 @@ where
                 x128.reset();
                 x128.update(d);
                 let mut out = [0u8; 32];
-                x128.clone().finalize_xof().squeeze(&mut out);
+                x128.finalize_xof().squeeze(&mut out);
                 black_box(out);
             }),
         ),
@@ -630,15 +645,15 @@ const ALGORITHMS: [&str; 12] = [
 
 /// Everything an implementation's rows are built from, held together
 /// so that the borrows in [`Keys::tasks`] all have one owner.
-struct Keys<C: BlockCipher> {
-    ecb128: C,
-    ecb256: C,
-    cbc: Cbc<C>,
-    ctr: Ctr<C>,
-    gcm128: Gcm<C>,
-    gcm256: Gcm<C>,
-    siv: GcmSiv<C>,
-    xts: Xts<C>,
+struct Keys<A: BlockCipher, B: BlockCipher> {
+    ecb128: A,
+    ecb256: B,
+    cbc: Cbc<A>,
+    ctr: Ctr<A>,
+    gcm128: Gcm<A>,
+    gcm256: Gcm<B>,
+    siv: GcmSiv<A>,
+    xts: Xts<A>,
     /// A tag buffer for each row that writes one; separate buffers so
     /// the rows borrow disjointly.
     tags: [[u8; 16]; 4],
@@ -654,8 +669,9 @@ const KEY256: [u8; 32] = [
     0xcc, 0xdd, 0xee, 0xff, 0x0f, 0x1e, 0x2d, 0x3c, 0x4b, 0x5a, 0x69, 0x78,
     0x87, 0x96, 0xa5, 0xb4, 0xc3, 0xd2, 0xe1, 0xf0,
 ];
-/// XTS takes both halves at once, and they must differ.
-const KEY_XTS: [u8; 32] = KEY256;
+/// XTS takes two keys, and they must differ.
+const KEY_XTS_DATA: [u8; 16] = KEY128;
+const KEY_XTS_TWEAK: [u8; 16] = [0x99; 16];
 const NONCE: [u8; 12] = [0xa5; 12];
 const IV: [u8; 16] = [0x5a; 16];
 const TWEAK: [u8; 16] = [0x3c; 16];
@@ -666,17 +682,21 @@ const TWEAK: [u8; 16] = [0x3c; 16];
 /// the wipe on a bad tag out of the measurement.
 const CHECKED_TAG: [u8; 16] = [0; 16];
 
-impl<C: BlockCipher<Block = [u8; 16]>> Keys<C> {
+impl<A, B> Keys<A, B>
+where
+    A: BlockCipher<Block = [u8; 16], Key = [u8; 16]>,
+    B: BlockCipher<Block = [u8; 16], Key = [u8; 32]>,
+{
     fn try_new() -> Result<Self, Error> {
         Ok(Keys {
-            ecb128: C::try_new(&KEY128)?,
-            ecb256: C::try_new(&KEY256)?,
-            cbc: Cbc::new(C::try_new(&KEY128)?),
-            ctr: Ctr::new(C::try_new(&KEY128)?),
-            gcm128: Gcm::try_new(C::try_new(&KEY128)?)?,
-            gcm256: Gcm::try_new(C::try_new(&KEY256)?)?,
+            ecb128: A::try_new(&KEY128)?,
+            ecb256: B::try_new(&KEY256)?,
+            cbc: Cbc::new(A::try_new(&KEY128)?),
+            ctr: Ctr::new(A::try_new(&KEY128)?),
+            gcm128: Gcm::try_new(A::try_new(&KEY128)?)?,
+            gcm256: Gcm::try_new(B::try_new(&KEY256)?)?,
             siv: GcmSiv::try_new(&KEY128)?,
-            xts: Xts::try_new(&KEY_XTS)?,
+            xts: Xts::try_new(&KEY_XTS_DATA, &KEY_XTS_TWEAK)?,
             tags: [[0u8; 16]; 4],
         })
     }
@@ -787,7 +807,7 @@ impl<C: BlockCipher<Block = [u8; 16]>> Keys<C> {
 /// The whole blocks of `data`. Every size the benchmark uses is a
 /// multiple of the block, so nothing is ever left over.
 fn blocks_of(data: &mut [u8]) -> &mut [[u8; 16]] {
-    let (blocks, rest) = <[u8; 16]>::split_mut(data);
+    let (blocks, rest) = data.as_chunks_mut::<16>();
     debug_assert!(rest.is_empty());
     blocks
 }
@@ -960,7 +980,8 @@ fn self_test() -> ExitCode {
     );
 
     // Every named row is built, or a filter would silently drop it.
-    let mut keys = Keys::<portable::Aes>::try_new().expect("portable keys");
+    let mut keys = Keys::<portable::Aes<16>, portable::Aes<32>>::try_new()
+        .expect("portable keys");
     let built = keys.tasks();
     check(
         "every algorithm has a task",

@@ -8,10 +8,10 @@
 //! whatever a later version adds:
 //!
 //! ```
-//! use scytale::cipher::aes::Aes;
+//! use scytale::cipher::chacha20::ChaCha20;
 //! use scytale::Error;
 //!
-//! match Aes::try_new(&[0u8; 7]) {
+//! match ChaCha20::try_new(&[0u8; 7]) {
 //!     Ok(_) => unreachable!(),
 //!     Err(Error::InvalidKeyLength(n)) => assert_eq!(n, 7),
 //!     Err(Error::NotSupported) => panic!("no implementation at all"),
@@ -29,15 +29,18 @@
 //! buffer, and carries the size it needs to be.
 //! [`Error::NotBlockAligned`], [`Error::InvalidNonceLength`],
 //! [`Error::InvalidTagLength`] and [`Error::InvalidKeyLength`] name
-//! the offending argument. [`Error::InvalidSeedLength`] and
-//! [`Error::RequestTooLarge`] come only from the random number
-//! generator, [`Error::InvalidBitCount`] only from ending a hash
-//! part way through a byte. [`Error::InvalidPublicKey`],
-//! [`Error::InvalidPrivateKey`] and [`Error::InvalidSignature`] come
-//! only from the public-key algorithms, and say deliberately
-//! little. [`Error::InvalidEncoding`] comes only from reading a key
-//! in DER or PEM, and says as little: the bytes are not the
-//! structure the call reads.
+//! the offending argument; where a key is a type, as it is for AES
+//! and every MAC, the last is left only for what the type cannot
+//! say, such as XTS being handed the same key twice.
+//! [`Error::InvalidSeedLength`] and [`Error::RequestTooLarge`] come
+//! only from the random number generator, [`Error::InvalidBitCount`]
+//! only from ending a hash part way through a byte.
+//! [`Error::InvalidPublicKey`], [`Error::InvalidPrivateKey`] and
+//! [`Error::InvalidSignature`] come only from the public-key
+//! algorithms, and say deliberately little.
+//! [`Error::InvalidEncoding`] comes only from reading a key in DER
+//! or PEM, and says as little: the bytes are not the structure the
+//! call reads.
 
 use core::fmt;
 

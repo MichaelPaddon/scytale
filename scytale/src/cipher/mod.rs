@@ -5,17 +5,19 @@
 //! and a stream cipher, [`chacha20`], with the authenticated mode
 //! built on it there too. The block cipher modes are written against
 //! the [`BlockCipher`] trait, so each works with any cipher and any
-//! of its implementations.
+//! of its implementations. The block and the key are types, so a
+//! cipher of unknown make can still be an object:
+//! `&dyn BlockCipher<Block = [u8; 16], Key = [u8; 16]>`.
 //!
 //! # Example
 //!
 //! ```
-//! use scytale::cipher::aes::Aes;
+//! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Ctr;
 //! use scytale::cipher::BlockCipher;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let aes = Aes::try_new(&[0u8; 16])?;
+//! let aes = Aes128::try_new(&[0u8; 16])?;
 //!
 //! // The cipher itself transforms one block at a time.
 //! let mut block = [0u8; 16];
@@ -40,72 +42,24 @@ pub mod aes;
 pub mod chacha20;
 pub mod mode;
 
-use crate::Error;
-
-/// One block of a block cipher: a fixed-size array of bytes.
-///
-/// Implemented here for every `[u8; N]`, which is what a cipher
-/// should name its block as. Implementing it for anything else is
-/// allowed; getting it wrong spoils that cipher's own output and
-/// nothing else, because everything here that touches a foreign
-/// block is safe code.
-pub trait Block: Copy + AsRef<[u8]> + AsMut<[u8]> {
-    /// Size in bytes. Never zero.
-    ///
-    /// Defaulted, and there is no reason to override it: a block is
-    /// its bytes, so its size is the size of the type.
-    const SIZE: usize = core::mem::size_of::<Self>();
-
-    /// A block of zeros.
-    const ZERO: Self;
-
-    /// Splits `data` into whole blocks and the bytes left over.
-    fn split(data: &[u8]) -> (&[Self], &[u8]);
-
-    /// Splits `data` into whole blocks and the bytes left over.
-    fn split_mut(data: &mut [u8]) -> (&mut [Self], &mut [u8]);
-
-    /// The blocks as the bytes they are.
-    fn flatten(blocks: &[Self]) -> &[u8];
-
-    /// The blocks as the bytes they are.
-    fn flatten_mut(blocks: &mut [Self]) -> &mut [u8];
-}
-
-impl<const N: usize> Block for [u8; N] {
-    const ZERO: Self = [0; N];
-
-    fn split(data: &[u8]) -> (&[Self], &[u8]) {
-        data.as_chunks::<N>()
-    }
-
-    fn split_mut(data: &mut [u8]) -> (&mut [Self], &mut [u8]) {
-        data.as_chunks_mut::<N>()
-    }
-
-    fn flatten(blocks: &[Self]) -> &[u8] {
-        blocks.as_flattened()
-    }
-
-    fn flatten_mut(blocks: &mut [Self]) -> &mut [u8] {
-        blocks.as_flattened_mut()
-    }
-}
+use crate::{BlockType, Error, KeyType};
 
 /// A block cipher: a keyed permutation of fixed-size blocks.
 ///
 /// Modes of operation are written against this trait so they work
-/// with any block cipher.
+/// with any block cipher. The block and the key are types, from
+/// [`BlockType`] and [`KeyType`], so a wrong length is a compile
+/// error and the trait is usable as an object once they are named:
+/// `&dyn BlockCipher<Block = [u8; 16], Key = [u8; 32]>`.
 ///
 /// Only construction can fail. A block is a type rather than a slice
 /// of hopeful length, so there is no misalignment left to report, and
 /// the bulk methods take as many blocks as there are.
-pub trait BlockCipher: Sized {
-    /// The block this cipher transforms; `[u8; 16]` for AES.
-    type Block: Block;
-
-    /// Expands `key`; each cipher decides which lengths it accepts.
-    fn try_new(key: &[u8]) -> Result<Self, Error>;
+pub trait BlockCipher: BlockType + KeyType {
+    /// Expands `key`.
+    fn try_new(key: &Self::Key) -> Result<Self, Error>
+    where
+        Self: Sized;
 
     /// Encrypts one block in place.
     fn encrypt_block(&self, block: &mut Self::Block);
@@ -122,4 +76,45 @@ pub trait BlockCipher: Sized {
 
     /// Decrypts every block in place, independently (ECB).
     fn decrypt_blocks(&self, blocks: &mut [Self::Block]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cipher::aes::{portable, Aes256};
+
+    /// Two implementations behind one object type agree.
+    #[test]
+    fn as_an_object() {
+        fn once(
+            cipher: &dyn BlockCipher<Block = [u8; 16], Key = [u8; 32]>,
+        ) -> [u8; 16] {
+            let mut block = [7u8; 16];
+            cipher.encrypt_block(&mut block);
+            block
+        }
+        let key = [0x5au8; 32];
+        let best = Aes256::try_new(&key).unwrap();
+        let portable = portable::Aes::<32>::try_new(&key).unwrap();
+        assert_eq!(once(&best), once(&portable));
+        assert_ne!(once(&best), [7u8; 16]);
+    }
+
+    /// Generic code can make a key and a block without knowing the
+    /// cipher.
+    #[test]
+    fn zero_key_and_block() {
+        fn round_trip<C: BlockCipher>() {
+            let cipher = C::try_new(&C::zero_key()).unwrap();
+            let mut block = C::zero_block();
+            cipher.encrypt_block(&mut block);
+            assert_ne!(block.as_ref(), C::zero_block().as_ref());
+            cipher.decrypt_block(&mut block);
+            assert_eq!(block.as_ref(), C::zero_block().as_ref());
+        }
+        round_trip::<aes::Aes128>();
+        round_trip::<aes::Aes192>();
+        round_trip::<Aes256>();
+        assert_eq!(Aes256::zero_key(), [0u8; 32]);
+    }
 }

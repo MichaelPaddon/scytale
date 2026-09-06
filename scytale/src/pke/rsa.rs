@@ -78,7 +78,6 @@
 
 use zeroize::Zeroize;
 
-use crate::cipher::Block;
 use crate::hash::Hash;
 use crate::math::rsa::{mgf1_xor, Private, Public};
 use crate::math::uint::Uint;
@@ -165,10 +164,15 @@ impl<const LIMBS: usize, const BYTES: usize> PublicKey<LIMBS, BYTES> {
         label: &[u8],
         message: &[u8],
     ) -> Result<[u8; BYTES], Error> {
-        let mut seed = H::Output::ZERO;
-        rng.fill(seed.as_mut())?;
-        let ciphertext = self.oaep_encode::<H>(seed.as_ref(), label, message);
-        seed.as_mut().zeroize();
+        // The seed is one digest long; the key is longer than two.
+        let h_len = size_of::<H::Output>();
+        if BYTES < 2 * h_len + 2 {
+            return Err(Error::MessageTooLong);
+        }
+        let mut seed = [0u8; BYTES];
+        rng.fill(&mut seed[..h_len])?;
+        let ciphertext = self.oaep_encode::<H>(&seed[..h_len], label, message);
+        seed.zeroize();
         ciphertext
     }
 
@@ -180,7 +184,7 @@ impl<const LIMBS: usize, const BYTES: usize> PublicKey<LIMBS, BYTES> {
         label: &[u8],
         message: &[u8],
     ) -> Result<[u8; BYTES], Error> {
-        let h_len = H::Output::SIZE;
+        let h_len = size_of::<H::Output>();
         if BYTES < 2 * h_len + 2 || message.len() > BYTES - 2 * h_len - 2 {
             return Err(Error::MessageTooLong);
         }
@@ -487,7 +491,7 @@ impl<const LIMBS: usize, const BYTES: usize, const HALF: usize>
         ciphertext: &[u8; BYTES],
         out: &mut [u8],
     ) -> Result<usize, Error> {
-        let h_len = H::Output::SIZE;
+        let h_len = size_of::<H::Output>();
         if BYTES < 2 * h_len + 2 {
             return Err(Error::DecryptionFailed);
         }

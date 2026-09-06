@@ -25,13 +25,13 @@ use zeroize::Zeroize;
 
 use super::montgomery::Montgomery;
 use super::uint::Uint;
-use crate::cipher::Block;
 use crate::der::{self, Reader, Writer};
 use crate::hash::Hash;
 use crate::mac::hmac::Hmac;
 use crate::mac::Mac;
 use crate::pem;
 use crate::random::Random;
+use crate::BlockType;
 use crate::Error;
 
 /// A curve's constants, each as a big-endian hex string of the
@@ -466,7 +466,7 @@ impl<const L: usize> Secret<L> {
 
     /// An ECDSA signature over `message`, `r || s` into `out` of
     /// twice the curve's width, with the nonce from RFC 6979.
-    pub(crate) fn sign<H: Hash>(
+    pub(crate) fn sign<H: Hash + Clone + BlockType>(
         &self,
         e: &Engine<L>,
         message: &[u8],
@@ -615,18 +615,22 @@ impl<const L: usize> Public<L> {
 /// signature's hash, seeded with the private key and the message's
 /// digest, so the same key and message always give the same nonce
 /// and nothing else can.
-struct Nonce<H: Hash> {
+struct Nonce<H: Hash + Clone + BlockType> {
     k: H::Output,
     v: H::Output,
 }
 
-impl<H: Hash> Nonce<H> {
+impl<H: Hash + Clone + BlockType> Nonce<H> {
     /// Steps b through g, given `int2octets(x)` and
     /// `bits2octets(h1)`.
     fn new(x: &[u8], h: &[u8]) -> Result<Self, Error> {
-        let mut v = H::Output::ZERO;
+        // V starts as 0x01 repeated and K as 0x00 repeated. A digest
+        // is the only `H::Output` generic code can make; its value
+        // is gone before either is used.
+        let mut v = H::digest(&[])?;
         v.as_mut().fill(0x01);
-        let k = H::Output::ZERO;
+        let mut k = v;
+        k.as_mut().fill(0x00);
         let mut nonce = Nonce { k, v };
         nonce.seed(0x00, x, h)?;
         nonce.seed(0x01, x, h)?;
@@ -658,7 +662,7 @@ impl<H: Hash> Nonce<H> {
             while filled < width::<L>() {
                 self.v = Hmac::<H>::mac(self.k.as_ref(), self.v.as_ref())?;
                 let out = &mut t.as_flattened_mut()[filled..];
-                let take = out.len().min(H::Output::SIZE);
+                let take = out.len().min(size_of::<H::Output>());
                 out[..take].copy_from_slice(&self.v.as_ref()[..take]);
                 filled += take;
             }
@@ -678,7 +682,7 @@ impl<H: Hash> Nonce<H> {
     }
 }
 
-impl<H: Hash> Drop for Nonce<H> {
+impl<H: Hash + Clone + BlockType> Drop for Nonce<H> {
     fn drop(&mut self) {
         self.k.as_mut().zeroize();
         self.v.as_mut().zeroize();

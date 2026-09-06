@@ -25,6 +25,16 @@
 //! let wide = fingerprint::<Sha512_256>(&[b"abc"])?;
 //! assert_eq!(wide.len(), 32);
 //!
+//! // Or as an object, for code that learns its hash at run time.
+//! fn feed(hash: &mut dyn Hash<Output = [u8; 32]>) -> [u8; 32] {
+//!     hash.update(b"abc");
+//!     hash.finalize()
+//! }
+//! let mut sha256 = Sha256::new();
+//! let mut sha512_256 = Sha512_256::new();
+//! assert_eq!(feed(&mut sha256), Sha256::digest(b"abc")?);
+//! assert_eq!(feed(&mut sha512_256), wide);
+//!
 //! // A message of 19 bits: two whole bytes, then the top three bits
 //! // of a third.
 //! let mut hash = Sha256::new();
@@ -72,26 +82,34 @@ pub mod sha1;
 pub mod sha2;
 pub mod sha3;
 
-use crate::cipher::Block;
+#[cfg(doc)]
+use crate::BlockType;
 use crate::Error;
 
 /// A hash function over byte strings, computed incrementally.
 ///
 /// Only construction can fail, and then only for an implementation
-/// that needs instructions this processor lacks. A state is consumed
-/// by [`finalize`](Hash::finalize), so a digest of a prefix means
-/// cloning first.
-pub trait Hash: Clone + Sized {
-    /// Bytes the compression function takes at a time. Constructions
-    /// on top of a hash, HMAC among them, are defined in terms of
-    /// this.
-    const BLOCK_SIZE: usize;
-
+/// that needs instructions this processor lacks.
+/// [`finalize`](Hash::finalize) returns the digest and leaves the
+/// state as [`reset`](Hash::reset) would, so one state can hash
+/// message after message; a digest of a prefix means cloning first,
+/// and every hash here is `Clone`.
+///
+/// The digest length is a type, not a constant, so the trait is
+/// usable as an object once it is named: `&mut dyn Hash<Output =
+/// [u8; 32]>` takes SHA-256, SHA-512/256 or SHA3-256 alike. Only
+/// [`try_new`](Hash::try_new) and [`digest`](Hash::digest) need the
+/// concrete type. The block a hash is built on is not part of this
+/// trait; the concrete types say it through [`BlockType`], for the
+/// constructions, HMAC among them, that are defined in terms of it.
+pub trait Hash {
     /// The digest; `[u8; 32]` for SHA-256.
-    type Output: Block;
+    type Output: Copy + AsRef<[u8]> + AsMut<[u8]>;
 
     /// Starts a new hash.
-    fn try_new() -> Result<Self, Error>;
+    fn try_new() -> Result<Self, Error>
+    where
+        Self: Sized;
 
     /// Returns to the state of a new hash, without asking the
     /// processor again.
@@ -100,11 +118,16 @@ pub trait Hash: Clone + Sized {
     /// Appends `data` to the message.
     fn update(&mut self, data: &[u8]);
 
-    /// Ends the message and returns its digest.
-    fn finalize(self) -> Self::Output;
+    /// Ends the message and returns its digest. The state is then
+    /// that of a new hash, so the next [`update`](Hash::update)
+    /// begins another message.
+    fn finalize(&mut self) -> Self::Output;
 
     /// The digest of `data`, in one call.
-    fn digest(data: &[u8]) -> Result<Self::Output, Error> {
+    fn digest(data: &[u8]) -> Result<Self::Output, Error>
+    where
+        Self: Sized,
+    {
         let mut hash = Self::try_new()?;
         hash.update(data);
         Ok(hash.finalize())
@@ -129,8 +152,13 @@ pub trait BitHash: Hash {
     ///
     /// Returns [`Error::InvalidBitCount`] for a `bits` outside that
     /// range: zero extra bits is [`finalize`](Hash::finalize), and
-    /// eight is a whole byte for [`update`](Hash::update).
-    fn finalize_bits(self, last: u8, bits: u32) -> Result<Self::Output, Error>;
+    /// eight is a whole byte for [`update`](Hash::update). The state
+    /// is then that of a new hash, as after `finalize`.
+    fn finalize_bits(
+        &mut self,
+        last: u8,
+        bits: u32,
+    ) -> Result<Self::Output, Error>;
 }
 
 /// An extendable-output function: a hash whose digest is as long as
@@ -141,16 +169,20 @@ pub trait BitHash: Hash {
 /// reader that yields output in any number of pieces. Two readers
 /// over the same message yield the same stream, so a caller wanting
 /// `n` bytes and later `m` more gets the first `n + m` bytes of one
-/// stream either way.
-pub trait Xof: Clone + Sized {
-    /// Bytes the sponge takes at a time, the rate.
-    const BLOCK_SIZE: usize;
-
+/// stream either way. Once the reader is handed back the function
+/// is the state of a new one, ready for another message.
+///
+/// As with [`Hash`], the trait is usable as an object once its
+/// reader type is named; the rate is the concrete type's
+/// [`BlockType`].
+pub trait Xof {
     /// What the output is squeezed from.
     type Reader: XofReader;
 
     /// Starts a new function.
-    fn try_new() -> Result<Self, Error>;
+    fn try_new() -> Result<Self, Error>
+    where
+        Self: Sized;
 
     /// Returns to the state of a new function, without asking the
     /// processor again.
@@ -159,8 +191,9 @@ pub trait Xof: Clone + Sized {
     /// Appends `data` to the message.
     fn update(&mut self, data: &[u8]);
 
-    /// Ends the message and returns the output stream.
-    fn finalize_xof(self) -> Self::Reader;
+    /// Ends the message and returns the output stream. The state is
+    /// then that of a new function.
+    fn finalize_xof(&mut self) -> Self::Reader;
 }
 
 /// The output side of an [`Xof`].
@@ -178,8 +211,102 @@ pub trait BitXof: Xof {
     /// Returns [`Error::InvalidBitCount`] for a `bits` outside that
     /// range.
     fn finalize_bits_xof(
-        self,
+        &mut self,
         last: u8,
         bits: u32,
     ) -> Result<Self::Reader, Error>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hash::sha1::Sha1;
+    use crate::hash::sha2::{Sha256, Sha512, Sha512_256};
+    use crate::hash::sha3::{self, Sha3_256, Shake128, Shake256};
+    use crate::BlockType;
+
+    /// Fed through an object, a hash gives the digest its type gives.
+    #[test]
+    fn as_an_object() {
+        fn feed(hash: &mut dyn Hash<Output = [u8; 32]>) -> [u8; 32] {
+            hash.update(b"ab");
+            hash.update(b"c");
+            hash.finalize()
+        }
+        let mut sha256 = Sha256::new();
+        let mut sha512_256 = Sha512_256::new();
+        let mut sha3_256 = Sha3_256::new();
+        assert_eq!(feed(&mut sha256), Sha256::digest(b"abc").unwrap());
+        assert_eq!(feed(&mut sha512_256), Sha512_256::digest(b"abc").unwrap());
+        assert_eq!(feed(&mut sha3_256), Sha3_256::digest(b"abc").unwrap());
+
+        type Reader = sha3::AutoReader<sha3::variant::Shake128>;
+        fn squeeze(xof: &mut dyn Xof<Reader = Reader>) -> [u8; 40] {
+            xof.update(b"abc");
+            let mut out = [0u8; 40];
+            xof.finalize_xof().squeeze(&mut out);
+            out
+        }
+        let mut shake = Shake128::new();
+        let mut fresh = Shake128::new();
+        fresh.update(b"abc");
+        let mut expected = [0u8; 40];
+        fresh.finalize_xof().squeeze(&mut expected);
+        assert_eq!(squeeze(&mut shake), expected);
+    }
+
+    /// `finalize` leaves a new hash: the next message hashes alone.
+    #[test]
+    fn finalize_resets() {
+        fn check<H: Hash>() {
+            let mut hash = H::try_new().unwrap();
+            hash.update(b"garbage");
+            let _ = hash.finalize();
+            hash.update(b"abc");
+            assert_eq!(
+                hash.finalize().as_ref(),
+                H::digest(b"abc").unwrap().as_ref()
+            );
+        }
+        check::<Sha1>();
+        check::<Sha256>();
+        check::<Sha512>();
+        check::<Sha3_256>();
+    }
+
+    #[test]
+    fn xof_finalize_resets() {
+        fn check<X: Xof>() {
+            let mut xof = X::try_new().unwrap();
+            xof.update(b"garbage");
+            let _ = xof.finalize_xof();
+            xof.update(b"abc");
+            let mut again = [0u8; 40];
+            xof.finalize_xof().squeeze(&mut again);
+            let mut fresh = X::try_new().unwrap();
+            fresh.update(b"abc");
+            let mut expected = [0u8; 40];
+            fresh.finalize_xof().squeeze(&mut expected);
+            assert_eq!(again, expected);
+        }
+        check::<Shake128>();
+        check::<Shake256>();
+    }
+
+    /// The block each hash is built on, as the standards give it.
+    #[test]
+    fn block_types_are_the_documented_sizes() {
+        fn block<H: BlockType>() -> usize {
+            size_of::<H::Block>()
+        }
+        assert_eq!(block::<Sha1>(), 64);
+        assert_eq!(block::<Sha256>(), 64);
+        assert_eq!(block::<Sha512>(), 128);
+        assert_eq!(block::<Sha512_256>(), 128);
+        assert_eq!(block::<Sha3_256>(), 136);
+        assert_eq!(block::<Shake128>(), 168);
+        assert_eq!(block::<Shake256>(), 136);
+        assert_eq!(Sha256::zero_block(), [0u8; 64]);
+        assert_eq!(Shake128::zero_block(), [0u8; 168]);
+    }
 }

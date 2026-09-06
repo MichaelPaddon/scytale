@@ -59,7 +59,7 @@ use crate::hash::{Hash, Xof, XofReader};
 use crate::mac::hmac::Hmac;
 use crate::mac::Mac;
 use crate::util;
-use crate::Error;
+use crate::{BlockType, Error};
 
 /// The largest `n` of any set, which sizes every node buffer.
 const MAX_N: usize = 32;
@@ -376,7 +376,7 @@ fn sha2_tweaked<H: Hash>(
 
 /// MGF1 over `seed`, `out.len()` bytes.
 fn mgf1<H: Hash>(seed: &[&[u8]], out: &mut [u8]) -> Result<(), Error> {
-    let size = <H::Output as crate::cipher::Block>::SIZE;
+    let size = size_of::<H::Output>();
     for (counter, chunk) in out.chunks_mut(size).enumerate() {
         let mut hash = H::try_new()?;
         for part in seed {
@@ -410,7 +410,7 @@ fn sha2_h_msg<H: Hash>(
 }
 
 /// `PRF_msg` for the SHA2 family: truncated HMAC.
-fn sha2_prf_msg<H: Hash>(
+fn sha2_prf_msg<H: Hash + Clone + BlockType>(
     sk_prf: &[u8],
     opt_rand: &[u8],
     message: &[&[u8]],

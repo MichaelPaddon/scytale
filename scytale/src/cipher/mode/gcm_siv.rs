@@ -32,11 +32,11 @@
 //! # Example
 //!
 //! ```
-//! use scytale::cipher::aes::Aes;
+//! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::GcmSiv;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let siv: GcmSiv<Aes> = GcmSiv::try_new(&[0u8; 16])?;
+//! let siv: GcmSiv<Aes128> = GcmSiv::try_new(&[0u8; 16])?;
 //! let nonce = [0u8; 12];
 //!
 //! let mut message = *b"hello";
@@ -54,9 +54,10 @@ use core::fmt;
 use super::ghash::BLOCK;
 use super::polyval::Polyval;
 use super::{xor, LANES};
-use crate::cipher::{Block, BlockCipher};
+use crate::cipher::BlockCipher;
 use crate::util;
 use crate::Error;
+use zeroize::Zeroize;
 
 /// The nonce length, fixed by the standard.
 const NONCE: usize = 12;
@@ -86,15 +87,16 @@ impl<C> fmt::Debug for GcmSiv<C> {
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> GcmSiv<C> {
-    /// Takes the key that all others are derived from, which must be
-    /// 16 or 32 bytes.
-    pub fn try_new(key: &[u8]) -> Result<Self, Error> {
-        if key.len() != 16 && key.len() != 32 {
-            return Err(Error::InvalidKeyLength(key.len()));
+    /// Takes the key that all others are derived from. The standard
+    /// defines the construction for 16- and 32-byte keys only.
+    pub fn try_new(key: &C::Key) -> Result<Self, Error> {
+        let key_len = key.as_ref().len();
+        if key_len != 16 && key_len != 32 {
+            return Err(Error::InvalidKeyLength(key_len));
         }
         Ok(GcmSiv {
             cipher: C::try_new(key)?,
-            key_len: key.len(),
+            key_len,
         })
     }
 
@@ -164,8 +166,13 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> GcmSiv<C> {
         }
         let mut hash_key = [0u8; BLOCK];
         hash_key.copy_from_slice(&material[..BLOCK]);
-        let cipher = C::try_new(&material[BLOCK..BLOCK + self.key_len])?;
-        Ok((hash_key, cipher))
+        let mut key = C::zero_key();
+        key.as_mut()
+            .copy_from_slice(&material[BLOCK..BLOCK + self.key_len]);
+        let cipher = C::try_new(&key);
+        key.as_mut().zeroize();
+        material.zeroize();
+        Ok((hash_key, cipher?))
     }
 }
 
@@ -215,7 +222,7 @@ fn apply<C: BlockCipher<Block = [u8; BLOCK]>>(
     counter: &mut [u8; BLOCK],
     data: &mut [u8],
 ) {
-    let (whole, tail) = <[u8; BLOCK]>::split_mut(data);
+    let (whole, tail) = data.as_chunks_mut::<BLOCK>();
     let mut keystream = [[0u8; BLOCK]; LANES];
     for group in whole.chunks_mut(LANES) {
         let keystream = &mut keystream[..group.len()];
@@ -265,7 +272,7 @@ fn increment(counter: &mut [u8; BLOCK]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cipher::aes::Aes;
+    use crate::cipher::aes::{Aes, Aes128, Aes192, Aes256};
 
     /// Buffers big enough for every case below.
     const MAX: usize = 32;
@@ -349,23 +356,39 @@ mod tests {
             unhex(case[5], &mut tb);
             let want = &tb;
 
-            let siv = GcmSiv::<Aes>::try_new(key).unwrap();
-            let mut data = [0u8; MAX];
-            let data = &mut data[..plain.len()];
-            data.copy_from_slice(plain);
-            let mut tag = [0u8; 16];
-
-            siv.encrypt(nonce, aad, data, &mut tag).unwrap();
-            assert_eq!(data, cipher, "case {i} ciphertext");
-            assert_eq!(&tag, want, "case {i} tag");
-
-            siv.decrypt(nonce, aad, data, want).unwrap();
-            assert_eq!(data, plain, "case {i} plaintext");
+            match key.len() {
+                16 => run_case::<16>(i, key, nonce, aad, plain, cipher, want),
+                _ => run_case::<32>(i, key, nonce, aad, plain, cipher, want),
+            }
         }
     }
 
-    fn siv() -> GcmSiv<Aes> {
-        GcmSiv::<Aes>::try_new(&[0x42; 16]).unwrap()
+    fn run_case<const K: usize>(
+        i: usize,
+        key: &[u8],
+        nonce: &[u8; 12],
+        aad: &[u8],
+        plain: &[u8],
+        cipher: &[u8],
+        want: &[u8; 16],
+    ) {
+        let key: &[u8; K] = key.try_into().unwrap();
+        let siv = GcmSiv::<Aes<K>>::try_new(key).unwrap();
+        let mut data = [0u8; MAX];
+        let data = &mut data[..plain.len()];
+        data.copy_from_slice(plain);
+        let mut tag = [0u8; 16];
+
+        siv.encrypt(nonce, aad, data, &mut tag).unwrap();
+        assert_eq!(data, cipher, "case {i} ciphertext");
+        assert_eq!(&tag, want, "case {i} tag");
+
+        siv.decrypt(nonce, aad, data, want).unwrap();
+        assert_eq!(data, plain, "case {i} plaintext");
+    }
+
+    fn siv() -> GcmSiv<Aes128> {
+        GcmSiv::<Aes128>::try_new(&[0x42; 16]).unwrap()
     }
 
     /// The point of the mode: a repeated nonce must not be a
@@ -432,18 +455,16 @@ mod tests {
     /// lengths are fixed by their types.
     #[test]
     fn rejects_bad_lengths() {
-        let source = [0u8; 32];
-        for n in [0, 1, 15, 17, 24, 31] {
-            assert_eq!(
-                GcmSiv::<Aes>::try_new(&source[..n]).unwrap_err(),
-                Error::InvalidKeyLength(n)
-            );
-        }
+        // AES-192 is a valid cipher but not a GCM-SIV key size.
+        assert_eq!(
+            GcmSiv::<Aes192>::try_new(&[0u8; 24]).unwrap_err(),
+            Error::InvalidKeyLength(24)
+        );
     }
 
     #[test]
     fn round_trips_at_many_lengths() {
-        let siv = GcmSiv::<Aes>::try_new(&[0x5a; 32]).unwrap();
+        let siv = GcmSiv::<Aes256>::try_new(&[0x5a; 32]).unwrap();
         let nonce = [0x77u8; 12];
         let mut plain = [0u8; 70];
         for (i, b) in plain.iter_mut().enumerate() {
@@ -476,7 +497,10 @@ mod tests {
         let mut buffer = Buffer([0; 256], 0);
         core::fmt::write(
             &mut buffer,
-            format_args!("{:?}", GcmSiv::<Aes>::try_new(&[0x5a; 32]).unwrap()),
+            format_args!(
+                "{:?}",
+                GcmSiv::<Aes256>::try_new(&[0x5a; 32]).unwrap()
+            ),
         )
         .unwrap();
         let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();

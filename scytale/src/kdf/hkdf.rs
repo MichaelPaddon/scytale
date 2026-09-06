@@ -44,15 +44,17 @@
 //! kilobytes for SHA-256; a protocol wanting more than that has
 //! something else wrong.
 
-use crate::cipher::Block;
 use crate::hash::Hash;
 use crate::mac::hmac::Hmac;
 use crate::mac::Mac;
-use crate::Error;
+use crate::{BlockType, Error};
 
 /// Extracts a pseudorandom key from `ikm` under `salt`, which may be
 /// empty.
-pub fn extract<H: Hash>(salt: &[u8], ikm: &[u8]) -> Result<H::Output, Error> {
+pub fn extract<H: Hash + Clone + BlockType>(
+    salt: &[u8],
+    ikm: &[u8],
+) -> Result<H::Output, Error> {
     let mut mac = Hmac::<H>::try_new(salt)?;
     mac.update(ikm);
     Ok(mac.finalize())
@@ -62,35 +64,34 @@ pub fn extract<H: Hash>(salt: &[u8], ikm: &[u8]) -> Result<H::Output, Error> {
 ///
 /// Returns [`Error::InvalidLength`] if `okm` is longer than 255
 /// digests, the most the construction defines.
-pub fn expand<H: Hash>(
+pub fn expand<H: Hash + Clone + BlockType>(
     prk: &[u8],
     info: &[u8],
     okm: &mut [u8],
 ) -> Result<(), Error> {
-    if okm.len() > 255 * H::Output::SIZE {
+    if okm.len() > 255 * size_of::<H::Output>() {
         return Err(Error::InvalidLength(okm.len()));
     }
     let mut mac = Hmac::<H>::try_new(prk)?;
-    // T(0) is empty; T(i) = HMAC(PRK, T(i-1) || info || i).
-    let mut previous = H::Output::ZERO;
-    let mut have_previous = false;
-    for (i, chunk) in okm.chunks_mut(H::Output::SIZE).enumerate() {
-        mac.reset();
-        if have_previous {
+    // T(0) is empty; T(i) = HMAC(PRK, T(i-1) || info || i). Each
+    // `finalize` leaves the MAC keyed and ready for the next.
+    let mut previous: Option<H::Output> = None;
+    for (i, chunk) in okm.chunks_mut(size_of::<H::Output>()).enumerate() {
+        if let Some(previous) = &previous {
             mac.update(previous.as_ref());
         }
         mac.update(info);
         mac.update(&[(i + 1) as u8]);
-        previous = mac.clone().finalize();
-        have_previous = true;
-        chunk.copy_from_slice(&previous.as_ref()[..chunk.len()]);
+        let t = mac.finalize();
+        chunk.copy_from_slice(&t.as_ref()[..chunk.len()]);
+        previous = Some(t);
     }
     Ok(())
 }
 
 /// Extracts from `ikm` under `salt`, then expands with `info` to fill
 /// `okm`.
-pub fn derive<H: Hash>(
+pub fn derive<H: Hash + Clone + BlockType>(
     salt: &[u8],
     ikm: &[u8],
     info: &[u8],

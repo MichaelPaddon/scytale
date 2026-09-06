@@ -57,6 +57,7 @@
 //! handles only public values.
 
 use crate::hash::Hash;
+use crate::BlockType;
 
 macro_rules! ecdsa_curve {
     (
@@ -79,7 +80,7 @@ macro_rules! ecdsa_curve {
             /// `H` is the hash the verifier will use; P-256 pairs
             /// with SHA-256 and P-384 with SHA-384 almost everywhere,
             /// though any hash is accepted.
-            pub fn sign<H: Hash>(
+            pub fn sign<H: Hash + Clone + BlockType>(
                 &self,
                 message: &[u8],
             ) -> Result<[u8; SIGNATURE_SIZE], Error> {

@@ -69,7 +69,7 @@ use core::sync::atomic::{AtomicU8, Ordering};
 use engine::{DigestVariant, Reader, Sponge, XofVariant};
 
 use crate::hash::{BitHash, BitXof, Hash, Xof, XofReader};
-use crate::Error;
+use crate::{BlockType, Error};
 
 /// The six functions, as markers the sponge is generic over.
 pub mod variant {
@@ -85,8 +85,12 @@ pub mod variant {
             impl Sealed for $name {}
 
             impl Variant for $name {
-                const RATE: usize = $rate;
+                type Block = [u8; $rate];
                 const SUFFIX: u8 = $suffix;
+
+                fn zero_block() -> Self::Block {
+                    [0; $rate]
+                }
             }
         };
     }
@@ -100,15 +104,31 @@ pub mod variant {
 
     impl DigestVariant for Sha3_224 {
         type Output = [u8; 28];
+
+        fn zero_output() -> Self::Output {
+            [0; 28]
+        }
     }
     impl DigestVariant for Sha3_256 {
         type Output = [u8; 32];
+
+        fn zero_output() -> Self::Output {
+            [0; 32]
+        }
     }
     impl DigestVariant for Sha3_384 {
         type Output = [u8; 48];
+
+        fn zero_output() -> Self::Output {
+            [0; 48]
+        }
     }
     impl DigestVariant for Sha3_512 {
         type Output = [u8; 64];
+
+        fn zero_output() -> Self::Output {
+            [0; 64]
+        }
     }
     impl XofVariant for Shake128 {}
     impl XofVariant for Shake256 {}
@@ -231,8 +251,15 @@ impl<V: engine::Variant> fmt::Debug for Auto<V> {
     }
 }
 
+impl<V: engine::Variant> BlockType for Auto<V> {
+    type Block = V::Block;
+
+    fn zero_block() -> Self::Block {
+        V::zero_block()
+    }
+}
+
 impl<V: DigestVariant> Hash for Auto<V> {
-    const BLOCK_SIZE: usize = V::RATE;
     type Output = V::Output;
 
     fn try_new() -> Result<Self, Error> {
@@ -248,14 +275,18 @@ impl<V: DigestVariant> Hash for Auto<V> {
         dispatch!(&mut self.0, Inner, s => Hash::update(s, data))
     }
 
-    fn finalize(self) -> Self::Output {
-        dispatch!(self.0, Inner, s => s.finalize())
+    fn finalize(&mut self) -> Self::Output {
+        dispatch!(&mut self.0, Inner, s => s.finalize())
     }
 }
 
 impl<V: DigestVariant> BitHash for Auto<V> {
-    fn finalize_bits(self, last: u8, bits: u32) -> Result<Self::Output, Error> {
-        dispatch!(self.0, Inner, s => s.finalize_bits(last, bits))
+    fn finalize_bits(
+        &mut self,
+        last: u8,
+        bits: u32,
+    ) -> Result<Self::Output, Error> {
+        dispatch!(&mut self.0, Inner, s => s.finalize_bits(last, bits))
     }
 }
 
@@ -277,7 +308,6 @@ impl<V: XofVariant> XofReader for AutoReader<V> {
 }
 
 impl<V: XofVariant> Xof for Auto<V> {
-    const BLOCK_SIZE: usize = V::RATE;
     type Reader = AutoReader<V>;
 
     fn try_new() -> Result<Self, Error> {
@@ -293,8 +323,8 @@ impl<V: XofVariant> Xof for Auto<V> {
         dispatch!(&mut self.0, Inner, s => Xof::update(s, data))
     }
 
-    fn finalize_xof(self) -> Self::Reader {
-        AutoReader(match self.0 {
+    fn finalize_xof(&mut self) -> Self::Reader {
+        AutoReader(match &mut self.0 {
             #[cfg(target_arch = "aarch64")]
             Inner::Armv8(s) => InnerReader::Armv8(s.finalize_xof()),
             Inner::Portable(s) => InnerReader::Portable(s.finalize_xof()),
@@ -304,11 +334,11 @@ impl<V: XofVariant> Xof for Auto<V> {
 
 impl<V: XofVariant> BitXof for Auto<V> {
     fn finalize_bits_xof(
-        self,
+        &mut self,
         last: u8,
         bits: u32,
     ) -> Result<Self::Reader, Error> {
-        Ok(AutoReader(match self.0 {
+        Ok(AutoReader(match &mut self.0 {
             #[cfg(target_arch = "aarch64")]
             Inner::Armv8(s) => {
                 InnerReader::Armv8(s.finalize_bits_xof(last, bits)?)
@@ -564,7 +594,7 @@ pub(crate) mod tests {
         hash.update(b"not this");
         hash.reset();
         hash.update(b"ab");
-        let fork = hash.clone();
+        let mut fork = hash.clone();
         hash.update(b"c");
         assert_eq!(hash.finalize(), Sha3_224::digest(b"abc").unwrap());
         assert_eq!(fork.finalize(), Sha3_224::digest(b"ab").unwrap());

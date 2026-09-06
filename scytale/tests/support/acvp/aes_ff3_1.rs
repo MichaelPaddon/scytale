@@ -4,9 +4,10 @@
 //! works in symbol values, so each character is turned into its
 //! position in that alphabet and back again.
 
-use super::{groups as suite_groups, hex};
+use super::{groups as suite_groups, hex, key_of};
 use scytale::cipher::mode::Ff3_1;
 use scytale::cipher::BlockCipher;
+use scytale::KeyType;
 use serde_json::Value;
 
 const FILE: &str = "ACVP-AES-FF3-1-1.0/internalProjection.json";
@@ -14,16 +15,18 @@ const FILE: &str = "ACVP-AES-FF3-1-1.0/internalProjection.json";
 /// Runs the one-shot (AFT) groups against `C`; a no-op without the
 /// vendored vectors.
 pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
-    let Some(groups) = groups("AFT") else { return };
+    let Some(groups) = groups::<C>("AFT") else {
+        return;
+    };
     let count: usize = groups
         .iter()
         .map(|(group, encrypt)| aft::<C>(group, *encrypt))
         .sum();
-    assert!(count >= 400, "only {count} AFT cases");
+    assert!(count >= 133, "only {count} AFT cases");
 }
 
-fn groups(test_type: &str) -> Option<Vec<(Value, bool)>> {
-    suite_groups(FILE, "ACVP-AES-FF3-1", "1.0", test_type)
+fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
+    suite_groups::<C>(FILE, "ACVP-AES-FF3-1", "1.0", test_type)
 }
 
 /// Turns text into symbol values, by position in the alphabet.
@@ -55,7 +58,10 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
 
     for t in group["tests"].as_array().expect("tests") {
         let label = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
-        let ff3 = Ff3_1::<C>::try_new(&hex(&t["key"]), radix).expect("key");
+        let Some(key) = key_of::<C>(&hex(&t["key"])) else {
+            continue;
+        };
+        let ff3 = Ff3_1::<C>::try_new(&key, radix).expect("key");
         let tweak: [u8; 7] = hex(&t["tweak"]).try_into().expect("tweak");
 
         let (input, expected) = if encrypt {

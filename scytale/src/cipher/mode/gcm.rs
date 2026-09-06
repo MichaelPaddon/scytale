@@ -67,7 +67,7 @@ use core::fmt;
 
 use super::ghash::{Ghash, BLOCK};
 use super::{xor, LANES};
-use crate::cipher::{Block, BlockCipher};
+use crate::cipher::BlockCipher;
 use crate::util;
 use crate::Error;
 
@@ -324,7 +324,7 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
         }
 
         // Whole blocks, in groups: the counters are known in advance.
-        let (whole, tail) = <[u8; BLOCK]>::split_mut(data);
+        let (whole, tail) = data.as_chunks_mut::<BLOCK>();
         let mut keystream = [[0u8; BLOCK]; LANES];
         for group in whole.chunks_mut(LANES) {
             let keystream = &mut keystream[..group.len()];
@@ -479,7 +479,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Decryptor<'_, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cipher::aes::Aes;
+    use crate::cipher::aes::{Aes, Aes128};
 
     /// Buffers big enough for every case below.
     const MAX: usize = 64;
@@ -588,22 +588,39 @@ mod tests {
             unhex(case[5], &mut tb);
             let tag = &tb;
 
-            let gcm = Gcm::try_new(Aes::try_new(key).unwrap()).unwrap();
-            let mut data = [0u8; MAX];
-            let data = &mut data[..plain.len()];
-            data.copy_from_slice(plain);
-            let mut got = [0u8; 16];
-
-            gcm.encrypt(nonce, aad, data, &mut got).unwrap();
-            assert_eq!(data, cipher, "case {i} ciphertext");
-            assert_eq!(&got, tag, "case {i} tag");
-
-            gcm.decrypt(nonce, aad, data, tag).unwrap();
-            assert_eq!(data, plain, "case {i} plaintext");
+            match key.len() {
+                16 => run_case::<16>(i, key, nonce, aad, plain, cipher, tag),
+                24 => run_case::<24>(i, key, nonce, aad, plain, cipher, tag),
+                _ => run_case::<32>(i, key, nonce, aad, plain, cipher, tag),
+            }
         }
     }
 
-    fn gcm() -> Gcm<Aes> {
+    fn run_case<const K: usize>(
+        i: usize,
+        key: &[u8],
+        nonce: &[u8],
+        aad: &[u8],
+        plain: &[u8],
+        cipher: &[u8],
+        tag: &[u8; 16],
+    ) {
+        let key: &[u8; K] = key.try_into().unwrap();
+        let gcm = Gcm::try_new(Aes::try_new(key).unwrap()).unwrap();
+        let mut data = [0u8; MAX];
+        let data = &mut data[..plain.len()];
+        data.copy_from_slice(plain);
+        let mut got = [0u8; 16];
+
+        gcm.encrypt(nonce, aad, data, &mut got).unwrap();
+        assert_eq!(data, cipher, "case {i} ciphertext");
+        assert_eq!(&got, tag, "case {i} tag");
+
+        gcm.decrypt(nonce, aad, data, tag).unwrap();
+        assert_eq!(data, plain, "case {i} plaintext");
+    }
+
+    fn gcm() -> Gcm<Aes128> {
         Gcm::try_new(Aes::try_new(&[0x42; 16]).unwrap()).unwrap()
     }
 

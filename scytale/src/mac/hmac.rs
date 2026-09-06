@@ -39,10 +39,9 @@ use core::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::Mac;
-use crate::cipher::Block;
 use crate::hash::sha2;
 use crate::hash::Hash;
-use crate::Error;
+use crate::{BlockType, Error, KeyType};
 
 /// HMAC-SHA-224.
 pub type HmacSha224 = Hmac<sha2::Sha224>;
@@ -57,19 +56,20 @@ pub type HmacSha512_224 = Hmac<sha2::Sha512_224>;
 /// HMAC-SHA-512/256.
 pub type HmacSha512_256 = Hmac<sha2::Sha512_256>;
 
-/// The largest block any hash here has, which sizes the buffer the
-/// padded key is built in. SHA-2 needs 128; SHA-3's rates need up to
-/// 168.
-const MAX_BLOCK_SIZE: usize = 256;
-
 /// HMAC over the hash `H`.
 ///
-/// Any key length is accepted. Keys shorter than the block are the
-/// usual case and are padded; longer ones are hashed down first, as
-/// the standard says, so two keys longer than the block can collide
-/// on the hash. Keys of at least the digest length are what the
-/// security proof assumes.
-pub struct Hmac<H: Hash> {
+/// The key of the construction is one block of the hash, `H::Block`,
+/// and that is the [`KeyType`] here. Any byte string is a valid HMAC
+/// key all the same, through [`Hmac::try_new`]: RFC 2104 pads a
+/// shorter key with zeros and hashes a longer one down first, and
+/// both give a block that keys the MAC identically, so nothing is
+/// lost by making the block the type. Keys of at least the digest
+/// length are what the security proof assumes.
+///
+/// One state serves many messages: [`Mac::reset`] returns to the
+/// keyed state without touching the key again, and so does
+/// [`Mac::finalize`].
+pub struct Hmac<H: Hash + Clone + BlockType> {
     /// The hash after the inner keyed block.
     inner: H,
     /// The hash after the outer keyed block.
@@ -78,30 +78,41 @@ pub struct Hmac<H: Hash> {
     working: H,
 }
 
-impl<H: Hash> Hmac<H> {
+impl<H: Hash + Clone + BlockType> Hmac<H> {
     /// Starts a MAC under `key`, of any length.
+    ///
+    /// A key longer than the hash's block is hashed first, as the
+    /// standard says; one shorter is padded with zeros. Either way
+    /// the result is the block that [`Mac::try_new`] takes directly.
     pub fn try_new(key: &[u8]) -> Result<Self, Error> {
-        const { assert!(H::BLOCK_SIZE <= MAX_BLOCK_SIZE) };
-        let mut padded = [0u8; MAX_BLOCK_SIZE];
-        let block = &mut padded[..H::BLOCK_SIZE];
-        if key.len() > H::BLOCK_SIZE {
+        let mut block = H::zero_block();
+        let room = block.as_ref().len();
+        if key.len() > room {
             let digest = H::digest(key)?;
-            block[..H::Output::SIZE].copy_from_slice(digest.as_ref());
+            let n = digest.as_ref().len();
+            block.as_mut()[..n].copy_from_slice(digest.as_ref());
         } else {
-            block[..key.len()].copy_from_slice(key);
+            block.as_mut()[..key.len()].copy_from_slice(key);
         }
+        let mac = Self::from_block(&block);
+        block.as_mut().zeroize();
+        mac
+    }
 
+    /// Keys the two hashes from the padded block.
+    fn from_block(key: &H::Block) -> Result<Self, Error> {
         let mut inner = H::try_new()?;
         let mut outer = H::try_new()?;
-        for b in block.iter_mut() {
+        let mut block = *key;
+        for b in block.as_mut() {
             *b ^= 0x36;
         }
-        inner.update(block);
-        for b in block.iter_mut() {
+        inner.update(block.as_ref());
+        for b in block.as_mut() {
             *b ^= 0x36 ^ 0x5c;
         }
-        outer.update(block);
-        padded.zeroize();
+        outer.update(block.as_ref());
+        block.as_mut().zeroize();
 
         Ok(Hmac {
             working: inner.clone(),
@@ -118,11 +129,19 @@ impl<H: Hash> Hmac<H> {
     }
 }
 
-impl<H: Hash> Mac for Hmac<H> {
+impl<H: Hash + Clone + BlockType> KeyType for Hmac<H> {
+    type Key = H::Block;
+
+    fn zero_key() -> Self::Key {
+        H::zero_block()
+    }
+}
+
+impl<H: Hash + Clone + BlockType> Mac for Hmac<H> {
     type Tag = H::Output;
 
-    fn try_new(key: &[u8]) -> Result<Self, Error> {
-        Hmac::try_new(key)
+    fn try_new(key: &Self::Key) -> Result<Self, Error> {
+        Hmac::from_block(key)
     }
 
     fn reset(&mut self) {
@@ -134,15 +153,16 @@ impl<H: Hash> Mac for Hmac<H> {
         self.working.update(data);
     }
 
-    fn finalize(mut self) -> Self::Tag {
+    fn finalize(&mut self) -> Self::Tag {
+        let inner = self.working.finalize();
+        self.working = self.inner.clone();
         let mut outer = self.outer.clone();
-        let inner = core::mem::replace(&mut self.working, self.inner.clone());
-        outer.update(inner.finalize().as_ref());
+        outer.update(inner.as_ref());
         outer.finalize()
     }
 }
 
-impl<H: Hash> Clone for Hmac<H> {
+impl<H: Hash + Clone + BlockType> Clone for Hmac<H> {
     fn clone(&self) -> Self {
         Hmac {
             inner: self.inner.clone(),
@@ -154,9 +174,9 @@ impl<H: Hash> Clone for Hmac<H> {
 
 // The hash states are functions of the key; they wipe themselves,
 // so there is nothing more to do here beyond saying so.
-impl<H: Hash + ZeroizeOnDrop> ZeroizeOnDrop for Hmac<H> {}
+impl<H: Hash + Clone + BlockType + ZeroizeOnDrop> ZeroizeOnDrop for Hmac<H> {}
 
-impl<H: Hash> fmt::Debug for Hmac<H> {
+impl<H: Hash + Clone + BlockType> fmt::Debug for Hmac<H> {
     /// Deliberately omits everything: it is all derived from the key.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Hmac").finish_non_exhaustive()
@@ -166,6 +186,31 @@ impl<H: Hash> fmt::Debug for Hmac<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hash::sha2::Sha256;
+
+    /// RFC 2104: a short key zero-padded to the block, or a long one
+    /// hashed first, keys the same MAC as the bytes themselves.
+    #[test]
+    fn block_key_is_the_canonical_form() {
+        let bytes = [0x5au8; 100];
+        for len in [0usize, 3, 63, 64, 65, 100] {
+            let key = &bytes[..len];
+            let mut block = HmacSha256::zero_key();
+            if len > 64 {
+                let digest = Sha256::digest(key).unwrap();
+                block[..32].copy_from_slice(&digest);
+            } else {
+                block[..len].copy_from_slice(key);
+            }
+            let mut mac = <HmacSha256 as Mac>::try_new(&block).unwrap();
+            mac.update(b"message");
+            assert_eq!(
+                mac.finalize(),
+                HmacSha256::mac(key, b"message").unwrap(),
+                "{len}"
+            );
+        }
+    }
 
     /// Decodes hex into a fixed buffer, returning the used prefix.
     fn hex(s: &str) -> ([u8; 64], usize) {
@@ -277,7 +322,7 @@ mod tests {
         },
     ];
 
-    fn check<H: Hash>(case: &Case, expected: &str) {
+    fn check<H: Hash + Clone + BlockType>(case: &Case, expected: &str) {
         let (tag, len) = hex(expected);
         let mut mac = Hmac::<H>::try_new(case.key).unwrap();
         mac.update(case.data);
@@ -285,7 +330,7 @@ mod tests {
         // The truncated case cannot verify against a full tag, which
         // is the point of `verify` taking a slice: it must match all
         // of it.
-        if len == H::Output::SIZE {
+        if len == size_of::<H::Output>() {
             assert_eq!(mac.verify(&tag[..len]), Ok(()));
         }
     }

@@ -11,14 +11,15 @@
 //! bits past the end are ours to leave as we like, and the vectors
 //! record them as zero.
 
-use super::{groups as suite_groups, hex};
+use super::{cipher_of, groups as suite_groups, hex};
 use scytale::cipher::mode::Ctr;
-use scytale::cipher::{Block, BlockCipher};
+use scytale::cipher::BlockCipher;
+use scytale::KeyType;
 use serde_json::Value;
 
 /// The IV as the cipher's block type.
-fn block<C: BlockCipher>(bytes: &[u8]) -> C::Block {
-    let mut block = C::Block::ZERO;
+fn block<C: BlockCipher<Block = [u8; 16]>>(bytes: &[u8]) -> C::Block {
+    let mut block = C::zero_block();
     block.as_mut().copy_from_slice(bytes);
     block
 }
@@ -27,18 +28,20 @@ const FILE: &str = "ACVP-AES-CTR-1.0/internalProjection.json";
 
 /// Runs the one-shot (AFT) groups against `C`; a no-op without the
 /// vendored vectors.
-pub fn run_aft<C: BlockCipher>() {
-    let Some(groups) = groups("AFT") else { return };
+pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
+    let Some(groups) = groups::<C>("AFT") else {
+        return;
+    };
     let count: usize = groups
         .iter()
         .map(|(group, encrypt)| aft::<C>(group, *encrypt))
         .sum();
     // Guard against a truncated or wrong file passing vacuously.
-    assert!(count >= 100, "only {count} AFT cases");
+    assert!(count >= 33, "only {count} AFT cases");
 }
 
-fn groups(test_type: &str) -> Option<Vec<(Value, bool)>> {
-    suite_groups(FILE, "ACVP-AES-CTR", "1.0", test_type)
+fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
+    suite_groups::<C>(FILE, "ACVP-AES-CTR", "1.0", test_type)
 }
 
 /// Zeroes every bit past `bits`, so that two answers can be compared
@@ -49,10 +52,16 @@ fn truncate(data: &mut [u8], bits: usize) {
     }
 }
 
-fn aft<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
+fn aft<C: BlockCipher<Block = [u8; 16]>>(
+    group: &Value,
+    encrypt: bool,
+) -> usize {
     let mut count = 0;
     for t in group["tests"].as_array().expect("tests") {
-        let ctr = Ctr::new(C::try_new(&hex(&t["key"])).expect("key"));
+        let Some(cipher) = cipher_of::<C>(&hex(&t["key"])) else {
+            continue;
+        };
+        let ctr = Ctr::new(cipher);
         let counter = hex(&t["iv"]);
         let bits = t["payloadLen"].as_u64().expect("payloadLen") as usize;
         let (input, expected) = if encrypt {

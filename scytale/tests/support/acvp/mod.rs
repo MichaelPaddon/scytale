@@ -33,6 +33,8 @@ pub mod shake;
 pub mod slh_dsa;
 pub mod xecdh;
 
+use scytale::cipher::BlockCipher;
+use scytale::KeyType;
 use serde_json::Value;
 
 pub fn hex(v: &Value) -> Vec<u8> {
@@ -56,18 +58,40 @@ pub fn load(file: &str, algorithm: &str, revision: &str) -> Option<Value> {
     Some(doc)
 }
 
-/// The groups of one test type in a suite, each paired with whether
-/// it is the encrypt direction. `None` if the vectors are not
-/// vendored in this copy.
-pub fn groups(
+/// The key of `C` from `bytes`, or `None` if it is another width.
+/// Each AES width is its own type, so a driver instantiated at one
+/// width skips the cases of the other two.
+pub fn key_of<C: KeyType>(bytes: &[u8]) -> Option<C::Key> {
+    let mut key = C::zero_key();
+    if key.as_ref().len() != bytes.len() {
+        return None;
+    }
+    key.as_mut().copy_from_slice(bytes);
+    Some(key)
+}
+
+/// `C` keyed from `bytes`, or `None` if the width is another type's.
+pub fn cipher_of<C: BlockCipher>(bytes: &[u8]) -> Option<C> {
+    key_of::<C>(bytes).map(|key| C::try_new(&key).expect("key"))
+}
+
+/// The groups of one test type in a suite for the key width of `C`,
+/// each paired with whether it is the encrypt direction. `None` if
+/// the vectors are not vendored in this copy, or define nothing at
+/// that width, which the driver treats the same way.
+pub fn groups<C: KeyType>(
     file: &str,
     algorithm: &str,
     revision: &str,
     test_type: &str,
 ) -> Option<Vec<(Value, bool)>> {
     let doc = load(file, algorithm, revision)?;
+    let bits = 8 * C::zero_key().as_ref().len() as u64;
     let mut selected = Vec::new();
     for group in doc["testGroups"].as_array().expect("testGroups") {
+        if group["keyLen"].as_u64().is_some_and(|len| len != bits) {
+            continue;
+        }
         let encrypt = match group["direction"].as_str() {
             Some("encrypt") => true,
             Some("decrypt") => false,
@@ -80,6 +104,9 @@ pub fn groups(
             Some("AFT") | Some("MCT") => {}
             other => panic!("unknown testType {other:?}"),
         }
+    }
+    if selected.is_empty() {
+        return None;
     }
     Some(selected)
 }

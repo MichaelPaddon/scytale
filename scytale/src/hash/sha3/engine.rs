@@ -25,9 +25,8 @@ use core::marker::PhantomData;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::cipher::Block;
 use crate::hash::{BitHash, BitXof, Hash, Xof, XofReader};
-use crate::Error;
+use crate::{BlockType, Error};
 
 /// Keeps the traits here to this crate's own implementations.
 mod sealed {
@@ -57,8 +56,10 @@ pub trait Permutation: Sealed {
 /// One of the six functions: its rate and the domain bits that end
 /// its messages. Sealed.
 pub trait Variant: Clone + Sealed {
-    /// Bytes absorbed between permutations.
-    const RATE: usize;
+    /// A block of the rate: the bytes absorbed between permutations.
+    type Block: Copy + AsRef<[u8]> + AsMut<[u8]>;
+    /// A block of zeros.
+    fn zero_block() -> Self::Block;
     /// The domain separation bits, with the first padding one after
     /// them, as FIPS 202 gives them: `0x06` for the digests, `0x1f`
     /// for SHAKE.
@@ -68,7 +69,14 @@ pub trait Variant: Clone + Sealed {
 /// A fixed-length digest: SHA3-224 to SHA3-512.
 pub trait DigestVariant: Variant {
     /// The digest.
-    type Output: Block;
+    type Output: Copy + AsRef<[u8]> + AsMut<[u8]>;
+    /// A digest of zeros, for the sponge to fill.
+    fn zero_output() -> Self::Output;
+}
+
+/// The rate of `V`, in bytes.
+fn rate<V: Variant>() -> usize {
+    core::mem::size_of::<V::Block>()
 }
 
 /// An extendable-output function: SHAKE128 or SHAKE256.
@@ -124,7 +132,7 @@ impl<P: Permutation> State<P> {
                 at += 1;
                 now = &now[1..];
             }
-            let (lanes, tail) = <[u8; 8]>::split(now);
+            let (lanes, tail) = now.as_chunks::<8>();
             for lane in lanes {
                 self.lanes[at / 8] ^= u64::from_le_bytes(*lane);
                 at += 8;
@@ -246,27 +254,37 @@ impl<P: Permutation, V: Variant> Sponge<P, V> {
     }
 
     fn update(&mut self, data: &[u8]) {
-        const { assert!(V::RATE <= MAX_RATE) };
-        self.state.absorb(V::RATE, data);
+        const { assert!(core::mem::size_of::<V::Block>() <= MAX_RATE) };
+        self.state.absorb(rate::<V>(), data);
     }
 
-    /// Pads with `trailer` and returns the state ready to squeeze.
-    fn finish(mut self, trailer: u16) -> State<P> {
-        self.state.pad(V::RATE, trailer);
-        self.state.clone()
+    /// Pads with `trailer` and returns the state ready to squeeze,
+    /// leaving this one as new.
+    fn finish(&mut self, trailer: u16) -> State<P> {
+        self.state.pad(rate::<V>(), trailer);
+        let finished = self.state.clone();
+        self.reset();
+        finished
     }
 }
 
 impl<P: Permutation, V: DigestVariant> Sponge<P, V> {
     fn output(state: &mut State<P>) -> V::Output {
-        let mut out = V::Output::ZERO;
-        state.squeeze(V::RATE, out.as_mut());
+        let mut out = V::zero_output();
+        state.squeeze(rate::<V>(), out.as_mut());
         out
     }
 }
 
+impl<P: Permutation, V: Variant> BlockType for Sponge<P, V> {
+    type Block = V::Block;
+
+    fn zero_block() -> Self::Block {
+        V::zero_block()
+    }
+}
+
 impl<P: Permutation, V: DigestVariant> Hash for Sponge<P, V> {
-    const BLOCK_SIZE: usize = V::RATE;
     type Output = V::Output;
 
     fn try_new() -> Result<Self, Error> {
@@ -281,14 +299,18 @@ impl<P: Permutation, V: DigestVariant> Hash for Sponge<P, V> {
         Sponge::update(self, data)
     }
 
-    fn finalize(self) -> Self::Output {
+    fn finalize(&mut self) -> Self::Output {
         let mut state = self.finish(u16::from(V::SUFFIX));
         Self::output(&mut state)
     }
 }
 
 impl<P: Permutation, V: DigestVariant> BitHash for Sponge<P, V> {
-    fn finalize_bits(self, last: u8, bits: u32) -> Result<Self::Output, Error> {
+    fn finalize_bits(
+        &mut self,
+        last: u8,
+        bits: u32,
+    ) -> Result<Self::Output, Error> {
         let trailer = trailer(V::SUFFIX, last, bits)?;
         let mut state = self.finish(trailer);
         Ok(Self::output(&mut state))
@@ -303,7 +325,7 @@ pub struct Reader<P: Permutation, V: XofVariant> {
 
 impl<P: Permutation, V: XofVariant> XofReader for Reader<P, V> {
     fn squeeze(&mut self, out: &mut [u8]) {
-        self.state.squeeze(V::RATE, out);
+        self.state.squeeze(rate::<V>(), out);
     }
 }
 
@@ -326,7 +348,6 @@ impl<P: Permutation, V: XofVariant> fmt::Debug for Reader<P, V> {
 }
 
 impl<P: Permutation, V: XofVariant> Xof for Sponge<P, V> {
-    const BLOCK_SIZE: usize = V::RATE;
     type Reader = Reader<P, V>;
 
     fn try_new() -> Result<Self, Error> {
@@ -341,7 +362,7 @@ impl<P: Permutation, V: XofVariant> Xof for Sponge<P, V> {
         Sponge::update(self, data)
     }
 
-    fn finalize_xof(self) -> Self::Reader {
+    fn finalize_xof(&mut self) -> Self::Reader {
         Reader {
             state: self.finish(u16::from(V::SUFFIX)),
             _marker: PhantomData,
@@ -351,7 +372,7 @@ impl<P: Permutation, V: XofVariant> Xof for Sponge<P, V> {
 
 impl<P: Permutation, V: XofVariant> BitXof for Sponge<P, V> {
     fn finalize_bits_xof(
-        self,
+        &mut self,
         last: u8,
         bits: u32,
     ) -> Result<Self::Reader, Error> {

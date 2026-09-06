@@ -3,14 +3,15 @@
 //! Segments are single bits. The vectors carry each one in the top
 //! bit of a byte, which is how the mode reads them too.
 
-use super::{groups as suite_groups, hex};
+use super::{cipher_of, groups as suite_groups, hex, key_of};
 use scytale::cipher::mode::Cfb1;
-use scytale::cipher::{Block, BlockCipher};
+use scytale::cipher::BlockCipher;
+use scytale::KeyType;
 use serde_json::Value;
 
 /// The IV as the cipher's block type.
 fn block<C: BlockCipher>(bytes: &[u8]) -> C::Block {
-    let mut block = C::Block::ZERO;
+    let mut block = C::zero_block();
     block.as_mut().copy_from_slice(bytes);
     block
 }
@@ -24,35 +25,41 @@ const MCT_SEGMENTS: usize = 1000;
 const HISTORY: usize = 128;
 
 pub fn run_aft<C: BlockCipher>() {
-    let Some(groups) = groups("AFT") else { return };
+    let Some(groups) = groups::<C>("AFT") else {
+        return;
+    };
     let count: usize = groups
         .iter()
         .map(|(group, encrypt)| aft::<C>(group, *encrypt))
         .sum();
-    assert!(count >= 2000, "only {count} AFT cases");
+    assert!(count >= 500, "only {count} AFT cases");
 }
 
 pub fn run_mct<C: BlockCipher>() {
-    let Some(groups) = groups("MCT") else { return };
+    let Some(groups) = groups::<C>("MCT") else {
+        return;
+    };
     let count: usize = groups
         .iter()
         .map(|(group, encrypt)| mct::<C>(group, *encrypt))
         .sum();
-    assert!(count >= 600, "only {count} MCT steps");
+    assert!(count >= 200, "only {count} MCT steps");
 }
 
-fn groups(test_type: &str) -> Option<Vec<(Value, bool)>> {
-    suite_groups(FILE, "ACVP-AES-CFB1", "1.0", test_type)
+fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
+    suite_groups::<C>(FILE, "ACVP-AES-CFB1", "1.0", test_type)
 }
 
-fn cfb<C: BlockCipher>(key: &[u8]) -> Cfb1<C> {
-    Cfb1::new(C::try_new(key).expect("key"))
+fn cfb<C: BlockCipher>(key: &[u8]) -> Option<Cfb1<C>> {
+    Some(Cfb1::new(cipher_of::<C>(key)?))
 }
 
 fn aft<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
     let mut count = 0;
     for t in group["tests"].as_array().expect("tests") {
-        let cfb = cfb::<C>(&hex(&t["key"]));
+        let Some(cfb) = cfb::<C>(&hex(&t["key"])) else {
+            continue;
+        };
         let iv = hex(&t["iv"]);
         let bits = t["payloadLen"].as_u64().expect("payloadLen") as usize;
         let (input, expected) = if encrypt {
@@ -82,6 +89,9 @@ fn mct<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
     for t in group["tests"].as_array().expect("tests") {
         let steps = t["resultsArray"].as_array().expect("resultsArray");
         let mut key = hex(&t["key"]);
+        if key_of::<C>(&key).is_none() {
+            continue;
+        }
         let mut iv = hex(&t["iv"]);
         let mut input = top_bit(&hex(&t[input_name]));
 
@@ -92,7 +102,7 @@ fn mct<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
             assert_eq!(iv, hex(&step["iv"]), "{tag} iv");
             assert_eq!(input, top_bit(&hex(&step[input_name])), "{tag} input");
 
-            let cfb = cfb::<C>(&key);
+            let cfb = cfb::<C>(&key).expect("width");
             let mut outputs = [0u8; MCT_SEGMENTS];
             let mut segment = [input << 7];
             if encrypt {

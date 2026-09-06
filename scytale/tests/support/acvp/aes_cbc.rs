@@ -1,13 +1,14 @@
 //! ACVP-AES-CBC 1.0, run through [`Cbc`] over any block cipher.
 
-use super::{groups as suite_groups, hex};
+use super::{cipher_of, groups as suite_groups, hex, key_of};
 use scytale::cipher::mode::Cbc;
-use scytale::cipher::{Block, BlockCipher};
+use scytale::cipher::BlockCipher;
+use scytale::KeyType;
 use serde_json::Value;
 
 /// The IV as the cipher's block type.
-fn block<C: BlockCipher>(bytes: &[u8]) -> C::Block {
-    let mut block = C::Block::ZERO;
+fn block<C: BlockCipher<Block = [u8; 16]>>(bytes: &[u8]) -> C::Block {
+    let mut block = C::zero_block();
     block.as_mut().copy_from_slice(bytes);
     block
 }
@@ -19,41 +20,50 @@ const MCT_ITERATIONS: usize = 1000;
 
 /// Runs the one-shot (AFT) groups against `C`; a no-op without the
 /// vendored vectors.
-pub fn run_aft<C: BlockCipher>() {
-    let Some(groups) = groups("AFT") else { return };
+pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
+    let Some(groups) = groups::<C>("AFT") else {
+        return;
+    };
     let count: usize = groups
         .iter()
         .map(|(group, encrypt)| aft::<C>(group, *encrypt))
         .sum();
     // Guard against a truncated or wrong file passing vacuously.
-    assert!(count >= 2000, "only {count} AFT cases");
+    assert!(count >= 500, "only {count} AFT cases");
 }
 
 /// Runs the Monte Carlo (MCT) groups against `C`; a no-op without the
 /// vendored vectors. Slow: 600,000 cipher calls.
-pub fn run_mct<C: BlockCipher>() {
-    let Some(groups) = groups("MCT") else { return };
+pub fn run_mct<C: BlockCipher<Block = [u8; 16]>>() {
+    let Some(groups) = groups::<C>("MCT") else {
+        return;
+    };
     let count: usize = groups
         .iter()
         .map(|(group, encrypt)| mct::<C>(group, *encrypt))
         .sum();
-    assert!(count >= 600, "only {count} MCT steps");
+    assert!(count >= 200, "only {count} MCT steps");
 }
 
 /// The groups of one test type; `None` without the vectors.
-fn groups(test_type: &str) -> Option<Vec<(Value, bool)>> {
-    suite_groups(FILE, "ACVP-AES-CBC", "1.0", test_type)
+fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
+    suite_groups::<C>(FILE, "ACVP-AES-CBC", "1.0", test_type)
 }
 
-fn cbc<C: BlockCipher>(key: &[u8]) -> Cbc<C> {
-    Cbc::new(C::try_new(key).expect("key"))
+fn cbc<C: BlockCipher<Block = [u8; 16]>>(key: &[u8]) -> Option<Cbc<C>> {
+    Some(Cbc::new(cipher_of::<C>(key)?))
 }
 
 /// Algorithm Functional Test: one message, one IV.
-fn aft<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
+fn aft<C: BlockCipher<Block = [u8; 16]>>(
+    group: &Value,
+    encrypt: bool,
+) -> usize {
     let mut count = 0;
     for t in group["tests"].as_array().expect("tests") {
-        let cbc = cbc::<C>(&hex(&t["key"]));
+        let Some(cbc) = cbc::<C>(&hex(&t["key"])) else {
+            continue;
+        };
         let iv = hex(&t["iv"]);
         let (input, expected) = if encrypt {
             (hex(&t["pt"]), hex(&t["ct"]))
@@ -77,13 +87,19 @@ fn aft<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
 /// Monte Carlo Test. Each of 100 steps runs 1000 single-block
 /// operations whose inputs chain into one another, then derives the
 /// next key, IV and input from the last two outputs.
-fn mct<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
+fn mct<C: BlockCipher<Block = [u8; 16]>>(
+    group: &Value,
+    encrypt: bool,
+) -> usize {
     let (input_name, output_name) =
         if encrypt { ("pt", "ct") } else { ("ct", "pt") };
     let mut count = 0;
     for t in group["tests"].as_array().expect("tests") {
         let steps = t["resultsArray"].as_array().expect("resultsArray");
         let mut key = hex(&t["key"]);
+        if key_of::<C>(&key).is_none() {
+            continue;
+        }
         let mut iv = hex(&t["iv"]);
         let mut input = hex(&t[input_name]);
 
@@ -94,7 +110,7 @@ fn mct<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
             assert_eq!(iv, hex(&step["iv"]), "{tag} iv");
             assert_eq!(input, hex(&step[input_name]), "{tag} input");
 
-            let cbc = cbc::<C>(&key);
+            let cbc = cbc::<C>(&key).expect("width");
             let (last, previous) = if encrypt {
                 step_encrypt(&cbc, &iv, &input)
             } else {
@@ -121,7 +137,7 @@ fn mct<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
 /// next input is the chaining value this one used: the IV to begin
 /// with, then the ciphertext before last. Returns the last two
 /// ciphertext blocks.
-fn step_encrypt<C: BlockCipher>(
+fn step_encrypt<C: BlockCipher<Block = [u8; 16]>>(
     cbc: &Cbc<C>,
     iv: &[u8],
     pt: &[u8],
@@ -145,7 +161,7 @@ fn step_encrypt<C: BlockCipher>(
 /// and ciphertext exchanged: the chaining value is the previous
 /// ciphertext, and the next ciphertext is the plaintext before last.
 /// Returns the last two plaintext blocks.
-fn step_decrypt<C: BlockCipher>(
+fn step_decrypt<C: BlockCipher<Block = [u8; 16]>>(
     cbc: &Cbc<C>,
     iv: &[u8],
     ct: &[u8],
