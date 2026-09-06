@@ -72,8 +72,8 @@
 //! - Tags are compared in time that depends on their length and on
 //!   nothing else.
 //! - The implementation chosen at run time is never one that leaks
-//!   through the cache; table-driven code exists, and must be asked
-//!   for by name.
+//!   through the cache; table-driven code exists as a peer of the
+//!   constant-time code, and must be asked for by name.
 //! - `Debug` output never contains key material, so a state can be
 //!   logged.
 //! - A trait describing a value you hold, a hash, a MAC or a cipher,

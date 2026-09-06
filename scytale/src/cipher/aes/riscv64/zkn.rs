@@ -683,13 +683,13 @@ mod tests {
     }
 
     #[test]
-    fn matches_portable() {
-        matches_portable_for::<16>();
-        matches_portable_for::<24>();
-        matches_portable_for::<32>();
+    fn matches_ttable() {
+        matches_ttable_for::<16>();
+        matches_ttable_for::<24>();
+        matches_ttable_for::<32>();
     }
 
-    fn matches_portable_for<const K: usize>() {
+    fn matches_ttable_for<const K: usize>() {
         const MAX: usize = 9;
         let klen = K;
         {
@@ -698,7 +698,7 @@ mod tests {
                 *k = (i * 37 + klen) as u8;
             }
             let Some(hw) = aes(&key) else { return };
-            let sw = portable::Aes::try_new(&key).unwrap();
+            let sw = portable::ttable::Aes::try_new(&key).unwrap();
             for nblocks in [0, 1, 3, 4, 5, 8, 9] {
                 let mut data = [[0u8; BLOCK_SIZE]; MAX];
                 for (i, b) in data.as_flattened_mut().iter_mut().enumerate() {

@@ -1,10 +1,11 @@
 //! Portable AES implementations, in plain Rust for any target.
 //!
-//! [`bitsliced`] is constant time and is what the automatic choice
-//! falls back to. [`Aes`] is the faster table-driven version, which
-//! leaks through cache timing; read its documentation before using it.
+//! Two peers, neither of them the default: [`bitsliced`] is constant
+//! time, and [`ttable`] is roughly twice as fast but indexes lookup
+//! tables with bytes derived from the key, so it leaks through cache
+//! timing. [`Aes`](crate::cipher::aes::Aes) picks the bitsliced one
+//! when the processor has no AES instructions, and never picks the
+//! other; read [`ttable`]'s documentation before naming it.
 
 pub mod bitsliced;
-pub(crate) mod ttable;
-
-pub use ttable::Aes;
+pub mod ttable;

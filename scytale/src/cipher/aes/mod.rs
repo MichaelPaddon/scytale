@@ -4,8 +4,8 @@
 //! are [`Aes<16>`](Aes), `Aes<24>` and `Aes<32>`, and each takes a key
 //! of exactly its width. [`Aes`] runs the best implementation the
 //! processor supports: hardware instructions where present, otherwise
-//! constant-time portable code. To use a particular one, name it:
-//! [`portable::Aes`], [`portable::bitsliced::Aes`],
+//! the constant-time portable code. To use a particular one, name it:
+//! [`portable::bitsliced::Aes`], [`portable::ttable::Aes`],
 //! `x86_64::aesni::Aes`, `x86_64::vaes::Aes`, `aarch64::armv8::Aes`,
 //! `riscv64::zkn::Aes` or `riscv64::zvkned::Aes` (the hardware ones
 //! exist only on their architecture), with the same width parameter.
@@ -17,12 +17,12 @@
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let fastest = Aes128::try_new(&[0u8; 16])?;
-//! let portable = portable::Aes::<16>::try_new(&[0u8; 16])?;
+//! let bitsliced = portable::bitsliced::Aes::<16>::try_new(&[0u8; 16])?;
 //!
 //! let mut a = [0u8; 16];
 //! let mut b = a;
 //! fastest.encrypt_block(&mut a);
-//! portable.encrypt_block(&mut b);
+//! bitsliced.encrypt_block(&mut b);
 //! assert_eq!(a, b);
 //! # Ok(())
 //! # }
@@ -187,8 +187,8 @@ fn supported(choice: Choice) -> bool {
 /// AES using the best implementation the processor supports: the
 /// fastest hardware instructions if there are any, otherwise the
 /// constant-time bitsliced code. Security comes before speed, so the
-/// faster table-driven [`portable::Aes`] is never chosen here; use it
-/// by name if its trade-off suits you.
+/// faster [`portable::ttable::Aes`] is never chosen here; name it
+/// yourself if its trade-off suits you.
 ///
 /// The processor is probed once, the first time a key is expanded;
 /// every later [`Aes::try_new`] reads the cached answer, and each
@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn every_implementation_zeroizes() {
         fn wipes<T: ZeroizeOnDrop>() {}
-        wipes::<portable::Aes<16>>();
+        wipes::<portable::ttable::Aes<16>>();
         wipes::<portable::bitsliced::Aes<16>>();
         #[cfg(target_arch = "x86_64")]
         {
@@ -435,17 +435,17 @@ mod tests {
     }
 
     #[test]
-    fn matches_portable() {
-        matches_portable_for::<16>();
-        matches_portable_for::<24>();
-        matches_portable_for::<32>();
+    fn matches_ttable() {
+        matches_ttable_for::<16>();
+        matches_ttable_for::<24>();
+        matches_ttable_for::<32>();
     }
 
-    fn matches_portable_for<const K: usize>() {
+    fn matches_ttable_for<const K: usize>() {
         let key = [0x5au8; K];
         {
             let aes = Aes::try_new(&key).unwrap();
-            let sw = portable::Aes::try_new(&key).unwrap();
+            let sw = portable::ttable::Aes::try_new(&key).unwrap();
             assert_eq!(aes.rounds(), sw.rounds());
 
             let mut data = [[0u8; BLOCK_SIZE]; 17];

@@ -182,18 +182,18 @@ macro_rules! every_aes {
             $kind
         );
         widths!(
-            portable_128,
-            portable_192,
-            portable_256,
-            aes::portable::Aes,
-            $suite,
-            $kind
-        );
-        widths!(
             bitsliced_128,
             bitsliced_192,
             bitsliced_256,
             aes::portable::bitsliced::Aes,
+            $suite,
+            $kind
+        );
+        widths!(
+            ttable_128,
+            ttable_192,
+            ttable_256,
+            aes::portable::ttable::Aes,
             $suite,
             $kind
         );
@@ -1182,10 +1182,13 @@ mod inventory {
     fn implementations() {
         println!("\nAES");
         report("aes::Aes", cipher::<aes::Aes<16>>());
-        report("aes::portable::Aes", cipher::<aes::portable::Aes<16>>());
         report(
             "aes::portable::bitsliced::Aes",
             cipher::<aes::portable::bitsliced::Aes<16>>(),
+        );
+        report(
+            "aes::portable::ttable::Aes",
+            cipher::<aes::portable::ttable::Aes<16>>(),
         );
         #[cfg(target_arch = "x86_64")]
         {

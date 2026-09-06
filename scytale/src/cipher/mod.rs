@@ -95,8 +95,8 @@ mod tests {
         }
         let key = [0x5au8; 32];
         let best = Aes256::try_new(&key).unwrap();
-        let portable = portable::Aes::<32>::try_new(&key).unwrap();
-        assert_eq!(once(&best), once(&portable));
+        let named = portable::ttable::Aes::<32>::try_new(&key).unwrap();
+        assert_eq!(once(&best), once(&named));
         assert_ne!(once(&best), [7u8; 16]);
     }
 

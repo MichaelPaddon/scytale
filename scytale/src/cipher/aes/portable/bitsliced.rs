@@ -6,9 +6,9 @@
 //! words. The S-box is the 113-gate circuit of Boyar and Peralta.
 //!
 //! There are no lookup tables and no data-dependent branches or
-//! memory accesses, so unlike [`Aes`](super::Aes) this
+//! memory accesses, so unlike [`ttable`](super::ttable) this
 //! implementation does not leak key material through cache timing. It
-//! is several times slower.
+//! is about half the speed.
 //!
 //! # Layout
 //!
@@ -713,13 +713,13 @@ mod tests {
     }
 
     #[test]
-    fn matches_portable() {
-        matches_portable_for::<16>();
-        matches_portable_for::<24>();
-        matches_portable_for::<32>();
+    fn matches_ttable() {
+        matches_ttable_for::<16>();
+        matches_ttable_for::<24>();
+        matches_ttable_for::<32>();
     }
 
-    fn matches_portable_for<const K: usize>() {
+    fn matches_ttable_for<const K: usize>() {
         const MAX: usize = 10;
         let klen = K;
         {
@@ -728,7 +728,7 @@ mod tests {
                 *k = (i * 37 + klen) as u8;
             }
             let bs = Aes::try_new(&key).unwrap();
-            let tt = portable::Aes::try_new(&key).unwrap();
+            let tt = portable::ttable::Aes::try_new(&key).unwrap();
             // Lengths cover zero, partial and whole groups of four.
             for nblocks in 0..MAX {
                 let mut data = [[0u8; BLOCK_SIZE]; MAX];

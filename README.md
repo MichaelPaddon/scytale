@@ -330,7 +330,7 @@ can also be named directly, with the same width parameter:
 | `aes::riscv64::zvkned::Aes<K>` | RISC-V vector cryptography |
 | `aes::riscv64::zkn::Aes<K>` | RISC-V scalar cryptography |
 | `aes::portable::bitsliced::Aes<K>` | portable, constant time |
-| `aes::portable::Aes<K>` | portable, table driven; see below |
+| `aes::portable::ttable::Aes<K>` | portable, table driven; see below |
 
 The architecture-specific types exist only on their architecture, and
 their `try_new` returns `Error::NotSupported` when the processor
@@ -341,12 +341,13 @@ when dropped.
 
 Prefer `Aes` unless you have a reason not to.
 
-It never chooses `portable::Aes`, the table-driven version. That one
-is about twice the speed of the bitsliced code, but its memory access
-pattern depends on the key, which leaks the key to an attacker who
-can measure the timing, typically by running code on the same
-processor. Use it only where nothing untrusted runs, and read the
-notes in its documentation first.
+The two portable implementations are peers, and `Aes` never chooses
+`portable::ttable`, the table-driven one. That one is about twice the
+speed of `portable::bitsliced`, but its memory access pattern depends
+on the key, which leaks the key to an attacker who can measure the
+timing, typically by running code on the same processor. Use it only
+where nothing untrusted runs, and read the notes in its documentation
+first.
 
 ## Speed
 
@@ -356,8 +357,8 @@ Measured on a 13th Gen Intel Core i7-1355U, encrypting 4 KB buffers:
 | --- | --- | --- |
 | `vaes` | 30 GB/s | 21 GB/s |
 | `aesni` | 15 GB/s | 11 GB/s |
-| `portable` (tables) | 500 MB/s | 360 MB/s |
-| `portable::bitsliced` | 290 MB/s | 210 MB/s |
+| `ttable` | 500 MB/s | 360 MB/s |
+| `bitsliced` | 290 MB/s | 210 MB/s |
 
 Short messages are not an afterthought: a buffer of eight blocks or
 fewer costs 8 to 11 ns per call with AES-NI.

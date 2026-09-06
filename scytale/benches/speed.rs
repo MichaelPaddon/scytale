@@ -43,14 +43,15 @@ use std::time::Duration;
 
 use cpu_time::ThreadTime;
 
-use scytale::cipher::aes::portable;
 use scytale::cipher::chacha20;
 use scytale::cipher::mode::ChaCha20Poly1305;
 use scytale::cipher::mode::{Cbc, Ctr, Gcm, GcmSiv, Xts};
 use scytale::cipher::{aes, BlockCipher};
 
-/// The bitsliced AES at a key width; its path alone is too long.
+/// The portable AES implementations at a key width; their paths
+/// alone are too long.
 type Bitsliced<const K: usize> = aes::portable::bitsliced::Aes<K>;
+type Ttable<const K: usize> = aes::portable::ttable::Aes<K>;
 use scytale::hash::{sha2, sha3};
 use scytale::hash::{Hash, Xof, XofReader};
 use scytale::mac::hmac::Hmac;
@@ -231,8 +232,8 @@ fn report(options: &Options) -> ExitCode {
             "zkn", options,
         );
     }
-    ran |= section::<portable::Aes<16>, portable::Aes<32>>("ttable", options);
     ran |= section::<Bitsliced<16>, Bitsliced<32>>("bitsliced", options);
+    ran |= section::<Ttable<16>, Ttable<32>>("ttable", options);
 
     // The hashes, likewise. SHA-224 and SHA-384 cost the same as
     // SHA-256 and SHA-512 and are not measured separately.
@@ -980,8 +981,8 @@ fn self_test() -> ExitCode {
     );
 
     // Every named row is built, or a filter would silently drop it.
-    let mut keys = Keys::<portable::Aes<16>, portable::Aes<32>>::try_new()
-        .expect("portable keys");
+    let mut keys =
+        Keys::<Ttable<16>, Ttable<32>>::try_new().expect("t-table keys");
     let built = keys.tasks();
     check(
         "every algorithm has a task",

@@ -15,30 +15,31 @@
 //! machine or browser tab, or a hyperthread sibling), can recover the
 //! key. This is a practical attack, not a theoretical one.
 //!
-//! It is roughly 1.5x to 2x faster than [`bitsliced`](super::bitsliced)
-//! on the same hardware, and far slower than any hardware
+//! It is roughly 1.5x to 2x faster than
+//! [`bitsliced`](super::bitsliced), its peer under
+//! [`portable`](super), and far slower than any hardware
 //! implementation. The automatic choice in
-//! [`cipher::aes::Aes`](crate::cipher::aes::Aes) never selects
-//! it.
+//! [`cipher::aes::Aes`](crate::cipher::aes::Aes) never selects it.
 //!
 //! Use it only when all of the following hold:
 //! - no hardware AES is available, and
 //! - no untrusted code can run on the same machine while keys are in
 //!   use (a dedicated single-tenant device, an isolated embedded
 //!   system, an offline tool), and
-//! - the extra speed over `bitsliced` actually matters.
+//! - the extra speed over the bitsliced code actually matters.
 //!
 //! Do not use it on shared or cloud hosts, on anything that handles
 //! keys while running untrusted code, in servers reachable by
-//! strangers, or whenever in doubt. Use `bitsliced` instead.
+//! strangers, or whenever in doubt. Use
+//! [`bitsliced`](super::bitsliced) instead.
 //!
 //! # Example
 //!
 //! ```
-//! use scytale::cipher::aes::portable::Aes;
+//! use scytale::cipher::aes::portable::ttable::Aes;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let aes = Aes::try_new(&[0u8; 16])?;
+//! let aes = Aes::<16>::try_new(&[0u8; 16])?;
 //! let mut block = [0u8; 16];
 //! aes.encrypt_block(&mut block);
 //! aes.decrypt_block(&mut block);
