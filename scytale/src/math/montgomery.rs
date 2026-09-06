@@ -6,6 +6,13 @@
 //! exponentiation's setup, and even there it is repeated doubling.
 //! This is the arithmetic under RSA, whose moduli are always odd.
 //!
+//! Some moduli are cheaper than others. The reduction multiplies by
+//! every limb of `n`, and the two NIST prime fields have limbs that
+//! are each a sum of a few powers of two, so those products are
+//! shifts and additions instead. [`Montgomery::new`] recognises the
+//! two primes and halves the multiplications in every product, which
+//! is what the curve arithmetic spends its time on.
+//!
 //! # Constant time
 //!
 //! [`mul`](Montgomery::mul) and [`modexp`](Montgomery::modexp) run
@@ -26,10 +33,54 @@ impl<const LIMBS: usize> Zeroize for Montgomery<LIMBS> {
     }
 }
 
+/// The moduli the reduction has a cheaper form for. `General`
+/// multiplies by each limb of `n`; the others name a prime whose
+/// limbs are sums of a few powers of two, so the same products are
+/// shifts and additions.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Shape {
+    General,
+    P256,
+    P384,
+}
+
+/// The P-256 field prime, `2^256 - 2^224 + 2^192 + 2^96 - 1`. The
+/// curve spells it in hex; the two are checked against each other.
+pub(crate) const P256_PRIME: [u64; 4] = [
+    0xffffffffffffffff,
+    0x00000000ffffffff,
+    0x0000000000000000,
+    0xffffffff00000001,
+];
+
+/// The P-384 field prime, `2^384 - 2^128 - 2^96 + 2^32 - 1`.
+pub(crate) const P384_PRIME: [u64; 6] = [
+    0x00000000ffffffff,
+    0xffffffff00000000,
+    0xfffffffffffffffe,
+    0xffffffffffffffff,
+    0xffffffffffffffff,
+    0xffffffffffffffff,
+];
+
+/// The shape of a modulus, by its limbs: the widths differ, so the
+/// comparison is over slices.
+fn shape_of<const LIMBS: usize>(n: &Uint<LIMBS>) -> Shape {
+    if n.0[..] == P256_PRIME[..] {
+        Shape::P256
+    } else if n.0[..] == P384_PRIME[..] {
+        Shape::P384
+    } else {
+        Shape::General
+    }
+}
+
 /// The context for arithmetic modulo one odd `n`: the constants that
 /// every product needs, computed once.
 pub(crate) struct Montgomery<const LIMBS: usize> {
     n: Uint<LIMBS>,
+    /// Which reduction the modulus admits.
+    shape: Shape,
     /// `-1/n` modulo 2^64, which turns the low limb of a product
     /// into the multiple of `n` that clears it.
     inv: u64,
@@ -63,22 +114,72 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
         for _ in 0..(2 * 64 * LIMBS) {
             rr = rr.double_mod(&n);
         }
-        Some(Montgomery { n, inv, rr })
+        Some(Montgomery {
+            n,
+            shape: shape_of(&n),
+            inv,
+            rr,
+        })
     }
 
     pub(crate) fn modulus(&self) -> &Uint<LIMBS> {
         &self.n
     }
 
-    /// `a * b / R mod n`, the Montgomery product, by coarsely
-    /// integrated operand scanning. `b` must be below `n`; `a` may
-    /// be any width-sized value; the result is below `n`.
+    /// `a * b / R mod n`, the Montgomery product. `b` must be below
+    /// `n`; `a` may be any width-sized value; the result is below
+    /// `n`. The shape picks the reduction, which is the same
+    /// arithmetic either way: one branch on a public constant, then
+    /// a fixed sequence of limb operations.
     pub(crate) fn mul(&self, a: &Uint<LIMBS>, b: &Uint<LIMBS>) -> Uint<LIMBS> {
+        match self.shape {
+            Shape::General => self.mul_with(a, b, |m, out| {
+                for (o, &nj) in out.iter_mut().zip(&self.n.0) {
+                    *o = u128::from(m) * u128::from(nj);
+                }
+            }),
+            // 2^64 - 1, 2^32 - 1, 0, 2^64 - 2^32 + 1.
+            Shape::P256 => self.mul_with(a, b, |m, out| {
+                let m = u128::from(m);
+                out.copy_from_slice(&[
+                    (m << 64) - m,
+                    (m << 32) - m,
+                    0,
+                    (m << 64) - (m << 32) + m,
+                ]);
+            }),
+            // 2^32 - 1, 2^64 - 2^32, 2^64 - 2, then 2^64 - 1 thrice.
+            Shape::P384 => self.mul_with(a, b, |m, out| {
+                let m = u128::from(m);
+                out.copy_from_slice(&[
+                    (m << 32) - m,
+                    (m << 64) - (m << 32),
+                    (m << 64) - 2 * m,
+                    (m << 64) - m,
+                    (m << 64) - m,
+                    (m << 64) - m,
+                ]);
+            }),
+        }
+    }
+
+    /// The product by coarsely integrated operand scanning, with
+    /// `products` writing `m * n[j]` for every limb `j`. Inlined
+    /// into each of [`mul`](Self::mul)'s arms, so the shape's
+    /// arithmetic is straight-line rather than a call.
+    #[inline(always)]
+    fn mul_with(
+        &self,
+        a: &Uint<LIMBS>,
+        b: &Uint<LIMBS>,
+        products: impl Fn(u64, &mut [u128; LIMBS]),
+    ) -> Uint<LIMBS> {
         let wide = |x: u64, y: u64| u128::from(x) * u128::from(y);
         let mut t = [0u64; LIMBS];
         // The two words above the array: `hi` in full, and above it
         // only a bit.
         let mut hi = 0u64;
+        let mut mn = [0u128; LIMBS];
         for &ai in &a.0 {
             let mut carry = 0u64;
             for (tj, &bj) in t.iter_mut().zip(&b.0) {
@@ -93,12 +194,12 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
             // Adding this multiple of n clears the low word, so the
             // whole value shifts down one word, exactly.
             let m = t[0].wrapping_mul(self.inv);
-            let v = u128::from(t[0]) + wide(m, self.n.0[0]);
+            products(m, &mut mn);
+            let v = u128::from(t[0]) + mn[0];
             debug_assert_eq!(v as u64, 0);
             let mut carry = (v >> 64) as u64;
             for j in 1..LIMBS {
-                let v =
-                    u128::from(t[j]) + wide(m, self.n.0[j]) + u128::from(carry);
+                let v = u128::from(t[j]) + mn[j] + u128::from(carry);
                 t[j - 1] = v as u64;
                 carry = (v >> 64) as u64;
             }
@@ -255,6 +356,74 @@ mod tests {
         let xa = m.modexp(&x, &Uint::<1>([17]));
         let composed = m.modexp(&xa, &Uint::<1>([23]));
         assert_eq!(composed.0, m.modexp(&x, &Uint::<1>([17 * 23])).0);
+    }
+
+    /// A cheap pseudorandom stream, for inputs that vary across the
+    /// whole width.
+    fn xorshift(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    /// A value below `n`, from `state`.
+    fn below<const L: usize>(state: &mut u64, n: &Uint<L>) -> Uint<L> {
+        let mut v = Uint([0u64; L]);
+        for limb in v.0.iter_mut() {
+            *limb = xorshift(state);
+        }
+        // Both primes are above half the width, so one subtraction
+        // brings any value of the width below them.
+        let (reduced, borrow) = v.sub_borrow(n);
+        v.cmov(&reduced, 1 - borrow);
+        v
+    }
+
+    /// The shaped reduction against the general one, over the two
+    /// primes it recognises: the same products either way.
+    fn shaped_matches_general<const L: usize>(prime: &[u64; L]) {
+        let n = Uint(*prime);
+        let shaped = Montgomery::new(n).expect("odd prime");
+        assert_ne!(shaped.shape, Shape::General);
+        let mut general = Montgomery::new(n).expect("odd prime");
+        general.shape = Shape::General;
+
+        let mut state = 0x243f6a8885a308d3;
+        for _ in 0..200 {
+            let a = below(&mut state, &n);
+            let b = below(&mut state, &n);
+            assert_eq!(shaped.mul(&a, &b).0, general.mul(&a, &b).0);
+        }
+        // The edges the random values will not reach.
+        let zero = Uint::<L>::ZERO;
+        let one = Uint::<L>::one();
+        let (top, _) = n.sub_borrow(&one);
+        for a in [zero, one, top] {
+            for b in [zero, one, top] {
+                assert_eq!(shaped.mul(&a, &b).0, general.mul(&a, &b).0);
+            }
+        }
+    }
+
+    #[test]
+    fn p256_reduction_matches_the_general_one() {
+        shaped_matches_general(&P256_PRIME);
+    }
+
+    #[test]
+    fn p384_reduction_matches_the_general_one() {
+        shaped_matches_general(&P384_PRIME);
+    }
+
+    /// A modulus of another width, or of the same width and a
+    /// different value, takes the general path.
+    #[test]
+    fn other_moduli_are_general() {
+        let m = Montgomery::new(Uint::<4>([9, 0, 0, 0])).unwrap();
+        assert_eq!(m.shape, Shape::General);
+        let m = Montgomery::new(Uint::<8>([u64::MAX; 8])).unwrap();
+        assert_eq!(m.shape, Shape::General);
     }
 
     /// A full RSA-2048-shaped known answer: fixed 2048-bit modulus,
