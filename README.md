@@ -1,10 +1,11 @@
 # scytale
 
-Cryptographic primitives in Rust: ciphers and the modes over them,
-hashes, message authentication, key derivation, key agreement,
-signatures, post-quantum key encapsulation and signatures, and random
-numbers. It is `no_std`, has two dependencies, needs no C compiler
-and no build script, and has no feature flags to get wrong.
+Correct, fast, portable cryptography in Rust: ciphers and the modes
+over them, hashes, message authentication, key derivation, key
+agreement, public-key encryption, signatures, post-quantum key
+encapsulation and signatures, and random numbers. It is `no_std`, has
+two dependencies, needs no C compiler and no build script, and has no
+feature flags to get wrong.
 
 ## The name
 
