@@ -1,26 +1,33 @@
-//! Throughput of the symmetric primitives, in the manner of
-//! `openssl speed`.
+//! Throughput of the primitives, in the manner of `openssl speed`,
+//! and the cost of the operations that have no throughput to
+//! measure.
 //!
-//! Each operation is run over a buffer of a fixed size for a fixed
-//! slice of CPU time, and the count of completed operations gives a
-//! rate. Six sizes are reported, from one block to sixteen kilobytes:
-//! the small end shows what a call costs before any data moves, the
-//! large end the steady state, and the distance between them is what
-//! says whether a faster bulk path would need a short-message
-//! fallback beside it.
+//! Everything the library implements is here. A primitive that runs
+//! over a buffer is reported as a rate at six sizes, from one block
+//! to sixteen kilobytes: the small end shows what a call costs
+//! before any data moves, the large end the steady state, and the
+//! distance between them is what says whether a faster bulk path
+//! would need a short-message fallback beside it. A primitive whose
+//! cost is the call rather than the data, which is every key
+//! operation, both key derivations and the two format-preserving
+//! modes, is reported instead as operations a second and the time
+//! one takes.
 //!
 //! Every AES implementation the processor supports gets its own
 //! section, named, rather than only the one `Aes::try_new` picks,
 //! which is how the vector suites already treat them. The `auto`
 //! section is `Aes` itself, so the cost of its dispatch shows as the
-//! distance between it and the implementation it chose. The SHA-2
-//! and SHA-3 implementations are treated the same way, in sections
-//! of their own after the ciphers.
+//! distance between it and the implementation it chose. The SHA-2,
+//! SHA-3 and ChaCha20 implementations are treated the same way, in
+//! sections of their own after the ciphers. The operation groups are
+//! named for the module they come from: `kdf`, `kex`, `sig`,
+//! `sig-pq`, `kem`, `pke` and `fpe`.
 //!
 //! ```text
 //! cargo bench --bench speed                    # everything
 //! cargo bench --bench speed -- gcm aesni       # rows matching both
 //! cargo bench --bench speed -- sha             # the hashes only
+//! cargo bench --bench speed -- sig             # signatures, both kinds
 //! cargo bench --bench speed -- --seconds 0.25  # a quicker sweep
 //! cargo bench --bench speed -- --self-test     # check the harness
 //! ```
@@ -34,29 +41,52 @@
 //! other and a single loop that interleaved them would have the whole
 //! of that difference to win. If GCM already beats that sum, the
 //! processor is overlapping them on its own.
-
+//!
+//! Key wrapping is six passes over its input by construction, so it
+//! reads an order of magnitude below the mode rows above it. CFB1 is
+//! a block operation per bit, and reads as such.
+//!
+//! ML-DSA signing repeats until a candidate passes, so its cost
+//! depends on the message and not only on the parameter set; a
+//! stronger set is not reliably slower. Both key generation figures
+//! for RSA and the signature figures for SLH-DSA vary for the same
+//! kind of reason.
+//!
+//! A laptop measured on battery reports about half these numbers,
+//! evenly across every row, which is the clock and not the code.
+//!
 use std::env;
 use std::fmt::Write as _;
 use std::hint::black_box;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use cpu_time::ThreadTime;
 
 use scytale::cipher::chacha20;
 use scytale::cipher::mode::ChaCha20Poly1305;
-use scytale::cipher::mode::{Cbc, Ctr, Gcm, GcmSiv, Xts};
+use scytale::cipher::mode::{
+    Cbc, Cfb1, Cfb128, Cfb8, Ctr, Gcm, GcmSiv, Kw, Kwp, Ofb, Xpn, Xts,
+};
+use scytale::cipher::mode::{Ff1, Ff3_1};
 use scytale::cipher::{aes, BlockCipher};
 
 /// The portable AES implementations at a key width; their paths
 /// alone are too long.
 type Bitsliced<const K: usize> = aes::portable::bitsliced::Aes<K>;
 type Ttable<const K: usize> = aes::portable::ttable::Aes<K>;
+use scytale::hash::sha1::Sha1;
 use scytale::hash::{sha2, sha3};
 use scytale::hash::{Hash, Xof, XofReader};
+use scytale::kdf::{hkdf, pbkdf2};
+use scytale::kex::{ecdh, x25519};
 use scytale::mac::hmac::Hmac;
 use scytale::mac::poly1305::Poly1305;
 use scytale::mac::Mac;
+use scytale::pke::rsa as oaep;
+use scytale::random::{Random, Rng};
+use scytale::sig::{ecdsa, ed25519, rsa};
 use scytale::BlockType;
 use scytale::Error;
 
@@ -287,22 +317,36 @@ fn report(options: &Options) -> ExitCode {
         "portable", options, false,
     );
 
-    ran |= sha3_section::<sha3::Sha3_256, sha3::Sha3_512, sha3::Shake128>(
-        "auto", options,
-    );
+    ran |= sha3_section::<
+        sha3::Sha3_256,
+        sha3::Sha3_512,
+        sha3::Shake128,
+        sha3::Shake256,
+    >("auto", options);
     #[cfg(target_arch = "aarch64")]
     {
         ran |= sha3_section::<
             sha3::aarch64::Sha3_256,
             sha3::aarch64::Sha3_512,
             sha3::aarch64::Shake128,
+            sha3::aarch64::Shake256,
         >("armv8", options);
     }
     ran |= sha3_section::<
         sha3::portable::Sha3_256,
         sha3::portable::Sha3_512,
         sha3::portable::Shake128,
+        sha3::portable::Shake256,
     >("portable", options);
+    ran |= single_section(options);
+
+    ran |= kdf_ops(options);
+    ran |= kex_ops(options);
+    ran |= sig_ops(options);
+    ran |= pq_sig_ops(options);
+    ran |= kem_ops(options);
+    ran |= pke_ops(options);
+    ran |= fpe_ops(options);
 
     if !ran {
         eprintln!("speed: nothing matched");
@@ -555,11 +599,11 @@ fn chacha_section<C: StreamCipher>(
     true
 }
 
-const SHA3: [&str; 3] = ["sha3-256", "sha3-512", "shake128"];
+const SHA3: [&str; 4] = ["sha3-256", "sha3-512", "shake128", "shake256"];
 
 /// Measures one implementation of SHA-3, returning whether it ran
 /// anything; an implementation the processor cannot run is left out.
-fn sha3_section<D256, D512, X128>(
+fn sha3_section<D256, D512, X128, X256>(
     implementation: &str,
     options: &Options,
 ) -> bool
@@ -567,6 +611,7 @@ where
     D256: Hash<Output = [u8; 32]>,
     D512: Hash<Output = [u8; 64]>,
     X128: Xof,
+    X256: Xof,
 {
     let wanted: Vec<&'static str> = SHA3
         .iter()
@@ -576,13 +621,22 @@ where
     if wanted.is_empty() {
         return false;
     }
-    let states = (D256::try_new(), D512::try_new(), X128::try_new());
-    let (mut d256, mut d512, mut x128) = match states {
-        (Ok(a), Ok(b), Ok(c)) => (a, b, c),
-        (Err(Error::NotSupported), _, _)
-        | (_, Err(Error::NotSupported), _)
-        | (_, _, Err(Error::NotSupported)) => return false,
-        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+    let states = (
+        D256::try_new(),
+        D512::try_new(),
+        X128::try_new(),
+        X256::try_new(),
+    );
+    let (mut d256, mut d512, mut x128, mut x256) = match states {
+        (Ok(a), Ok(b), Ok(c), Ok(d)) => (a, b, c, d),
+        (Err(Error::NotSupported), _, _, _)
+        | (_, Err(Error::NotSupported), _, _)
+        | (_, _, Err(Error::NotSupported), _)
+        | (_, _, _, Err(Error::NotSupported)) => return false,
+        (Err(e), _, _, _)
+        | (_, Err(e), _, _)
+        | (_, _, Err(e), _)
+        | (_, _, _, Err(e)) => {
             eprintln!("speed: {implementation}: {e}");
             return false;
         }
@@ -614,6 +668,16 @@ where
                 black_box(out);
             }),
         ),
+        (
+            "shake256",
+            Box::new(|d: &mut [u8]| {
+                x256.reset();
+                x256.update(d);
+                let mut out = [0u8; 32];
+                x256.finalize_xof().squeeze(&mut out);
+                black_box(out);
+            }),
+        ),
     ];
     tasks.retain(|(name, _)| wanted.contains(name));
 
@@ -625,23 +689,814 @@ where
     true
 }
 
+/// The rows that have one implementation each: SHA-1 has no
+/// hardware anywhere, and the generator dispatches inside itself,
+/// so there is nothing to name a section after.
+const SINGLE: [&str; 2] = ["sha-1", "ctr-drbg"];
+
+/// Measures the rows that exist only once. Reported under `auto`
+/// like the other automatic rows, since that is what they are.
+fn single_section(options: &Options) -> bool {
+    let wanted: Vec<&'static str> = SINGLE
+        .iter()
+        .copied()
+        .filter(|name| options.wants("auto", name))
+        .collect();
+    if wanted.is_empty() {
+        return false;
+    }
+    let Ok(mut sha1) = Sha1::try_new() else {
+        return false;
+    };
+    // Seeded rather than drawn, so a run repeats and no entropy
+    // source is needed for a measurement.
+    let Ok(mut rng) = Rng::from_seed(&[0x5au8; 64]) else {
+        return false;
+    };
+    let mut tasks: Vec<Task<'_>> = vec![
+        (
+            "sha-1",
+            Box::new(|d: &mut [u8]| {
+                sha1.reset();
+                sha1.update(d);
+                black_box(sha1.finalize());
+            }) as Operation<'_>,
+        ),
+        (
+            "ctr-drbg",
+            Box::new(|d: &mut [u8]| {
+                let _ = rng.fill(d);
+            }),
+        ),
+    ];
+    tasks.retain(|(name, _)| wanted.contains(name));
+
+    println!("\nauto");
+    println!("{}", heading());
+    for (name, operation) in &mut tasks {
+        println!("{}", row(name, operation, options.budget));
+    }
+    true
+}
+
+// Operations whose cost is the call rather than a rate over a
+// buffer: everything with a key pair, the two password and key
+// derivations, and the format-preserving modes, which work on a
+// string of symbols rather than on bytes.
+
+/// One such operation.
+type Once<'a> = Box<dyn FnMut() + 'a>;
+
+/// A named one.
+type Job<'a> = (&'static str, Once<'a>);
+
+/// The message every signature row signs. Short, because what these
+/// rows measure is the key operation and not the hash in front of
+/// it.
+const MESSAGE: &[u8] = b"scytale benchmark message";
+
+/// PBKDF2 is meant to be slow, and its cost is the iteration count;
+/// this is the round number nearest what a login path would use.
+const ITERATIONS: u32 = 100_000;
+
+/// The digits a format-preserving row encrypts: a card number's
+/// worth, which is what the modes are for.
+const DIGITS: usize = 16;
+
+/// FF3-1's tweak is exactly seven bytes.
+const FF3_TWEAK: [u8; 7] = [0x3c; 7];
+
+/// A generator seeded rather than drawn, so that every key below is
+/// the same one on every run.
+fn seeded() -> Result<Rng<scytale::random::External>, Error> {
+    Rng::from_seed(&[0x5au8; 64])
+}
+
+/// Whether the heading over the operation groups has been printed;
+/// the first group to run prints it, so a run filtered down to the
+/// throughput rows does not carry a heading over nothing.
+static OPS_HEADING: AtomicBool = AtomicBool::new(false);
+
+/// Prints one group of operations, returning whether it ran any.
+/// The jobs are built by the caller, which has already made the keys
+/// they close over.
+fn ops_section(title: &str, jobs: Vec<Job<'_>>, options: &Options) -> bool {
+    let mut jobs: Vec<Job<'_>> = jobs
+        .into_iter()
+        .filter(|(name, _)| options.wants(title, name))
+        .collect();
+    if jobs.is_empty() {
+        return false;
+    }
+    if !OPS_HEADING.swap(true, Ordering::Relaxed) {
+        println!("\nOperations a second, and the time one takes.");
+    }
+    println!("\n{title}");
+    for (name, call) in &mut jobs {
+        println!("{}", ops_row(name, call, options.budget));
+    }
+    true
+}
+
+/// Whether any of `names` is wanted, so that a group can be skipped
+/// before its keys are made.
+fn any_wanted(title: &str, names: &[&str], options: &Options) -> bool {
+    names.iter().any(|name| options.wants(title, name))
+}
+
+/// One row: the name, how many of the operation run in a second, and
+/// how long one takes.
+fn ops_row(name: &str, call: &mut Once<'_>, budget: Duration) -> String {
+    match ops_rate(call, budget) {
+        Some(rate) if rate > 0.0 => {
+            format!("  {name:28}{rate:>12.1}{:>12}", per_call(1.0 / rate))
+        }
+        _ => format!("  {name:28}{:>12}{:>12}", "-", "-"),
+    }
+}
+
+/// Operations a second, calibrated and timed as [`rate`] does, but
+/// with no buffer to hand the operation.
+fn ops_rate(call: &mut Once<'_>, budget: Duration) -> Option<f64> {
+    let mut once = |batch: u64| -> Duration {
+        time_calls(batch, call).unwrap_or(Duration::from_secs(1))
+    };
+    let batch = calibrate(CALIBRATION, &mut once);
+
+    let mut iterations: u64 = 0;
+    let mut elapsed = Duration::ZERO;
+    while elapsed < budget {
+        elapsed += time_calls(batch, call)?;
+        iterations = iterations.saturating_add(batch);
+    }
+    let seconds = elapsed.as_secs_f64();
+    if seconds <= 0.0 {
+        return None;
+    }
+    Some(iterations as f64 / seconds)
+}
+
+/// Runs `batch` calls and returns the CPU time they took.
+fn time_calls(batch: u64, call: &mut Once<'_>) -> Option<Duration> {
+    let start = ThreadTime::try_now().ok()?;
+    for _ in 0..batch {
+        call();
+    }
+    start.try_elapsed().ok()
+}
+
+/// A duration in the unit that shows it best.
+fn per_call(seconds: f64) -> String {
+    if seconds >= 1.0 {
+        format!("{seconds:.2} s")
+    } else if seconds >= 1e-3 {
+        format!("{:.2} ms", seconds * 1e3)
+    } else {
+        format!("{:.2} us", seconds * 1e6)
+    }
+}
+
+const KDF_JOBS: [&str; 4] = [
+    "hkdf-sha-256",
+    "hkdf-sha-512",
+    "pbkdf2-sha-256",
+    "pbkdf2-sha-512",
+];
+
+/// Key derivation: one derivation of a 32-byte key, which is what a
+/// caller asks for. HKDF's cost is two hashes of a short input;
+/// PBKDF2's is its iteration count, and nothing else.
+fn kdf_ops(options: &Options) -> bool {
+    if !any_wanted("kdf", &KDF_JOBS, options) {
+        return false;
+    }
+    let jobs: Vec<Job<'_>> = vec![
+        (
+            "hkdf-sha-256",
+            Box::new(|| {
+                let mut out = [0u8; 32];
+                let _ = hkdf::derive::<sha2::Sha256>(
+                    &KEY128,
+                    &KEY256,
+                    &[],
+                    &mut out,
+                );
+                black_box(out);
+            }) as Once<'_>,
+        ),
+        (
+            "hkdf-sha-512",
+            Box::new(|| {
+                let mut out = [0u8; 32];
+                let _ = hkdf::derive::<sha2::Sha512>(
+                    &KEY128,
+                    &KEY256,
+                    &[],
+                    &mut out,
+                );
+                black_box(out);
+            }),
+        ),
+        (
+            "pbkdf2-sha-256",
+            Box::new(|| {
+                let mut out = [0u8; 32];
+                let _ = pbkdf2::pbkdf2::<sha2::Sha256>(
+                    &KEY128, &KEY128, ITERATIONS, &mut out,
+                );
+                black_box(out);
+            }),
+        ),
+        (
+            "pbkdf2-sha-512",
+            Box::new(|| {
+                let mut out = [0u8; 32];
+                let _ = pbkdf2::pbkdf2::<sha2::Sha512>(
+                    &KEY128, &KEY128, ITERATIONS, &mut out,
+                );
+                black_box(out);
+            }),
+        ),
+    ];
+    ops_section("kdf", jobs, options)
+}
+
+const KEX_JOBS: [&str; 6] = [
+    "x25519-keygen",
+    "x25519-agree",
+    "ecdh-p256-keygen",
+    "ecdh-p256-agree",
+    "ecdh-p384-keygen",
+    "ecdh-p384-agree",
+];
+
+/// Key agreement: deriving a public key from a secret, and the
+/// shared secret from a peer's.
+fn kex_ops(options: &Options) -> bool {
+    if !any_wanted("kex", &KEX_JOBS, options) {
+        return false;
+    }
+    // A generator each, since two rows draw at once and one
+    // borrow of each is all a closure can hold.
+    let (Ok(mut build), Ok(mut rng256), Ok(mut rng384)) =
+        (seeded(), seeded(), seeded())
+    else {
+        return false;
+    };
+    let secret = KEY256;
+    let peer = x25519::public_key(&secret);
+    let (Ok(p256), Ok(p256_peer), Ok(p384), Ok(p384_peer)) = (
+        ecdh::p256::PrivateKey::generate(&mut build),
+        ecdh::p256::PrivateKey::generate(&mut build),
+        ecdh::p384::PrivateKey::generate(&mut build),
+        ecdh::p384::PrivateKey::generate(&mut build),
+    ) else {
+        return false;
+    };
+    let p256_public = p256_peer.public_key();
+    let p384_public = p384_peer.public_key();
+    let jobs: Vec<Job<'_>> = vec![
+        (
+            "x25519-keygen",
+            Box::new(|| {
+                black_box(x25519::public_key(&secret));
+            }) as Once<'_>,
+        ),
+        (
+            "x25519-agree",
+            Box::new(|| {
+                black_box(x25519::shared_secret(&secret, &peer)).ok();
+            }),
+        ),
+        (
+            "ecdh-p256-keygen",
+            Box::new(|| {
+                black_box(ecdh::p256::PrivateKey::generate(&mut rng256)).ok();
+            }),
+        ),
+        (
+            "ecdh-p256-agree",
+            Box::new(|| {
+                black_box(p256.shared_secret(p256_public)).ok();
+            }),
+        ),
+        (
+            "ecdh-p384-keygen",
+            Box::new(|| {
+                black_box(ecdh::p384::PrivateKey::generate(&mut rng384)).ok();
+            }),
+        ),
+        (
+            "ecdh-p384-agree",
+            Box::new(|| {
+                black_box(p384.shared_secret(p384_public)).ok();
+            }),
+        ),
+    ];
+    ops_section("kex", jobs, options)
+}
+
+const SIG_JOBS: [&str; 11] = [
+    "ed25519-keygen",
+    "ed25519-sign",
+    "ed25519-verify",
+    "ecdsa-p256-keygen",
+    "ecdsa-p256-sign",
+    "ecdsa-p256-verify",
+    "ecdsa-p384-keygen",
+    "ecdsa-p384-sign",
+    "ecdsa-p384-verify",
+    "rsa-2048-pss-sign",
+    "rsa-2048-pss-verify",
+];
+
+/// The signature schemes with a classical hardness assumption.
+/// Signing dominates for RSA and verification for the curves, which
+/// is the whole shape of the choice between them.
+fn sig_ops(options: &Options) -> bool {
+    if !any_wanted("sig", &SIG_JOBS, options) {
+        return false;
+    }
+    let (Ok(mut build), Ok(mut rng256), Ok(mut rng384)) =
+        (seeded(), seeded(), seeded())
+    else {
+        return false;
+    };
+    let ed_secret = KEY256;
+    let (Ok(ed_public), Ok(ed_signature)) = (
+        ed25519::public_key(&ed_secret),
+        ed25519::sign(&ed_secret, MESSAGE),
+    ) else {
+        return false;
+    };
+    let (Ok(p256), Ok(p384)) = (
+        ecdsa::p256::PrivateKey::generate(&mut build),
+        ecdsa::p384::PrivateKey::generate(&mut build),
+    ) else {
+        return false;
+    };
+    let (Ok(sig256), Ok(sig384)) = (
+        p256.sign::<sha2::Sha256>(MESSAGE),
+        p384.sign::<sha2::Sha384>(MESSAGE),
+    ) else {
+        return false;
+    };
+    let Ok(rsa_key) = rsa::Rsa2048PrivateKey::generate(&mut build) else {
+        return false;
+    };
+    let Ok(rsa_signature) = rsa_key.sign_pss::<sha2::Sha256>(MESSAGE, &KEY256)
+    else {
+        return false;
+    };
+    let jobs: Vec<Job<'_>> = vec![
+        (
+            "ed25519-keygen",
+            Box::new(|| {
+                black_box(ed25519::public_key(&ed_secret)).ok();
+            }) as Once<'_>,
+        ),
+        (
+            "ed25519-sign",
+            Box::new(|| {
+                black_box(ed25519::sign(&ed_secret, MESSAGE)).ok();
+            }),
+        ),
+        (
+            "ed25519-verify",
+            Box::new(|| {
+                black_box(ed25519::verify(&ed_public, MESSAGE, &ed_signature))
+                    .ok();
+            }),
+        ),
+        (
+            "ecdsa-p256-keygen",
+            Box::new(|| {
+                black_box(ecdsa::p256::PrivateKey::generate(&mut rng256)).ok();
+            }),
+        ),
+        (
+            "ecdsa-p256-sign",
+            Box::new(|| {
+                black_box(p256.sign::<sha2::Sha256>(MESSAGE)).ok();
+            }),
+        ),
+        (
+            "ecdsa-p256-verify",
+            Box::new(|| {
+                black_box(
+                    p256.public_key().verify::<sha2::Sha256>(MESSAGE, &sig256),
+                )
+                .ok();
+            }),
+        ),
+        (
+            "ecdsa-p384-keygen",
+            Box::new(|| {
+                black_box(ecdsa::p384::PrivateKey::generate(&mut rng384)).ok();
+            }),
+        ),
+        (
+            "ecdsa-p384-sign",
+            Box::new(|| {
+                black_box(p384.sign::<sha2::Sha384>(MESSAGE)).ok();
+            }),
+        ),
+        (
+            "ecdsa-p384-verify",
+            Box::new(|| {
+                black_box(
+                    p384.public_key().verify::<sha2::Sha384>(MESSAGE, &sig384),
+                )
+                .ok();
+            }),
+        ),
+        (
+            "rsa-2048-pss-sign",
+            Box::new(|| {
+                black_box(rsa_key.sign_pss::<sha2::Sha256>(MESSAGE, &KEY256))
+                    .ok();
+            }),
+        ),
+        (
+            "rsa-2048-pss-verify",
+            Box::new(|| {
+                black_box(rsa_key.public_key().verify_pss::<sha2::Sha256>(
+                    MESSAGE,
+                    &rsa_signature,
+                    KEY256.len(),
+                ))
+                .ok();
+            }),
+        ),
+    ];
+    ops_section("sig", jobs, options)
+}
+
+/// A post-quantum signing key and one signature from it, bound in
+/// the caller's scope so that the rows below can share them. Keys
+/// are bound before the job list, since the closures borrow them.
+macro_rules! pq_sig_key {
+    ($key:ident, $signature:ident, $build:expr, $private:ty) => {
+        let Ok($key) = <$private>::generate($build) else {
+            return false;
+        };
+        let Ok($signature) = $key.sign_deterministic(&[], MESSAGE) else {
+            return false;
+        };
+    };
+}
+
+/// The three rows for one parameter set.
+macro_rules! pq_sig_rows {
+    ($jobs:expr, $key:ident, $signature:ident, $rng:expr, $private:ty,
+     $name:literal) => {
+        $jobs.push((
+            concat!($name, "-keygen"),
+            Box::new(|| {
+                black_box(<$private>::generate($rng)).ok();
+            }) as Once<'_>,
+        ));
+        $jobs.push((
+            concat!($name, "-sign"),
+            Box::new(|| {
+                black_box($key.sign_deterministic(&[], MESSAGE)).ok();
+            }),
+        ));
+        $jobs.push((
+            concat!($name, "-verify"),
+            Box::new(|| {
+                black_box($key.public_key().verify(&[], MESSAGE, &$signature))
+                    .ok();
+            }),
+        ));
+    };
+}
+
+const PQ_SIG_JOBS: [&str; 5] = [
+    "ml-dsa-44",
+    "ml-dsa-65",
+    "ml-dsa-87",
+    "slh-dsa-sha2-128s",
+    "slh-dsa-sha2-128f",
+];
+
+/// The post-quantum signature schemes. Signing is measured in its
+/// deterministic form, which is the same work as the hedged one
+/// without a draw from the generator in the middle of it. SLH-DSA
+/// has twelve parameter sets; the two here are the small and the
+/// fast end of the 128-bit ones, and the rest fall between the
+/// pattern they show.
+fn pq_sig_ops(options: &Options) -> bool {
+    if !PQ_SIG_JOBS
+        .iter()
+        .any(|name| any_wanted("sig-pq", &[name], options))
+    {
+        return false;
+    }
+    let (Ok(mut build), Ok(mut r1), Ok(mut r2), Ok(mut r3)) =
+        (seeded(), seeded(), seeded(), seeded())
+    else {
+        return false;
+    };
+    let (Ok(mut r4), Ok(mut r5)) = (seeded(), seeded()) else {
+        return false;
+    };
+    pq_sig_key!(
+        mldsa44,
+        mldsa44_sig,
+        &mut build,
+        scytale::sig::ml_dsa::ml_dsa_44::PrivateKey
+    );
+    pq_sig_key!(
+        mldsa65,
+        mldsa65_sig,
+        &mut build,
+        scytale::sig::ml_dsa::ml_dsa_65::PrivateKey
+    );
+    pq_sig_key!(
+        mldsa87,
+        mldsa87_sig,
+        &mut build,
+        scytale::sig::ml_dsa::ml_dsa_87::PrivateKey
+    );
+    pq_sig_key!(
+        slh128s,
+        slh128s_sig,
+        &mut build,
+        scytale::sig::slh_dsa::sha2_128s::PrivateKey
+    );
+    pq_sig_key!(
+        slh128f,
+        slh128f_sig,
+        &mut build,
+        scytale::sig::slh_dsa::sha2_128f::PrivateKey
+    );
+    let mut jobs: Vec<Job<'_>> = Vec::new();
+    pq_sig_rows!(
+        jobs,
+        mldsa44,
+        mldsa44_sig,
+        &mut r1,
+        scytale::sig::ml_dsa::ml_dsa_44::PrivateKey,
+        "ml-dsa-44"
+    );
+    pq_sig_rows!(
+        jobs,
+        mldsa65,
+        mldsa65_sig,
+        &mut r2,
+        scytale::sig::ml_dsa::ml_dsa_65::PrivateKey,
+        "ml-dsa-65"
+    );
+    pq_sig_rows!(
+        jobs,
+        mldsa87,
+        mldsa87_sig,
+        &mut r3,
+        scytale::sig::ml_dsa::ml_dsa_87::PrivateKey,
+        "ml-dsa-87"
+    );
+    pq_sig_rows!(
+        jobs,
+        slh128s,
+        slh128s_sig,
+        &mut r4,
+        scytale::sig::slh_dsa::sha2_128s::PrivateKey,
+        "slh-dsa-sha2-128s"
+    );
+    pq_sig_rows!(
+        jobs,
+        slh128f,
+        slh128f_sig,
+        &mut r5,
+        scytale::sig::slh_dsa::sha2_128f::PrivateKey,
+        "slh-dsa-sha2-128f"
+    );
+    ops_section("sig-pq", jobs, options)
+}
+
+/// An ML-KEM key and one ciphertext under it, likewise.
+macro_rules! kem_key {
+    ($key:ident, $ciphertext:ident, $build:expr, $private:ty) => {
+        let Ok($key) = <$private>::generate($build) else {
+            return false;
+        };
+        let Ok(($ciphertext, _)) = $key.public_key().encapsulate($build) else {
+            return false;
+        };
+    };
+}
+
+/// The three rows for one parameter set.
+macro_rules! kem_rows {
+    ($jobs:expr, $key:ident, $ciphertext:ident, $keygen:expr, $encap:expr,
+     $private:ty, $name:literal) => {
+        $jobs.push((
+            concat!($name, "-keygen"),
+            Box::new(|| {
+                black_box(<$private>::generate($keygen)).ok();
+            }) as Once<'_>,
+        ));
+        $jobs.push((
+            concat!($name, "-encapsulate"),
+            Box::new(|| {
+                black_box($key.public_key().encapsulate($encap)).ok();
+            }),
+        ));
+        $jobs.push((
+            concat!($name, "-decapsulate"),
+            Box::new(|| {
+                black_box($key.decapsulate(&$ciphertext));
+            }),
+        ));
+    };
+}
+
+const KEM_JOBS: [&str; 3] = ["ml-kem-512", "ml-kem-768", "ml-kem-1024"];
+
+/// Key encapsulation, the three parameter sets.
+fn kem_ops(options: &Options) -> bool {
+    if !KEM_JOBS
+        .iter()
+        .any(|name| any_wanted("kem", &[name], options))
+    {
+        return false;
+    }
+    let (Ok(mut build), Ok(mut k1), Ok(mut e1), Ok(mut k2)) =
+        (seeded(), seeded(), seeded(), seeded())
+    else {
+        return false;
+    };
+    let (Ok(mut e2), Ok(mut k3), Ok(mut e3)) = (seeded(), seeded(), seeded())
+    else {
+        return false;
+    };
+    kem_key!(
+        kem512,
+        kem512_ct,
+        &mut build,
+        scytale::kem::ml_kem::ml_kem_512::PrivateKey
+    );
+    kem_key!(
+        kem768,
+        kem768_ct,
+        &mut build,
+        scytale::kem::ml_kem::ml_kem_768::PrivateKey
+    );
+    kem_key!(
+        kem1024,
+        kem1024_ct,
+        &mut build,
+        scytale::kem::ml_kem::ml_kem_1024::PrivateKey
+    );
+    let mut jobs: Vec<Job<'_>> = Vec::new();
+    kem_rows!(
+        jobs,
+        kem512,
+        kem512_ct,
+        &mut k1,
+        &mut e1,
+        scytale::kem::ml_kem::ml_kem_512::PrivateKey,
+        "ml-kem-512"
+    );
+    kem_rows!(
+        jobs,
+        kem768,
+        kem768_ct,
+        &mut k2,
+        &mut e2,
+        scytale::kem::ml_kem::ml_kem_768::PrivateKey,
+        "ml-kem-768"
+    );
+    kem_rows!(
+        jobs,
+        kem1024,
+        kem1024_ct,
+        &mut k3,
+        &mut e3,
+        scytale::kem::ml_kem::ml_kem_1024::PrivateKey,
+        "ml-kem-1024"
+    );
+    ops_section("kem", jobs, options)
+}
+
+const PKE_JOBS: [&str; 2] = ["rsa-2048-oaep-encrypt", "rsa-2048-oaep-decrypt"];
+
+/// Public-key encryption. The encryption key is a different type
+/// from the signing one, since a key does one job.
+fn pke_ops(options: &Options) -> bool {
+    if !any_wanted("pke", &PKE_JOBS, options) {
+        return false;
+    }
+    let (Ok(mut build), Ok(mut rng)) = (seeded(), seeded()) else {
+        return false;
+    };
+    let Ok(key) = oaep::Rsa2048PrivateKey::generate(&mut build) else {
+        return false;
+    };
+    let Ok(ciphertext) = key.public_key().encrypt_oaep::<sha2::Sha256, _>(
+        &mut build,
+        &[],
+        MESSAGE,
+    ) else {
+        return false;
+    };
+    let jobs: Vec<Job<'_>> = vec![
+        (
+            "rsa-2048-oaep-encrypt",
+            Box::new(|| {
+                black_box(key.public_key().encrypt_oaep::<sha2::Sha256, _>(
+                    &mut rng,
+                    &[],
+                    MESSAGE,
+                ))
+                .ok();
+            }) as Once<'_>,
+        ),
+        (
+            "rsa-2048-oaep-decrypt",
+            Box::new(|| {
+                let mut out = [0u8; 256];
+                black_box(key.decrypt_oaep::<sha2::Sha256>(
+                    &[],
+                    &ciphertext,
+                    &mut out,
+                ))
+                .ok();
+            }),
+        ),
+    ];
+    ops_section("pke", jobs, options)
+}
+
+const FPE_JOBS: [&str; 2] = ["ff1-radix10", "ff3-1-radix10"];
+
+/// The format-preserving modes, which work on a string of symbols
+/// rather than on bytes: sixteen decimal digits, a card number's
+/// worth, which is what they exist for.
+fn fpe_ops(options: &Options) -> bool {
+    if !any_wanted("fpe", &FPE_JOBS, options) {
+        return false;
+    }
+    let Ok(cipher) = aes::Aes::<16>::try_new(&KEY128) else {
+        return false;
+    };
+    let (Ok(ff1), Ok(ff3)) = (
+        Ff1::try_new(cipher, 10),
+        Ff3_1::<aes::Aes<16>>::try_new(&KEY128, 10),
+    ) else {
+        return false;
+    };
+    let mut digits = [0u16; DIGITS];
+    for (i, d) in digits.iter_mut().enumerate() {
+        *d = (i % 10) as u16;
+    }
+    let mut ff1_digits = digits;
+    let mut ff3_digits = digits;
+    let jobs: Vec<Job<'_>> = vec![
+        (
+            "ff1-radix10",
+            Box::new(move || {
+                let _ = ff1.encrypt(&[], &mut ff1_digits);
+                black_box(&ff1_digits);
+            }) as Once<'_>,
+        ),
+        (
+            "ff3-1-radix10",
+            Box::new(move || {
+                let _ = ff3.encrypt(&FF3_TWEAK, &mut ff3_digits);
+                black_box(&ff3_digits);
+            }),
+        ),
+    ];
+    ops_section("fpe", jobs, options)
+}
+
 /// The rows, in the order they are printed. Kept beside the tasks
 /// they name so that a filter can be applied before any key is
 /// expanded, which is what lets an unsupported implementation be
 /// skipped silently.
-const ALGORITHMS: [&str; 12] = [
+const ALGORITHMS: [&str; 20] = [
     "aes-128-ecb-enc",
     "aes-128-ecb-dec",
     "aes-256-ecb-enc",
     "aes-128-cbc-enc",
     "aes-128-cbc-dec",
+    "aes-128-cfb1-enc",
+    "aes-128-cfb8-enc",
+    "aes-128-cfb128-enc",
+    "aes-128-ofb",
     "aes-128-ctr",
     "aes-128-gmac",
     "aes-128-gcm-enc",
     "aes-128-gcm-dec",
     "aes-256-gcm-enc",
     "aes-128-gcm-siv-enc",
+    "aes-128-xpn-enc",
     "aes-128-xts-enc",
+    "aes-128-xts-dec",
+    "aes-128-kw-wrap",
+    "aes-128-kwp-wrap",
 ];
 
 /// Everything an implementation's rows are built from, held together
@@ -650,14 +1505,25 @@ struct Keys<A: BlockCipher, B: BlockCipher> {
     ecb128: A,
     ecb256: B,
     cbc: Cbc<A>,
+    cfb1: Cfb1<A>,
+    cfb8: Cfb8<A>,
+    cfb128: Cfb128<A>,
+    ofb: Ofb<A>,
     ctr: Ctr<A>,
     gcm128: Gcm<A>,
     gcm256: Gcm<B>,
     siv: GcmSiv<A>,
+    xpn: Xpn<A>,
     xts: Xts<A>,
+    kw: Kw<A>,
+    kwp: Kwp<A>,
+    /// Room for a wrapped key, one buffer for each of the two rows
+    /// that writes one: the largest input and the eight bytes of
+    /// check value that go on the end of it.
+    wrapped: [Vec<u8>; 2],
     /// A tag buffer for each row that writes one; separate buffers so
     /// the rows borrow disjointly.
-    tags: [[u8; 16]; 4],
+    tags: [[u8; 16]; 5],
 }
 
 /// Key material. Fixed rather than drawn, so that a run repeats.
@@ -674,6 +1540,9 @@ const KEY256: [u8; 32] = [
 const KEY_XTS_DATA: [u8; 16] = KEY128;
 const KEY_XTS_TWEAK: [u8; 16] = [0x99; 16];
 const NONCE: [u8; 12] = [0xa5; 12];
+/// XPN builds its nonce from a salt and a frame number, both of
+/// them the width of a short GCM nonce.
+const SALT: [u8; 12] = [0x11; 12];
 const IV: [u8; 16] = [0x5a; 16];
 const TWEAK: [u8; 16] = [0x3c; 16];
 /// The tag a decryption is checked against. It will not match after
@@ -693,12 +1562,23 @@ where
             ecb128: A::try_new(&KEY128)?,
             ecb256: B::try_new(&KEY256)?,
             cbc: Cbc::new(A::try_new(&KEY128)?),
+            cfb1: Cfb1::new(A::try_new(&KEY128)?),
+            cfb8: Cfb8::new(A::try_new(&KEY128)?),
+            cfb128: Cfb128::new(A::try_new(&KEY128)?),
+            ofb: Ofb::new(A::try_new(&KEY128)?),
             ctr: Ctr::new(A::try_new(&KEY128)?),
             gcm128: Gcm::try_new(A::try_new(&KEY128)?)?,
             gcm256: Gcm::try_new(B::try_new(&KEY256)?)?,
             siv: GcmSiv::try_new(&KEY128)?,
+            xpn: Xpn::try_new(A::try_new(&KEY128)?)?,
             xts: Xts::try_new(&KEY_XTS_DATA, &KEY_XTS_TWEAK)?,
-            tags: [[0u8; 16]; 4],
+            kw: Kw::new(A::try_new(&KEY128)?),
+            kwp: Kwp::new(A::try_new(&KEY128)?),
+            wrapped: [
+                vec![0u8; SIZES[SIZES.len() - 1] + 8],
+                vec![0u8; SIZES[SIZES.len() - 1] + 8],
+            ],
+            tags: [[0u8; 16]; 5],
         })
     }
 
@@ -710,18 +1590,29 @@ where
             ecb128,
             ecb256,
             cbc,
+            cfb1,
+            cfb8,
+            cfb128,
+            ofb,
             ctr,
             gcm128,
             gcm256,
             siv,
+            xpn,
             xts,
+            kw,
+            kwp,
+            wrapped,
             tags,
         } = self;
         // Split so that each row that writes a tag borrows its own.
-        let (gmac_tag, tags) = tags.split_first_mut().expect("four tags");
-        let (gcm_tag, tags) = tags.split_first_mut().expect("three tags");
-        let (gcm256_tag, tags) = tags.split_first_mut().expect("two tags");
-        let (siv_tag, _) = tags.split_first_mut().expect("one tag");
+        let (gmac_tag, tags) = tags.split_first_mut().expect("five tags");
+        let (gcm_tag, tags) = tags.split_first_mut().expect("four tags");
+        let (gcm256_tag, tags) = tags.split_first_mut().expect("three tags");
+        let (siv_tag, tags) = tags.split_first_mut().expect("two tags");
+        let (xpn_tag, _) = tags.split_first_mut().expect("one tag");
+        let (kw_out, wrapped) = wrapped.split_first_mut().expect("two buffers");
+        let (kwp_out, _) = wrapped.split_first_mut().expect("one buffer");
         vec![
             (
                 "aes-128-ecb-enc",
@@ -751,6 +1642,33 @@ where
                 "aes-128-cbc-dec",
                 Box::new(|d: &mut [u8]| {
                     let _ = cbc.decrypt(&IV, d);
+                }),
+            ),
+            // A bit at a time, which is what the mode is for and
+            // why it is the slowest row here.
+            (
+                "aes-128-cfb1-enc",
+                Box::new(|d: &mut [u8]| {
+                    let bits = d.len() * 8;
+                    let _ = cfb1.encrypt(&IV, d, bits);
+                }),
+            ),
+            (
+                "aes-128-cfb8-enc",
+                Box::new(|d: &mut [u8]| {
+                    let _ = cfb8.encrypt(&IV, d);
+                }),
+            ),
+            (
+                "aes-128-cfb128-enc",
+                Box::new(|d: &mut [u8]| {
+                    let _ = cfb128.encrypt(&IV, d);
+                }),
+            ),
+            (
+                "aes-128-ofb",
+                Box::new(|d: &mut [u8]| {
+                    let _ = ofb.encrypt(&IV, d);
                 }),
             ),
             (
@@ -796,9 +1714,35 @@ where
                 }),
             ),
             (
+                "aes-128-xpn-enc",
+                Box::new(|d: &mut [u8]| {
+                    let _ = xpn.encrypt(&SALT, &NONCE, &[], d, xpn_tag);
+                }),
+            ),
+            (
                 "aes-128-xts-enc",
                 Box::new(|d: &mut [u8]| {
                     let _ = xts.encrypt(&TWEAK, d);
+                }),
+            ),
+            (
+                "aes-128-xts-dec",
+                Box::new(|d: &mut [u8]| {
+                    let _ = xts.decrypt(&TWEAK, d);
+                }),
+            ),
+            // Wrapping writes eight bytes more than it reads, so
+            // these two write into a buffer of their own.
+            (
+                "aes-128-kw-wrap",
+                Box::new(|d: &mut [u8]| {
+                    let _ = kw.wrap(d, &mut kw_out[..d.len() + 8]);
+                }),
+            ),
+            (
+                "aes-128-kwp-wrap",
+                Box::new(|d: &mut [u8]| {
+                    let _ = kwp.wrap(d, &mut kwp_out[..d.len() + 8]);
                 }),
             ),
         ]
@@ -815,7 +1759,7 @@ fn blocks_of(data: &mut [u8]) -> &mut [[u8; 16]] {
 
 /// The column headings, the buffer sizes.
 fn heading() -> String {
-    let mut line = format!("{:20}", "");
+    let mut line = format!("{:24}", "");
     for size in SIZES {
         let _ = write!(line, "{size:>9}");
     }
@@ -824,7 +1768,7 @@ fn heading() -> String {
 
 /// One row: the name, then a rate for each size.
 fn row(name: &str, operation: &mut Operation<'_>, budget: Duration) -> String {
-    let mut line = format!("  {name:18}");
+    let mut line = format!("  {name:22}");
     for size in SIZES {
         match rate(operation, size, budget) {
             Some(bytes) => {
