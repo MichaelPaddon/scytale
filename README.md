@@ -374,8 +374,8 @@ let mut block = [0u8; 16];
 aes.encrypt_block(&mut block);
 aes.decrypt_block(&mut block);
 
-// Any whole number of blocks, each encrypted independently.
-aes.encrypt_blocks(&mut buffer)?;
+// Any number of blocks, each encrypted independently.
+aes.encrypt_blocks(&mut blocks); // blocks: [[u8; 16]; N]
 ```
 
 A mode wraps the cipher. Authenticated encryption returns a tag, and
