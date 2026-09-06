@@ -51,8 +51,8 @@ the Project Wycheproof files, close to sixty thousand vector cases
 before the Monte Carlo suites add several million chained calls of
 their own. Every implementation of a primitive is put through the
 whole vector set for it, at every key size, and the whole suite runs
-on x86-64, aarch64 and riscv64 rather than on the machine that
-happens to be to hand. The Goals section below says exactly what that
+on x86-64, aarch64 and riscv64 hardware rather than on the machine
+that happens to be to hand. The Goals section below says exactly what that
 means.
 
 Work from here goes into speed and into algorithms that are still
@@ -315,25 +315,30 @@ wiped when the generator is dropped.
 
 ## Supported architectures
 
-| Architecture | Acceleration used | For | Verified |
-| --- | --- | --- | --- |
-| x86-64 | VAES on 256-bit registers | AES | on hardware |
-| x86-64 | AES-NI on 128-bit registers | AES | on hardware |
-| x86-64 | PCLMULQDQ | GHASH | on hardware |
-| aarch64 | ARMv8 cryptography extension | AES | under emulation |
-| aarch64 | PMULL | GHASH | under emulation |
-| riscv64 | vector cryptography (Zvkned) | AES | under emulation |
-| riscv64 | scalar cryptography (Zkne, Zknd) | AES | under emulation |
-| riscv64 | vector GHASH (Zvkg) | GHASH | under emulation |
-| x86-64 | SHA-NI | SHA-256 | on hardware |
-| aarch64 | ARMv8 SHA2 extension | SHA-256 | under emulation |
-| aarch64 | ARMv8 SHA512 extension | SHA-512 | under emulation |
-| riscv64 | scalar cryptography (Zknh) | SHA-256, SHA-512 | under emulation |
-| aarch64 | ARMv8 SHA3 extension | SHA-3, SHAKE | under emulation |
-| x86-64 | AVX2 | ChaCha20 | on hardware |
-| aarch64 | NEON | ChaCha20 | under emulation |
-| riscv64 | vector extension with Zvbb | ChaCha20 | under emulation |
-| any | none needed; portable Rust | all | on hardware |
+| Architecture | Acceleration used | For |
+| --- | --- | --- |
+| x86-64 | VAES on 256-bit registers | AES |
+| x86-64 | AES-NI on 128-bit registers | AES |
+| x86-64 | PCLMULQDQ | GHASH |
+| aarch64 | ARMv8 cryptography extension | AES |
+| aarch64 | PMULL | GHASH |
+| riscv64 | vector cryptography (Zvkned) | AES |
+| riscv64 | scalar cryptography (Zkne, Zknd) | AES |
+| riscv64 | vector GHASH (Zvkg) | GHASH |
+| x86-64 | SHA-NI | SHA-256 |
+| aarch64 | ARMv8 SHA2 extension | SHA-256 |
+| aarch64 | ARMv8 SHA512 extension | SHA-512 |
+| riscv64 | scalar cryptography (Zknh) | SHA-256, SHA-512 |
+| aarch64 | ARMv8 SHA3 extension | SHA-3, SHAKE |
+| x86-64 | AVX2 | ChaCha20 |
+| aarch64 | NEON | ChaCha20 |
+| riscv64 | vector extension with Zvbb | ChaCha20 |
+| any | none needed; portable Rust | all |
+
+Every row is exercised on real silicon: the continuous integration
+matrix runs the whole test suite natively on x86-64, arm64 and
+riscv64 runners, with no emulation, so the assembly for each is run
+by the processor it was written for.
 
 GHASH is the hash inside GCM, GCM-SIV and XPN. Without a carry-less
 multiply instruction it costs more than the cipher does. SHA-224 and
@@ -603,8 +608,8 @@ signature small and slow or large and quick.
 Both are ten rounds of a Feistel network over the caller's radix, and
 FF1 does more work per round.
 
-The ARM and RISC-V implementations have only been run under
-emulation, so there are no timings for them.
+The benchmark has only been run on this x86-64 machine, so there are
+no timings for the ARM and RISC-V implementations.
 
 ## Testing
 
