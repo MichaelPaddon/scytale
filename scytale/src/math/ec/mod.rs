@@ -6,20 +6,28 @@
 //! generates the whole group and there is no cofactor to clear. The
 //! field and the scalar ring both run on [`Montgomery`], which is
 //! generic over the width; nothing here is specialised to a curve
-//! beyond its constants, so a third curve is a constant away.
+//! beyond its constants and the table of multiples of its base
+//! point in [`base`], so a third curve is those two things away.
 //!
 //! # Constant time
 //!
 //! Points are projective, and added by the complete formulas of
-//! Renes, Costello and Batina (2016) for `a = -3`: one routine
+//! Renes, Costello and Batina (2016) for `a = -3`: the addition
 //! handles doubling, the identity and inverse pairs with no case
-//! analysis, so a scalar multiplication is a fixed sequence of
-//! field operations. The scalar is consumed in four-bit windows with
+//! analysis, and the doubling beside it, which is a multiplication
+//! cheaper, is complete in the same way. A scalar multiplication is
+//! therefore a fixed sequence of field operations. The scalar is
+//! consumed in four-bit windows with
 //! the table read by scanning every entry, as [`Montgomery::modexp`]
-//! reads its own. Inversion and square roots are exponentiations.
+//! reads its own. A multiplication of the base point instead reads
+//! the comb table in [`base`], which is public; the digit that
+//! chooses an entry is not, so that read scans the table whole
+//! too. Inversion and square roots are exponentiations.
 //! The only value-dependent control flow is the retry ECDSA makes
 //! when a nonce yields a zero `r` or `s`, which happens once in
 //! 2^256 signatures.
+
+mod base;
 
 use zeroize::Zeroize;
 
@@ -40,9 +48,26 @@ pub(crate) struct Curve<const L: usize> {
     p: Uint<L>,
     b: Uint<L>,
     n: Uint<L>,
+    // The generator, which only the tests read now: every
+    // multiplication of it goes through `base`, whose first entry it
+    // is. It stays as what that table is checked against.
+    #[cfg_attr(not(test), allow(dead_code))]
     gx: Uint<L>,
+    #[cfg_attr(not(test), allow(dead_code))]
     gy: Uint<L>,
+    /// The comb table of multiples of `G`, described in [`base`].
+    base: &'static [[[u64; L]; 2]],
     pub(crate) oid: &'static [u8],
+}
+
+/// The blocks a scalar is cut into for a fixed-base multiplication,
+/// and so the width of the comb's digit.
+const COMB: usize = 6;
+
+/// The bits in one comb block, which is how many doublings a
+/// fixed-base multiplication makes.
+const fn block<const L: usize>() -> usize {
+    (64 * L).div_ceil(COMB)
 }
 
 /// A hex string of exactly `16 * L` digits, as limbs.
@@ -88,6 +113,7 @@ pub(crate) const P256: Curve<4> = Curve {
     gy: from_hex(
         "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
     ),
+    base: &base::P256_BASE,
     // 1.2.840.10045.3.1.7
     oid: &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07],
 };
@@ -114,6 +140,7 @@ pub(crate) const P384: Curve<6> = Curve {
         "3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c0\
          0a60b1ce1d7e819d7a431d7c90ea0e5f",
     ),
+    base: &base::P384_BASE,
     // 1.3.132.0.34
     oid: &[0x2b, 0x81, 0x04, 0x00, 0x22],
 };
@@ -152,7 +179,6 @@ pub(crate) struct Engine<'a, const L: usize> {
     b: Uint<L>,
     /// One, in the domain: `R mod p`.
     one: Uint<L>,
-    g: Point<L>,
 }
 
 /// A Montgomery context for a curve modulus.
@@ -170,11 +196,6 @@ impl<'a, const L: usize> Engine<'a, L> {
         let field = context(&curve.p);
         let order = context(&curve.n);
         let one = field.to_mont(&Uint::one());
-        let g = Point {
-            x: field.to_mont(&curve.gx),
-            y: field.to_mont(&curve.gy),
-            z: one,
-        };
         let b = field.to_mont(&curve.b);
         Engine {
             curve,
@@ -182,7 +203,6 @@ impl<'a, const L: usize> Engine<'a, L> {
             order,
             b,
             one,
-            g,
         }
     }
 
@@ -299,6 +319,55 @@ impl<'a, const L: usize> Engine<'a, L> {
         }
     }
 
+    /// `2 p`, by algorithm 6 of Renes, Costello and Batina: the
+    /// complete doubling for `a = -3`. One multiplication cheaper
+    /// than adding a point to itself, and the doublings are most of
+    /// what a scalar multiplication does.
+    fn point_double(&self, p: &Point<L>) -> Point<L> {
+        let (x, y, z) = (&p.x, &p.y, &p.z);
+        let b = &self.b;
+
+        let t0 = self.mul(x, x);
+        let t1 = self.mul(y, y);
+        let t2 = self.mul(z, z);
+        let t3 = self.mul(x, y);
+        let t3 = self.add(&t3, &t3);
+        let z3 = self.mul(x, z);
+        let z3 = self.add(&z3, &z3);
+        let y3 = self.mul(b, &t2);
+        let y3 = self.sub(&y3, &z3);
+        let x3 = self.add(&y3, &y3);
+        let y3 = self.add(&x3, &y3);
+        let x3 = self.sub(&t1, &y3);
+        let y3 = self.add(&t1, &y3);
+        let y3 = self.mul(&x3, &y3);
+        let x3 = self.mul(&x3, &t3);
+        let t3 = self.add(&t2, &t2);
+        let t2 = self.add(&t3, &t2);
+        let z3 = self.mul(b, &z3);
+        let z3 = self.sub(&z3, &t2);
+        let z3 = self.sub(&z3, &t0);
+        let t3 = self.add(&z3, &z3);
+        let z3 = self.add(&z3, &t3);
+        let t3 = self.add(&t0, &t0);
+        let t0 = self.add(&t3, &t0);
+        let t0 = self.sub(&t0, &t2);
+        let t0 = self.mul(&t0, &z3);
+        let y3 = self.add(&y3, &t0);
+        let t0 = self.mul(y, z);
+        let t0 = self.add(&t0, &t0);
+        let z3 = self.mul(&t0, &z3);
+        let x3 = self.sub(&x3, &z3);
+        let z3 = self.mul(&t0, &t1);
+        let z3 = self.add(&z3, &z3);
+        let z3 = self.add(&z3, &z3);
+        Point {
+            x: x3,
+            y: y3,
+            z: z3,
+        }
+    }
+
     /// `k * p`, by fixed four-bit windows over the scalar's full
     /// width, the table read by scanning it whole.
     fn point_mul(&self, p: &Point<L>, k: &Uint<L>) -> Point<L> {
@@ -309,13 +378,52 @@ impl<'a, const L: usize> Engine<'a, L> {
         let mut acc = self.identity();
         for window in (0..16 * L).rev() {
             for _ in 0..4 {
-                acc = self.point_add(&acc, &acc);
+                acc = self.point_double(&acc);
             }
             let digit = (k.0[window >> 4] >> ((window & 15) * 4)) & 15;
             let mut chosen = table[0];
             for (i, entry) in table.iter().enumerate() {
                 let matches = ((i as u64 ^ digit).wrapping_sub(1)) >> 63;
                 chosen.cmov(entry, matches);
+            }
+            acc = self.point_add(&acc, &chosen);
+        }
+        acc
+    }
+
+    /// `k * G`, by the comb over the table in [`base`]: a doubling
+    /// and one table addition for each bit of a block, rather than
+    /// four doublings and an addition for each four bits of the
+    /// scalar. The table is public; only the digit that reads it is
+    /// secret, so the read scans every entry as [`point_mul`]'s
+    /// does.
+    ///
+    /// [`point_mul`]: Self::point_mul
+    fn mul_base(&self, k: &Uint<L>) -> Point<L> {
+        let block = block::<L>();
+        let mut acc = self.identity();
+        for t in (0..block).rev() {
+            acc = self.point_double(&acc);
+            // Bit `t` of every block, gathered least block first.
+            // The last block runs past the scalar when the width is
+            // not a multiple of `COMB`; those bits are zero.
+            let mut digit = 0u64;
+            for i in 0..COMB {
+                let bit = i * block + t;
+                if bit < 64 * L {
+                    digit |= ((k.0[bit >> 6] >> (bit & 63)) & 1) << i;
+                }
+            }
+            // Entry `j` holds the digit `j + 1`, so a zero digit
+            // matches nothing and leaves the identity, which is what
+            // it stands for.
+            let mut chosen = self.identity();
+            for (j, entry) in self.curve.base.iter().enumerate() {
+                let index = j as u64 + 1;
+                let matches = ((index ^ digit).wrapping_sub(1)) >> 63;
+                chosen.x.cmov(&Uint(entry[0]), matches);
+                chosen.y.cmov(&Uint(entry[1]), matches);
+                chosen.z.cmov(&self.one, matches);
             }
             acc = self.point_add(&acc, &chosen);
         }
@@ -439,7 +547,7 @@ impl<const L: usize> Secret<L> {
 
     /// The public point, `d * G`.
     pub(crate) fn public(&self, e: &Engine<L>) -> Public<L> {
-        let p = e.point_mul(&e.g, &self.d);
+        let p = e.mul_base(&self.d);
         // A scalar in range times a generator of prime order is
         // never the identity.
         let (x, y) = e.to_affine(&p).unwrap_or((Uint::ZERO, Uint::ZERO));
@@ -485,7 +593,7 @@ impl<const L: usize> Secret<L> {
 
         loop {
             let mut k = nonce.next(e)?;
-            let r = match e.to_affine(&e.point_mul(&e.g, &k)) {
+            let r = match e.to_affine(&e.mul_base(&k)) {
                 Some((x, _)) => e.reduce_scalar(&x),
                 None => Uint::ZERO,
             };
@@ -598,10 +706,8 @@ impl<const L: usize> Public<L> {
         let w = e.scalar_invert(&s);
         let u1 = e.scalar_mul(&z, &w);
         let u2 = e.scalar_mul(&r, &w);
-        let sum = e.point_add(
-            &e.point_mul(&e.g, &u1),
-            &e.point_mul(&e.lift(self), &u2),
-        );
+        let sum =
+            e.point_add(&e.mul_base(&u1), &e.point_mul(&e.lift(self), &u2));
         let (x, _) = e.to_affine(&sum).ok_or(Error::InvalidSignature)?;
         if e.reduce_scalar(&x).0 == r.0 {
             Ok(())
@@ -1159,6 +1265,17 @@ mod tests {
     use super::*;
     use crate::hash::sha2::{Sha256, Sha384};
 
+    /// The generator, in the field's domain. Only the tests need
+    /// it by itself: every multiplication of it goes through the
+    /// comb table instead.
+    fn generator<const L: usize>(e: &Engine<L>) -> Point<L> {
+        Point {
+            x: e.field.to_mont(&e.curve.gx),
+            y: e.field.to_mont(&e.curve.gy),
+            z: e.one,
+        }
+    }
+
     /// Affine coordinates as limbs, comparable.
     fn affine<const L: usize>(
         e: &Engine<L>,
@@ -1176,6 +1293,18 @@ mod tests {
         &buf[..hex.len() / 2]
     }
 
+    /// Both field primes are the ones the Montgomery reduction has
+    /// a shift-and-add form for. They are spelled twice, in hex
+    /// here and as limbs there, so check the spellings agree: a
+    /// mismatch would be silently correct and half the speed.
+    #[test]
+    fn field_primes_take_the_shaped_reduction() {
+        use crate::math::montgomery::{P256_PRIME, P384_PRIME};
+
+        assert_eq!(P256.p.0, P256_PRIME);
+        assert_eq!(P384.p.0, P384_PRIME);
+    }
+
     /// The generator is on the curve, and doubling it by the
     /// complete formula agrees with adding it to itself, and with
     /// multiplying by two; the identity behaves.
@@ -1183,25 +1312,103 @@ mod tests {
     fn group_law_basics() {
         fn check<const L: usize>(curve: &Curve<L>) {
             let e = Engine::new(curve);
-            let g = Public {
-                x: curve.gx,
-                y: curve.gy,
-            };
-            Public::try_from_affine(&e, g.x, g.y).unwrap();
-            let two_g = e.point_add(&e.g, &e.g);
-            let by_mul = e.point_mul(&e.g, &Uint::from_limbs(&[2]));
+            let g = generator(&e);
+            Public::try_from_affine(&e, curve.gx, curve.gy).unwrap();
+            let two_g = e.point_add(&g, &g);
+            let by_mul = e.point_mul(&g, &Uint::from_limbs(&[2]));
             assert_eq!(affine(&e, &two_g), affine(&e, &by_mul));
             let (x, y) = e.to_affine(&two_g).unwrap();
             Public::try_from_affine(&e, x, y).unwrap();
             // Identity plus G is G; n G is the identity; (n-1) G = -G.
             let id = e.identity();
-            assert_eq!(affine(&e, &e.point_add(&id, &e.g)), affine(&e, &e.g));
-            assert!(e.to_affine(&e.point_mul(&e.g, &curve.n)).is_none());
+            assert_eq!(affine(&e, &e.point_add(&id, &g)), affine(&e, &g));
+            assert!(e.to_affine(&e.point_mul(&g, &curve.n)).is_none());
             let (minus_one, _) = curve.n.sub_borrow(&Uint::one());
-            let (x, y) = e.to_affine(&e.point_mul(&e.g, &minus_one)).unwrap();
+            let (x, y) = e.to_affine(&e.point_mul(&g, &minus_one)).unwrap();
             assert_eq!(x.0, curve.gx.0);
             assert_eq!(y.0, Uint::ZERO.sub_mod(&curve.gy, &curve.p).0);
-            assert!(e.to_affine(&e.point_mul(&e.g, &Uint::ZERO)).is_none());
+            assert!(e.to_affine(&e.point_mul(&g, &Uint::ZERO)).is_none());
+        }
+        check(&P256);
+        check(&P384);
+    }
+
+    /// The dedicated doubling agrees with adding a point to
+    /// itself, on the identity and along a run of multiples of `G`.
+    #[test]
+    fn doubling_matches_the_general_addition() {
+        fn check<const L: usize>(curve: &Curve<L>) {
+            let e = Engine::new(curve);
+            let g = generator(&e);
+            let mut p = e.identity();
+            for _ in 0..8 {
+                assert_eq!(
+                    affine(&e, &e.point_double(&p)),
+                    affine(&e, &e.point_add(&p, &p)),
+                );
+                p = e.point_add(&p, &g);
+            }
+        }
+        check(&P256);
+        check(&P384);
+    }
+
+    /// Every entry of a comb table is the multiple of `G` it
+    /// stands for: the sum of `2^(i * d) G` over the set bits of
+    /// its index, in the field's domain. This is what says the
+    /// checked-in tables are the curve's and not something else.
+    #[test]
+    fn base_tables_are_multiples_of_g() {
+        fn check<const L: usize>(curve: &Curve<L>) {
+            let e = Engine::new(curve);
+            let mut bases = [generator(&e); COMB];
+            for i in 1..COMB {
+                let mut p = bases[i - 1];
+                for _ in 0..block::<L>() {
+                    p = e.point_double(&p);
+                }
+                bases[i] = p;
+            }
+            assert_eq!(curve.base.len(), (1 << COMB) - 1);
+            for (j, entry) in curve.base.iter().enumerate() {
+                let index = j + 1;
+                let mut sum = e.identity();
+                for (i, b) in bases.iter().enumerate() {
+                    if index >> i & 1 == 1 {
+                        sum = e.point_add(&sum, b);
+                    }
+                }
+                let (x, y) = e.to_affine(&sum).expect("a sum of bases");
+                assert_eq!(e.field.to_mont(&x).0, entry[0], "{index} x");
+                assert_eq!(e.field.to_mont(&y).0, entry[1], "{index} y");
+            }
+        }
+        check(&P256);
+        check(&P384);
+    }
+
+    /// The fixed-base multiplication agrees with the general one,
+    /// over the scalars that reach the edges of the comb: zero, one,
+    /// the order less one, and values whose top bits fall in the
+    /// last block, which runs past the scalar's width.
+    #[test]
+    fn fixed_base_matches_the_general_multiplication() {
+        fn check<const L: usize>(curve: &Curve<L>) {
+            let e = Engine::new(curve);
+            let g = generator(&e);
+            let (top, _) = curve.n.sub_borrow(&Uint::one());
+            let mut high = Uint::<L>::ZERO;
+            high.0[L - 1] = 1 << 63;
+            let mut spread = Uint::<L>::ZERO;
+            for (i, limb) in spread.0.iter_mut().enumerate() {
+                *limb = 0x0f1e2d3c4b5a6978u64.rotate_left(i as u32 * 7);
+            }
+            for k in [Uint::ZERO, Uint::one(), top, high, spread] {
+                assert_eq!(
+                    affine(&e, &e.mul_base(&k)),
+                    affine(&e, &e.point_mul(&g, &k)),
+                );
+            }
         }
         check(&P256);
         check(&P384);
