@@ -4,6 +4,10 @@ description = "Command line interface for scytale"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# A tool built from the library, not a crate to depend on: it takes
+# scytale by path, which crates.io will not accept, and there is
+# nothing here for anyone to import.
+publish = false
 
 [dependencies]
 scytale = { path = "../scytale" }
