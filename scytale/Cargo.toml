@@ -1,6 +1,6 @@
 [package]
 name = "scytale"
-description = "Portable cryptographic primitives"
+description = "Correct, fast, portable no_std cryptography: AES, ChaCha20, SHA-2, SHA-3, HMAC, Poly1305, HKDF, PBKDF2, X25519, ECDH, RSA, ECDSA, Ed25519, ML-KEM, ML-DSA, SLH-DSA"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,8 +10,13 @@ documentation = "https://docs.rs/scytale"
 # The README lives at the workspace root; cargo only looks in the
 # package directory on its own.
 readme = "../README.md"
-keywords = ["cryptography", "aes", "sha2", "sha3", "hmac"]
-categories = ["cryptography", "no-std", "no-std::no-alloc"]
+keywords = ["encryption", "hash", "mac", "signature", "post-quantum"]
+categories = [
+    "cryptography",
+    "no-std",
+    "no-std::no-alloc",
+    "algorithms",
+]
 # ACVP vectors are vendored for development but not shipped, to keep
 # the crate small; without them the ACVP suites skip and the built-in
 # vectors in the unit tests remain.
