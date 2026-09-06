@@ -19,10 +19,6 @@ permissions:
   pages: write
   id-token: write
 
-concurrency:
-  group: pages
-  cancel-in-progress: true
-
 env:
   RUSTDOCFLAGS: -D warnings
 
@@ -84,6 +80,11 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    # Deploys wait for each other rather than cancelling: only this
+    # job is serialized, so no build is ever thrown away.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
