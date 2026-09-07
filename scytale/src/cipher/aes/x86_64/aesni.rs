@@ -40,8 +40,8 @@
 use core::fmt;
 
 use super::{RoundKeys, expand, has_aesni};
-use crate::cipher::BlockCipher;
 use crate::cipher::aes::BLOCK_SIZE;
+use crate::cipher::{BlockCipher, add_low32};
 use crate::{BlockType, Error, KeyType};
 use zeroize::ZeroizeOnDrop;
 
@@ -141,6 +141,96 @@ impl<const K: usize> KeyType for Aes<K> {
     }
 }
 
+impl<const K: usize> Aes<K> {
+    /// Counter mode's inner loop; see
+    /// [`BlockCipher::xor_counter_blocks`].
+    ///
+    /// The counters are made in registers and encrypted where they
+    /// lie, then XORed over the data on the way to a single store, so
+    /// a block is read once and written once, which is what plain ECB
+    /// costs. Whole groups go first, then one pass of exactly the
+    /// blocks left over.
+    ///
+    /// `pshufb` comes with SSSE3 rather than AES-NI; `has_aesni`
+    /// asks for both, so this type does not exist without it.
+    pub fn xor_counter_blocks(
+        &self,
+        counter: &mut [u8; BLOCK_SIZE],
+        data: &mut [u8],
+    ) {
+        debug_assert_eq!(data.len() % BLOCK_SIZE, 0);
+        let rk = self.keys.enc.as_ptr();
+        let rounds = self.keys.size.rounds();
+        let mut data = data;
+
+        let groups = data.len() / (GROUP * BLOCK_SIZE);
+        if groups > 0 {
+            let (whole, rest) = data.split_at_mut(groups * GROUP * BLOCK_SIZE);
+            // SAFETY: the struct only exists if try_new confirmed
+            // AES-NI; `whole` is `groups` whole groups, at least one.
+            // The loop leaves `counter` on the block after the last.
+            unsafe {
+                counter_groups(
+                    rk,
+                    rounds,
+                    counter.as_mut_ptr(),
+                    whole.as_mut_ptr(),
+                    groups,
+                );
+            }
+            data = rest;
+        }
+
+        // At most seven blocks are left, each width with a body of
+        // its own so that a short message costs one pass, not a group.
+        if !data.is_empty() {
+            let blocks = data.len() / BLOCK_SIZE;
+            // SAFETY: as above, and `blocks` is 1 to 7, which indexes
+            // the table, with `data` exactly that many blocks.
+            unsafe {
+                TAILS[blocks - 1](
+                    rk,
+                    rounds,
+                    counter.as_ptr(),
+                    data.as_mut_ptr(),
+                );
+            }
+            add_low32(counter, blocks as u32);
+        }
+    }
+}
+
+/// Blocks the counter loop puts through the cipher at once.
+const GROUP: usize = 8;
+
+/// Constants the counter loop reads, at the width it loads them.
+#[repr(align(16))]
+struct Mask([u8; BLOCK_SIZE]);
+
+#[repr(align(16))]
+struct Words<const N: usize>([u32; N]);
+
+/// Reverses the bytes of a register. The counter is the last four
+/// bytes of a block, most significant first; reversed, it is the low
+/// doubleword, least significant first, where a doubleword add can
+/// reach it.
+static BSWAP: Mask =
+    Mask([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]);
+
+/// What each register adds to the base counter to make its block.
+static OFFSETS: Words<{ 4 * GROUP }> = {
+    let mut w = [0u32; 4 * GROUP];
+    let mut i = 0;
+    while i < GROUP {
+        w[4 * i] = i as u32;
+        i += 1;
+    }
+    Words(w)
+};
+
+/// One group's worth, added to the base after each pass.
+static ADVANCE: Words<4> = Words([GROUP as u32, 0, 0, 0]);
+
 impl<const K: usize> BlockCipher for Aes<K> {
     fn try_new(key: &Self::Key) -> Result<Self, Error> {
         Aes::try_new(key)
@@ -160,6 +250,10 @@ impl<const K: usize> BlockCipher for Aes<K> {
 
     fn decrypt_blocks(&self, blocks: &mut [Self::Block]) {
         Aes::decrypt_blocks(self, blocks)
+    }
+
+    fn xor_counter_blocks(&self, counter: &mut Self::Block, data: &mut [u8]) {
+        Aes::xor_counter_blocks(self, counter, data)
     }
 }
 
@@ -360,6 +454,255 @@ macro_rules! groups {
     };
 }
 
+/// Runs whole groups of counter blocks through the cipher and XORs
+/// them over `data`, leaving `counter` on the block after the last.
+///
+/// Only the low doubleword is added to, so a carry out of the counter
+/// field would be lost; the caller splits its run at that boundary.
+///
+/// # Safety
+/// Requires AES-NI and `pshufb`, which `has_aesni` asks for
+/// together; `rk` must point at `rounds + 1` round keys, `counter` at
+/// a block, and `data` at `groups * 128` writable bytes, with
+/// `groups >= 1`.
+unsafe fn counter_groups(
+    rk: *const u32,
+    rounds: usize,
+    counter: *mut u8,
+    data: *mut u8,
+    groups: usize,
+) {
+    unsafe {
+        core::arch::asm!(
+            "movdqa xmm10, [{bswap}]",
+            "movdqa xmm11, [{advance}]",
+            // The base counter, byte-reversed so the field adds.
+            "movdqu xmm9, [{counter}]",
+            "pshufb xmm9, xmm10",
+            "3:",
+            // Eight counters from the one base, then the base moved
+            // on while they are turned back into blocks.
+            "movdqa xmm0, xmm9",
+            "movdqa xmm1, xmm9",
+            "movdqa xmm2, xmm9",
+            "movdqa xmm3, xmm9",
+            "movdqa xmm4, xmm9",
+            "movdqa xmm5, xmm9",
+            "movdqa xmm6, xmm9",
+            "movdqa xmm7, xmm9",
+            "paddd xmm0, [{offs}]",
+            "paddd xmm1, [{offs} + 16]",
+            "paddd xmm2, [{offs} + 32]",
+            "paddd xmm3, [{offs} + 48]",
+            "paddd xmm4, [{offs} + 64]",
+            "paddd xmm5, [{offs} + 80]",
+            "paddd xmm6, [{offs} + 96]",
+            "paddd xmm7, [{offs} + 112]",
+            "paddd xmm9, xmm11",
+            "pshufb xmm0, xmm10",
+            "pshufb xmm1, xmm10",
+            "pshufb xmm2, xmm10",
+            "pshufb xmm3, xmm10",
+            "pshufb xmm4, xmm10",
+            "pshufb xmm5, xmm10",
+            "pshufb xmm6, xmm10",
+            "pshufb xmm7, xmm10",
+            "movdqu xmm8, [{rk}]",
+            "pxor xmm0, xmm8",
+            "pxor xmm1, xmm8",
+            "pxor xmm2, xmm8",
+            "pxor xmm3, xmm8",
+            "pxor xmm4, xmm8",
+            "pxor xmm5, xmm8",
+            "pxor xmm6, xmm8",
+            "pxor xmm7, xmm8",
+            "lea {k}, [{rk} + 16]",
+            "mov {n}, {nr}",
+            "2:",
+            "movdqu xmm8, [{k}]",
+            "aesenc xmm0, xmm8",
+            "aesenc xmm1, xmm8",
+            "aesenc xmm2, xmm8",
+            "aesenc xmm3, xmm8",
+            "aesenc xmm4, xmm8",
+            "aesenc xmm5, xmm8",
+            "aesenc xmm6, xmm8",
+            "aesenc xmm7, xmm8",
+            "add {k}, 16",
+            "dec {n}",
+            "jnz 2b",
+            "movdqu xmm8, [{k}]",
+            "aesenclast xmm0, xmm8",
+            "aesenclast xmm1, xmm8",
+            "aesenclast xmm2, xmm8",
+            "aesenclast xmm3, xmm8",
+            "aesenclast xmm4, xmm8",
+            "aesenclast xmm5, xmm8",
+            "aesenclast xmm6, xmm8",
+            "aesenclast xmm7, xmm8",
+            // The keystream never reaches memory: it is XORed over
+            // the data on the way to the one store. The load is
+            // separate because a plain SSE operand must be aligned
+            // and the message need not be.
+            "movdqu xmm12, [{data}]",
+            "pxor xmm0, xmm12",
+            "movdqu [{data}], xmm0",
+            "movdqu xmm12, [{data} + 16]",
+            "pxor xmm1, xmm12",
+            "movdqu [{data} + 16], xmm1",
+            "movdqu xmm12, [{data} + 32]",
+            "pxor xmm2, xmm12",
+            "movdqu [{data} + 32], xmm2",
+            "movdqu xmm12, [{data} + 48]",
+            "pxor xmm3, xmm12",
+            "movdqu [{data} + 48], xmm3",
+            "movdqu xmm12, [{data} + 64]",
+            "pxor xmm4, xmm12",
+            "movdqu [{data} + 64], xmm4",
+            "movdqu xmm12, [{data} + 80]",
+            "pxor xmm5, xmm12",
+            "movdqu [{data} + 80], xmm5",
+            "movdqu xmm12, [{data} + 96]",
+            "pxor xmm6, xmm12",
+            "movdqu [{data} + 96], xmm6",
+            "movdqu xmm12, [{data} + 112]",
+            "pxor xmm7, xmm12",
+            "movdqu [{data} + 112], xmm7",
+            "add {data}, 128",
+            "dec {groups}",
+            "jnz 3b",
+            // Hand the counter back in block order.
+            "pshufb xmm9, xmm10",
+            "movdqu [{counter}], xmm9",
+            rk = in(reg) rk,
+            nr = in(reg) rounds - 1,
+            counter = in(reg) counter,
+            data = inout(reg) data => _,
+            groups = inout(reg) groups => _,
+            offs = in(reg) OFFSETS.0.as_ptr(),
+            bswap = in(reg) BSWAP.0.as_ptr(),
+            advance = in(reg) ADVANCE.0.as_ptr(),
+            k = out(reg) _,
+            n = out(reg) _,
+            out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
+            out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
+            out("xmm8") _, out("xmm9") _, out("xmm10") _, out("xmm11") _,
+            out("xmm12") _,
+            options(nostack),
+        );
+    }
+}
+
+/// Defines a counter body for a fixed number of blocks: it makes its
+/// counters from `counter`, encrypts them and XORs them over `data`.
+/// Advancing `counter` is left to the caller, which knows the width.
+macro_rules! counter_body {
+    ($name:ident, [$(($r:literal, $off:literal)),+]) => {
+        /// # Safety
+        /// Requires AES-NI and `pshufb`; `rk` must point at
+        /// `rounds + 1` round keys, `counter` at a block, and `data`
+        /// at the blocks this body handles.
+        unsafe fn $name(
+            rk: *const u32,
+            rounds: usize,
+            counter: *const u8,
+            data: *mut u8,
+        ) {
+            unsafe {
+                core::arch::asm!(
+                    "movdqa xmm10, [{bswap}]",
+                    "movdqu xmm9, [{counter}]",
+                    "pshufb xmm9, xmm10",
+                    $(concat!("movdqa ", $r, ", xmm9"),)+
+                    $(concat!(
+                        "paddd ", $r, ", [{offs} + ", $off, "]"),)+
+                    $(concat!("pshufb ", $r, ", xmm10"),)+
+                    "movdqu xmm8, [{rk}]",
+                    $(concat!("pxor ", $r, ", xmm8"),)+
+                    "lea {k}, [{rk} + 16]",
+                    "mov {n}, {nr}",
+                    "2:",
+                    "movdqu xmm8, [{k}]",
+                    $(concat!("aesenc ", $r, ", xmm8"),)+
+                    "add {k}, 16",
+                    "dec {n}",
+                    "jnz 2b",
+                    "movdqu xmm8, [{k}]",
+                    $(concat!("aesenclast ", $r, ", xmm8"),)+
+                    $(concat!(
+                        "movdqu xmm12, [{data} + ", $off, "]\n",
+                        "pxor ", $r, ", xmm12\n",
+                        "movdqu [{data} + ", $off, "], ", $r),)+
+                    rk = in(reg) rk,
+                    nr = in(reg) rounds - 1,
+                    counter = in(reg) counter,
+                    data = in(reg) data,
+                    offs = in(reg) OFFSETS.0.as_ptr(),
+                    bswap = in(reg) BSWAP.0.as_ptr(),
+                    k = out(reg) _,
+                    n = out(reg) _,
+                    out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
+                    out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm8") _,
+                    out("xmm9") _, out("xmm10") _, out("xmm12") _,
+                    options(nostack),
+                );
+            }
+        }
+    };
+}
+
+counter_body!(counter1, [("xmm0", "0")]);
+counter_body!(counter2, [("xmm0", "0"), ("xmm1", "16")]);
+counter_body!(counter3, [("xmm0", "0"), ("xmm1", "16"), ("xmm2", "32")]);
+counter_body!(
+    counter4,
+    [
+        ("xmm0", "0"),
+        ("xmm1", "16"),
+        ("xmm2", "32"),
+        ("xmm3", "48")
+    ]
+);
+counter_body!(
+    counter5,
+    [
+        ("xmm0", "0"),
+        ("xmm1", "16"),
+        ("xmm2", "32"),
+        ("xmm3", "48"),
+        ("xmm4", "64")
+    ]
+);
+counter_body!(
+    counter6,
+    [
+        ("xmm0", "0"),
+        ("xmm1", "16"),
+        ("xmm2", "32"),
+        ("xmm3", "48"),
+        ("xmm4", "64"),
+        ("xmm5", "80")
+    ]
+);
+counter_body!(
+    counter7,
+    [
+        ("xmm0", "0"),
+        ("xmm1", "16"),
+        ("xmm2", "32"),
+        ("xmm3", "48"),
+        ("xmm4", "64"),
+        ("xmm5", "80"),
+        ("xmm6", "96")
+    ]
+);
+
+/// The bodies by block count, so that a tail of `n` blocks is one
+/// call.
+static TAILS: [unsafe fn(*const u32, usize, *const u8, *mut u8); 7] = [
+    counter1, counter2, counter3, counter4, counter5, counter6, counter7,
+];
+
 groups!(encrypt8, "aesenc", "aesenclast");
 groups!(decrypt8, "aesdec", "aesdeclast");
 
@@ -502,6 +845,41 @@ mod tests {
             Ok(a) => Some(a),
             Err(Error::NotSupported) => None,
             Err(e) => panic!("{e}"),
+        }
+    }
+
+    /// The counter loop against a block at a time, at every length
+    /// across a group, its tail widths and the block after it.
+    ///
+    /// Round-tripping would not catch a wrong keystream, since the
+    /// same wrong keystream undoes itself.
+    #[test]
+    fn counter_blocks_match_a_block_at_a_time() {
+        let Some(aes) = aes(&[0x5au8; 16]) else {
+            return;
+        };
+        const N: usize = (2 * GROUP + 5) * BLOCK_SIZE;
+        let start = [0x77u8; BLOCK_SIZE];
+
+        let mut want = [0u8; N];
+        let mut counter = start;
+        for chunk in want.chunks_mut(BLOCK_SIZE) {
+            let mut block = counter;
+            aes.encrypt_block(&mut block);
+            chunk.copy_from_slice(&block);
+            add_low32(&mut counter, 1);
+        }
+
+        for blocks in 0..=N / BLOCK_SIZE {
+            let n = blocks * BLOCK_SIZE;
+            let mut got = [0u8; N];
+            let mut counter = start;
+            aes.xor_counter_blocks(&mut counter, &mut got[..n]);
+            assert_eq!(got[..n], want[..n], "{blocks} blocks");
+            // And the counter is left on the block after the last.
+            let mut want_counter = start;
+            add_low32(&mut want_counter, blocks as u32);
+            assert_eq!(counter, want_counter, "{blocks} blocks, counter");
         }
     }
 

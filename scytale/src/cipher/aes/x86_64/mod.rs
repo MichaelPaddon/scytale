@@ -14,9 +14,17 @@ use zeroize::ZeroizeOnDrop;
 
 use super::{KeySize, MAX_WORDS, expand_words};
 
-/// Whether the processor reports AES-NI (CPUID leaf 1, ECX bit 25).
+/// Whether the processor reports AES-NI (CPUID leaf 1, ECX bit 25)
+/// and `pshufb`, which comes with SSSE3 (bit 9).
+///
+/// The counter loop uses `pshufb` and the cipher itself does not, but
+/// the two have arrived together on every processor ever built, so
+/// they are asked for together. A machine with one and not the other
+/// takes the portable path, rather than every call carrying a branch
+/// for hardware that does not exist.
 pub(super) fn has_aesni() -> bool {
-    __cpuid(1).ecx & (1 << 25) != 0
+    let features = __cpuid(1).ecx;
+    features & (1 << 25) != 0 && features & (1 << 9) != 0
 }
 
 /// Whether the processor and operating system support VAES on 256-bit

@@ -11,7 +11,7 @@ pub mod zkn;
 pub mod zvkned;
 
 use crate::arch::riscv64::{
-    EXT_ZKND, EXT_ZKNE, EXT_ZVKNED, IMA_V, hwprobe_ima_ext_0, vlenb,
+    EXT_ZKND, EXT_ZKNE, EXT_ZVBB, EXT_ZVKNED, IMA_V, hwprobe_ima_ext_0, vlenb,
 };
 
 /// Whether the scalar AES instructions (Zkne and Zknd) are available.
@@ -33,6 +33,19 @@ pub(crate) fn has_zvkned() -> bool {
             hwprobe_ima_ext_0().is_some_and(|ext| ext & want == want)
         };
     present && vlenb() >= 16
+}
+
+/// Whether the vector byte reverse `vrev8.v` is here, which comes
+/// with Zvbb.
+///
+/// The counter loop uses it and the cipher does not, so it is asked
+/// for separately. RVA23 requires both, so a machine that conforms to
+/// the profile has it; one that does not takes the shared loop.
+pub(crate) fn has_zvbb() -> bool {
+    cfg!(all(target_feature = "v", target_feature = "zvbb")) || {
+        let want = IMA_V | EXT_ZVBB;
+        hwprobe_ima_ext_0().is_some_and(|ext| ext & want == want)
+    }
 }
 
 #[cfg(test)]

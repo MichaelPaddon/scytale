@@ -862,6 +862,41 @@ mod tests {
         }
     }
 
+    /// The counter loop against a block at a time, at every length
+    /// across a group, its tail widths and the block after it.
+    ///
+    /// Round-tripping would not catch a wrong keystream, since the
+    /// same wrong keystream undoes itself.
+    #[test]
+    fn counter_blocks_match_a_block_at_a_time() {
+        let Some(aes) = aes(&[0x5au8; 16]) else {
+            return;
+        };
+        const N: usize = (2 * GROUP + 5) * BLOCK_SIZE;
+        let start = [0x77u8; BLOCK_SIZE];
+
+        let mut want = [0u8; N];
+        let mut counter = start;
+        for chunk in want.chunks_mut(BLOCK_SIZE) {
+            let mut block = counter;
+            aes.encrypt_block(&mut block);
+            chunk.copy_from_slice(&block);
+            add_low32(&mut counter, 1);
+        }
+
+        for blocks in 0..=N / BLOCK_SIZE {
+            let n = blocks * BLOCK_SIZE;
+            let mut got = [0u8; N];
+            let mut counter = start;
+            aes.xor_counter_blocks(&mut counter, &mut got[..n]);
+            assert_eq!(got[..n], want[..n], "{blocks} blocks");
+            // And the counter is left on the block after the last.
+            let mut want_counter = start;
+            add_low32(&mut want_counter, blocks as u32);
+            assert_eq!(counter, want_counter, "{blocks} blocks, counter");
+        }
+    }
+
     fn unhex(s: &str) -> [u8; 32] {
         let mut out = [0u8; 32];
         for (i, pair) in s.as_bytes().chunks_exact(2).enumerate() {

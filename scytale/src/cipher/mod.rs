@@ -95,21 +95,36 @@ pub trait BlockCipher: BlockType + KeyType {
     ///
     /// The default does assemble it from `encrypt_blocks`.
     fn xor_counter_blocks(&self, counter: &mut Self::Block, data: &mut [u8]) {
-        let size = counter.as_ref().len();
-        debug_assert_eq!(data.len() % size, 0);
-        // `*counter` rather than `zero_block`, which an object has
-        // no way to call; the values are overwritten below.
-        let mut keystream = [*counter; mode::LANES];
-        for group in data.chunks_mut(size * mode::LANES) {
-            let keystream = &mut keystream[..group.len() / size];
-            for block in keystream.iter_mut() {
-                *block = *counter;
-                add_low32(counter.as_mut(), 1);
-            }
-            self.encrypt_blocks(keystream);
-            for (chunk, key) in group.chunks_mut(size).zip(&*keystream) {
-                mode::xor(chunk, key.as_ref());
-            }
+        counter_blocks_via_ecb(self, counter, data)
+    }
+}
+
+/// [`BlockCipher::xor_counter_blocks`] assembled from
+/// [`encrypt_blocks`](BlockCipher::encrypt_blocks).
+///
+/// The default, and the fallback for an implementation whose own loop
+/// wants an instruction the processor turns out to lack.
+pub(crate) fn counter_blocks_via_ecb<C>(
+    cipher: &C,
+    counter: &mut C::Block,
+    data: &mut [u8],
+) where
+    C: BlockCipher + ?Sized,
+{
+    let size = counter.as_ref().len();
+    debug_assert_eq!(data.len() % size, 0);
+    // `*counter` rather than `zero_block`, which an object has no way
+    // to call; the values are overwritten below.
+    let mut keystream = [*counter; mode::LANES];
+    for group in data.chunks_mut(size * mode::LANES) {
+        let keystream = &mut keystream[..group.len() / size];
+        for block in keystream.iter_mut() {
+            *block = *counter;
+            add_low32(counter.as_mut(), 1);
+        }
+        cipher.encrypt_blocks(keystream);
+        for (chunk, key) in group.chunks_mut(size).zip(&*keystream) {
+            mode::xor(chunk, key.as_ref());
         }
     }
 }
