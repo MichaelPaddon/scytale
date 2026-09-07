@@ -928,10 +928,10 @@ impl<const L: usize> Secret<L> {
         carried: Option<Public<L>>,
     ) -> Result<(Self, Public<L>), Error> {
         let public = self.public(e);
-        if let Some(carried) = carried {
-            if carried.x.0 != public.x.0 || carried.y.0 != public.y.0 {
-                return Err(Error::InvalidEncoding);
-            }
+        if let Some(carried) = carried
+            && (carried.x.0 != public.x.0 || carried.y.0 != public.y.0)
+        {
+            return Err(Error::InvalidEncoding);
         }
         Ok((self, public))
     }

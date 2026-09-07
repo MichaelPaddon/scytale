@@ -179,11 +179,11 @@ fn checked(
     mut secret: [u8; KEY_SIZE],
     carried: Option<[u8; KEY_SIZE]>,
 ) -> Result<[u8; KEY_SIZE], Error> {
-    if let Some(carried) = carried {
-        if carried != public_key(&secret) {
-            secret.zeroize();
-            return Err(Error::InvalidEncoding);
-        }
+    if let Some(carried) = carried
+        && carried != public_key(&secret)
+    {
+        secret.zeroize();
+        return Err(Error::InvalidEncoding);
     }
     Ok(secret)
 }

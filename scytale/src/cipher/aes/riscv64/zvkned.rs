@@ -94,16 +94,20 @@ impl<const K: usize> Aes<K> {
     /// The caller must have confirmed that the vector extension and
     /// Zvkned are available with `VLEN >= 128`.
     pub(crate) unsafe fn new_unchecked(key: &[u8; K]) -> Result<Self, Error> {
-        let size = KeySize::for_key(key)?;
-        let mut keys = [0u32; MAX_WORDS];
-        match size {
-            KeySize::Aes128 => expand128(key.as_ptr(), keys.as_mut_ptr()),
-            KeySize::Aes256 => expand256(key.as_ptr(), keys.as_mut_ptr()),
-            // No vector instruction covers AES-192; use the shared
-            // schedule with a vector SubWord.
-            KeySize::Aes192 => keys = expand_words(key, size, |w| sub_word(w)),
+        unsafe {
+            let size = KeySize::for_key(key)?;
+            let mut keys = [0u32; MAX_WORDS];
+            match size {
+                KeySize::Aes128 => expand128(key.as_ptr(), keys.as_mut_ptr()),
+                KeySize::Aes256 => expand256(key.as_ptr(), keys.as_mut_ptr()),
+                // No vector instruction covers AES-192; use the shared
+                // schedule with a vector SubWord.
+                KeySize::Aes192 => {
+                    keys = expand_words(key, size, |w| sub_word(w))
+                }
+            }
+            Ok(Aes { keys, size })
         }
-        Ok(Aes { keys, size })
     }
 
     /// Number of rounds: 10, 12 or 14 depending on key size.
@@ -149,11 +153,13 @@ impl<const K: usize> Aes<K> {
     /// `blocks >= 1`.
     #[inline]
     unsafe fn encrypt(&self, data: *mut u8, blocks: usize) {
-        let rk = self.keys.as_ptr();
-        match self.size {
-            KeySize::Aes128 => encrypt10(rk, data, blocks),
-            KeySize::Aes192 => encrypt12(rk, data, blocks),
-            KeySize::Aes256 => encrypt14(rk, data, blocks),
+        unsafe {
+            let rk = self.keys.as_ptr();
+            match self.size {
+                KeySize::Aes128 => encrypt10(rk, data, blocks),
+                KeySize::Aes192 => encrypt12(rk, data, blocks),
+                KeySize::Aes256 => encrypt14(rk, data, blocks),
+            }
         }
     }
 
@@ -161,11 +167,13 @@ impl<const K: usize> Aes<K> {
     /// As [`Aes::encrypt`].
     #[inline]
     unsafe fn decrypt(&self, data: *mut u8, blocks: usize) {
-        let rk = self.keys.as_ptr();
-        match self.size {
-            KeySize::Aes128 => decrypt10(rk, data, blocks),
-            KeySize::Aes192 => decrypt12(rk, data, blocks),
-            KeySize::Aes256 => decrypt14(rk, data, blocks),
+        unsafe {
+            let rk = self.keys.as_ptr();
+            match self.size {
+                KeySize::Aes128 => decrypt10(rk, data, blocks),
+                KeySize::Aes192 => decrypt12(rk, data, blocks),
+                KeySize::Aes256 => decrypt14(rk, data, blocks),
+            }
         }
     }
 }
@@ -219,58 +227,60 @@ impl<const K: usize> BlockCipher for Aes<K> {
 /// Requires the vector extension and Zvkned; `key` must point at 16
 /// key bytes and `out` at 44 writable words.
 unsafe fn expand128(key: *const u8, out: *mut u32) {
-    core::arch::asm!(
-        ".option push",
-        ".option arch, +v, +zvkned",
-        "vsetivli zero, 4, e32, m1, tu, mu",
-        "vle32.v v10, ({key})",
-        "vaeskf1.vi v11, v10, 1",
-        "vaeskf1.vi v12, v11, 2",
-        "vaeskf1.vi v13, v12, 3",
-        "vaeskf1.vi v14, v13, 4",
-        "vaeskf1.vi v15, v14, 5",
-        "vaeskf1.vi v16, v15, 6",
-        "vaeskf1.vi v17, v16, 7",
-        "vaeskf1.vi v18, v17, 8",
-        "vaeskf1.vi v19, v18, 9",
-        "vaeskf1.vi v20, v19, 10",
-        "vse32.v v10, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v11, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v12, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v13, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v14, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v15, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v16, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v17, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v18, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v19, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v20, ({out})",
-        ".option pop",
-        key = in(reg) key,
-        out = inout(reg) out => _,
-        out("v10") _,
-        out("v11") _,
-        out("v12") _,
-        out("v13") _,
-        out("v14") _,
-        out("v15") _,
-        out("v16") _,
-        out("v17") _,
-        out("v18") _,
-        out("v19") _,
-        out("v20") _,
-        options(nostack),
-    );
+    unsafe {
+        core::arch::asm!(
+            ".option push",
+            ".option arch, +v, +zvkned",
+            "vsetivli zero, 4, e32, m1, tu, mu",
+            "vle32.v v10, ({key})",
+            "vaeskf1.vi v11, v10, 1",
+            "vaeskf1.vi v12, v11, 2",
+            "vaeskf1.vi v13, v12, 3",
+            "vaeskf1.vi v14, v13, 4",
+            "vaeskf1.vi v15, v14, 5",
+            "vaeskf1.vi v16, v15, 6",
+            "vaeskf1.vi v17, v16, 7",
+            "vaeskf1.vi v18, v17, 8",
+            "vaeskf1.vi v19, v18, 9",
+            "vaeskf1.vi v20, v19, 10",
+            "vse32.v v10, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v11, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v12, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v13, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v14, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v15, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v16, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v17, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v18, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v19, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v20, ({out})",
+            ".option pop",
+            key = in(reg) key,
+            out = inout(reg) out => _,
+            out("v10") _,
+            out("v11") _,
+            out("v12") _,
+            out("v13") _,
+            out("v14") _,
+            out("v15") _,
+            out("v16") _,
+            out("v17") _,
+            out("v18") _,
+            out("v19") _,
+            out("v20") _,
+            options(nostack),
+        );
+    }
 }
 
 /// AES-256 key schedule.
@@ -279,88 +289,90 @@ unsafe fn expand128(key: *const u8, out: *mut u32) {
 /// Requires the vector extension and Zvkned; `key` must point at 32
 /// key bytes and `out` at 60 writable words.
 unsafe fn expand256(key: *const u8, out: *mut u32) {
-    core::arch::asm!(
-        ".option push",
-        ".option arch, +v, +zvkned",
-        "vsetivli zero, 4, e32, m1, tu, mu",
-        "vle32.v v10, ({key})",
-        "addi {key}, {key}, 16",
-        "vle32.v v11, ({key})",
-        "vmv.v.v v12, v10",
-        "vaeskf2.vi v12, v11, 2",
-        "vmv.v.v v13, v11",
-        "vaeskf2.vi v13, v12, 3",
-        "vmv.v.v v14, v12",
-        "vaeskf2.vi v14, v13, 4",
-        "vmv.v.v v15, v13",
-        "vaeskf2.vi v15, v14, 5",
-        "vmv.v.v v16, v14",
-        "vaeskf2.vi v16, v15, 6",
-        "vmv.v.v v17, v15",
-        "vaeskf2.vi v17, v16, 7",
-        "vmv.v.v v18, v16",
-        "vaeskf2.vi v18, v17, 8",
-        "vmv.v.v v19, v17",
-        "vaeskf2.vi v19, v18, 9",
-        "vmv.v.v v20, v18",
-        "vaeskf2.vi v20, v19, 10",
-        "vmv.v.v v21, v19",
-        "vaeskf2.vi v21, v20, 11",
-        "vmv.v.v v22, v20",
-        "vaeskf2.vi v22, v21, 12",
-        "vmv.v.v v23, v21",
-        "vaeskf2.vi v23, v22, 13",
-        "vmv.v.v v24, v22",
-        "vaeskf2.vi v24, v23, 14",
-        "vse32.v v10, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v11, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v12, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v13, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v14, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v15, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v16, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v17, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v18, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v19, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v20, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v21, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v22, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v23, ({out})",
-        "addi {out}, {out}, 16",
-        "vse32.v v24, ({out})",
-        ".option pop",
-        key = inout(reg) key => _,
-        out = inout(reg) out => _,
-        out("v10") _,
-        out("v11") _,
-        out("v12") _,
-        out("v13") _,
-        out("v14") _,
-        out("v15") _,
-        out("v16") _,
-        out("v17") _,
-        out("v18") _,
-        out("v19") _,
-        out("v20") _,
-        out("v21") _,
-        out("v22") _,
-        out("v23") _,
-        out("v24") _,
-        options(nostack),
-    );
+    unsafe {
+        core::arch::asm!(
+            ".option push",
+            ".option arch, +v, +zvkned",
+            "vsetivli zero, 4, e32, m1, tu, mu",
+            "vle32.v v10, ({key})",
+            "addi {key}, {key}, 16",
+            "vle32.v v11, ({key})",
+            "vmv.v.v v12, v10",
+            "vaeskf2.vi v12, v11, 2",
+            "vmv.v.v v13, v11",
+            "vaeskf2.vi v13, v12, 3",
+            "vmv.v.v v14, v12",
+            "vaeskf2.vi v14, v13, 4",
+            "vmv.v.v v15, v13",
+            "vaeskf2.vi v15, v14, 5",
+            "vmv.v.v v16, v14",
+            "vaeskf2.vi v16, v15, 6",
+            "vmv.v.v v17, v15",
+            "vaeskf2.vi v17, v16, 7",
+            "vmv.v.v v18, v16",
+            "vaeskf2.vi v18, v17, 8",
+            "vmv.v.v v19, v17",
+            "vaeskf2.vi v19, v18, 9",
+            "vmv.v.v v20, v18",
+            "vaeskf2.vi v20, v19, 10",
+            "vmv.v.v v21, v19",
+            "vaeskf2.vi v21, v20, 11",
+            "vmv.v.v v22, v20",
+            "vaeskf2.vi v22, v21, 12",
+            "vmv.v.v v23, v21",
+            "vaeskf2.vi v23, v22, 13",
+            "vmv.v.v v24, v22",
+            "vaeskf2.vi v24, v23, 14",
+            "vse32.v v10, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v11, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v12, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v13, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v14, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v15, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v16, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v17, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v18, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v19, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v20, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v21, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v22, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v23, ({out})",
+            "addi {out}, {out}, 16",
+            "vse32.v v24, ({out})",
+            ".option pop",
+            key = inout(reg) key => _,
+            out = inout(reg) out => _,
+            out("v10") _,
+            out("v11") _,
+            out("v12") _,
+            out("v13") _,
+            out("v14") _,
+            out("v15") _,
+            out("v16") _,
+            out("v17") _,
+            out("v18") _,
+            out("v19") _,
+            out("v20") _,
+            out("v21") _,
+            out("v22") _,
+            out("v23") _,
+            out("v24") _,
+            options(nostack),
+        );
+    }
 }
 
 /// `SubWord` via a final AES round with a zero key on a vector holding
@@ -370,22 +382,24 @@ unsafe fn expand256(key: *const u8, out: *mut u32) {
 /// # Safety
 /// Requires the vector extension and Zvkned.
 unsafe fn sub_word(w: u32) -> u32 {
-    let out: u64;
-    core::arch::asm!(
-        ".option push",
-        ".option arch, +v, +zvkned",
-        "vsetivli zero, 4, e32, m1, ta, ma",
-        "vmv.v.x v8, {w}",
-        "vmv.v.i v9, 0",
-        "vaesef.vv v8, v9",
-        "vmv.x.s {out}, v8",
-        ".option pop",
-        w = in(reg) w,
-        out = lateout(reg) out,
-        out("v8") _, out("v9") _,
-        options(nomem, nostack),
-    );
-    out as u32
+    unsafe {
+        let out: u64;
+        core::arch::asm!(
+            ".option push",
+            ".option arch, +v, +zvkned",
+            "vsetivli zero, 4, e32, m1, ta, ma",
+            "vmv.v.x v8, {w}",
+            "vmv.v.i v9, 0",
+            "vaesef.vv v8, v9",
+            "vmv.x.s {out}, v8",
+            ".option pop",
+            w = in(reg) w,
+            out = lateout(reg) out,
+            out("v8") _, out("v9") _,
+            options(nomem, nostack),
+        );
+        out as u32
+    }
 }
 
 // The round loops below are hand-written so the instruction order can
@@ -409,64 +423,66 @@ macro_rules! vaes_body {
         /// `rk` must point at 15 round keys and `data` at `blocks`
         /// writable blocks, `blocks >= 1`.
         unsafe fn $name(rk: *const u32, data: *mut u8, blocks: usize) {
-            core::arch::asm!(
-                ".option push",
-                ".option arch, +v, +zvkned",
-                "vsetivli zero, 4, e32, m1, ta, ma",
-                "vle32.v v16, ({rk})",
-                "addi {rk}, {rk}, 16",
-                "vle32.v v17, ({rk})",
-                "addi {rk}, {rk}, 16",
-                "vle32.v v18, ({rk})",
-                "addi {rk}, {rk}, 16",
-                "vle32.v v19, ({rk})",
-                "addi {rk}, {rk}, 16",
-                "vle32.v v20, ({rk})",
-                "addi {rk}, {rk}, 16",
-                "vle32.v v21, ({rk})",
-                "addi {rk}, {rk}, 16",
-                "vle32.v v22, ({rk})",
-                "addi {rk}, {rk}, 16",
-                "vle32.v v23, ({rk})",
-                "addi {rk}, {rk}, 16",
-                "vle32.v v24, ({rk})",
-                "addi {rk}, {rk}, 16",
-                "vle32.v v25, ({rk})",
-                "addi {rk}, {rk}, 16",
-                "vle32.v v26, ({rk})",
-                "addi {rk}, {rk}, 16",
-                "vle32.v v27, ({rk})",
-                "addi {rk}, {rk}, 16",
-                "vle32.v v28, ({rk})",
-                "addi {rk}, {rk}, 16",
-                "vle32.v v29, ({rk})",
-                "addi {rk}, {rk}, 16",
-                "vle32.v v30, ({rk})",
-                "2:",
-                "vsetvli {vl}, {avl}, e32, m8, ta, ma",
-                "vle32.v v8, ({data})",
-                concat!("vaesz.vs v8, ", $first),
-                $(concat!($midop, " v8, ", $mid),)*
-                concat!($lastop, " v8, ", $last),
-                "vse32.v v8, ({data})",
-                "slli {t}, {vl}, 2",
-                "add {data}, {data}, {t}",
-                "sub {avl}, {avl}, {vl}",
-                "bnez {avl}, 2b",
-                ".option pop",
-                rk = inout(reg) rk => _,
-                data = inout(reg) data => _,
-                avl = inout(reg) 4 * blocks => _,
-                vl = out(reg) _,
-                t = out(reg) _,
-                out("v8") _, out("v9") _, out("v10") _, out("v11") _,
-                out("v12") _, out("v13") _, out("v14") _, out("v15") _,
-                out("v16") _, out("v17") _, out("v18") _, out("v19") _,
-                out("v20") _, out("v21") _, out("v22") _, out("v23") _,
-                out("v24") _, out("v25") _, out("v26") _, out("v27") _,
-                out("v28") _, out("v29") _, out("v30") _,
-                options(nostack),
-            );
+            unsafe {
+                core::arch::asm!(
+                    ".option push",
+                    ".option arch, +v, +zvkned",
+                    "vsetivli zero, 4, e32, m1, ta, ma",
+                    "vle32.v v16, ({rk})",
+                    "addi {rk}, {rk}, 16",
+                    "vle32.v v17, ({rk})",
+                    "addi {rk}, {rk}, 16",
+                    "vle32.v v18, ({rk})",
+                    "addi {rk}, {rk}, 16",
+                    "vle32.v v19, ({rk})",
+                    "addi {rk}, {rk}, 16",
+                    "vle32.v v20, ({rk})",
+                    "addi {rk}, {rk}, 16",
+                    "vle32.v v21, ({rk})",
+                    "addi {rk}, {rk}, 16",
+                    "vle32.v v22, ({rk})",
+                    "addi {rk}, {rk}, 16",
+                    "vle32.v v23, ({rk})",
+                    "addi {rk}, {rk}, 16",
+                    "vle32.v v24, ({rk})",
+                    "addi {rk}, {rk}, 16",
+                    "vle32.v v25, ({rk})",
+                    "addi {rk}, {rk}, 16",
+                    "vle32.v v26, ({rk})",
+                    "addi {rk}, {rk}, 16",
+                    "vle32.v v27, ({rk})",
+                    "addi {rk}, {rk}, 16",
+                    "vle32.v v28, ({rk})",
+                    "addi {rk}, {rk}, 16",
+                    "vle32.v v29, ({rk})",
+                    "addi {rk}, {rk}, 16",
+                    "vle32.v v30, ({rk})",
+                    "2:",
+                    "vsetvli {vl}, {avl}, e32, m8, ta, ma",
+                    "vle32.v v8, ({data})",
+                    concat!("vaesz.vs v8, ", $first),
+                    $(concat!($midop, " v8, ", $mid),)*
+                    concat!($lastop, " v8, ", $last),
+                    "vse32.v v8, ({data})",
+                    "slli {t}, {vl}, 2",
+                    "add {data}, {data}, {t}",
+                    "sub {avl}, {avl}, {vl}",
+                    "bnez {avl}, 2b",
+                    ".option pop",
+                    rk = inout(reg) rk => _,
+                    data = inout(reg) data => _,
+                    avl = inout(reg) 4 * blocks => _,
+                    vl = out(reg) _,
+                    t = out(reg) _,
+                    out("v8") _, out("v9") _, out("v10") _, out("v11") _,
+                    out("v12") _, out("v13") _, out("v14") _, out("v15") _,
+                    out("v16") _, out("v17") _, out("v18") _, out("v19") _,
+                    out("v20") _, out("v21") _, out("v22") _, out("v23") _,
+                    out("v24") _, out("v25") _, out("v26") _, out("v27") _,
+                    out("v28") _, out("v29") _, out("v30") _,
+                    options(nostack),
+                );
+            }
         }
     };
 }

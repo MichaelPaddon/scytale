@@ -58,19 +58,21 @@ pub(super) fn prepare(h: &[u64; 2]) -> [u64; 2] {
 /// # Safety
 /// Requires the vector extension and Zvkg.
 pub(super) unsafe fn multiply(value: &mut [u64; 2], h: &[u64; 2]) {
-    let mut group = prepare(value);
-    core::arch::asm!(
-        ".option arch, +v, +zvkg",
-        // Four 32-bit elements make up one 128-bit element group.
-        "vsetivli zero, 4, e32, m1, ta, ma",
-        "vle32.v v0, ({group})",
-        "vle32.v v1, ({h})",
-        "vgmul.vv v0, v1",
-        "vse32.v v0, ({group})",
-        group = in(reg) group.as_mut_ptr(),
-        h = in(reg) h.as_ptr(),
-        out("v0") _, out("v1") _,
-        options(nostack),
-    );
-    *value = prepare(&group);
+    unsafe {
+        let mut group = prepare(value);
+        core::arch::asm!(
+            ".option arch, +v, +zvkg",
+            // Four 32-bit elements make up one 128-bit element group.
+            "vsetivli zero, 4, e32, m1, ta, ma",
+            "vle32.v v0, ({group})",
+            "vle32.v v1, ({h})",
+            "vgmul.vv v0, v1",
+            "vse32.v v0, ({group})",
+            group = in(reg) group.as_mut_ptr(),
+            h = in(reg) h.as_ptr(),
+            out("v0") _, out("v1") _,
+            options(nostack),
+        );
+        *value = prepare(&group);
+    }
 }

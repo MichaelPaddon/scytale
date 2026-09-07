@@ -62,52 +62,54 @@ pub(super) fn prepare(h: &[u64; 2]) -> [u64; 2] {
 /// # Safety
 /// Requires `pclmulqdq`.
 pub(super) unsafe fn multiply(value: &mut [u64; 2], h: &[u64; 2]) {
-    core::arch::asm!(
-        // The words are held most significant first; a register
-        // wants them the other way round. The subkey is already in
-        // register order from prepare.
-        "movdqu    xmm0, [{value}]",
-        "pshufd    xmm0, xmm0, 0x4e",
-        "movdqu    xmm1, [{h}]",
+    unsafe {
+        core::arch::asm!(
+            // The words are held most significant first; a register
+            // wants them the other way round. The subkey is already in
+            // register order from prepare.
+            "movdqu    xmm0, [{value}]",
+            "pshufd    xmm0, xmm0, 0x4e",
+            "movdqu    xmm1, [{h}]",
 
-        // The four cross products of the two halves. The two middle
-        // ones belong half in each end of the 256-bit result.
-        "movdqa    xmm2, xmm0",
-        "pclmulqdq xmm2, xmm1, 0x00",
-        "movdqa    xmm3, xmm0",
-        "pclmulqdq xmm3, xmm1, 0x11",
-        "movdqa    xmm4, xmm0",
-        "pclmulqdq xmm4, xmm1, 0x10",
-        "movdqa    xmm5, xmm0",
-        "pclmulqdq xmm5, xmm1, 0x01",
-        "pxor      xmm4, xmm5",
-        "movdqa    xmm5, xmm4",
-        "pslldq    xmm4, 8",
-        "psrldq    xmm5, 8",
-        "pxor      xmm2, xmm4",
-        "pxor      xmm3, xmm5",
+            // The four cross products of the two halves. The two middle
+            // ones belong half in each end of the 256-bit result.
+            "movdqa    xmm2, xmm0",
+            "pclmulqdq xmm2, xmm1, 0x00",
+            "movdqa    xmm3, xmm0",
+            "pclmulqdq xmm3, xmm1, 0x11",
+            "movdqa    xmm4, xmm0",
+            "pclmulqdq xmm4, xmm1, 0x10",
+            "movdqa    xmm5, xmm0",
+            "pclmulqdq xmm5, xmm1, 0x01",
+            "pxor      xmm4, xmm5",
+            "movdqa    xmm5, xmm4",
+            "pslldq    xmm4, 8",
+            "psrldq    xmm5, 8",
+            "pxor      xmm2, xmm4",
+            "pxor      xmm3, xmm5",
 
-        // Fold the excess down in two halves.
-        "movq      xmm6, {polynomial}",
-        "movdqa    xmm4, xmm6",
-        "pclmulqdq xmm4, xmm2, 0x00",
-        "pshufd    xmm5, xmm2, 0x4e",
-        "pxor      xmm5, xmm4",
-        "movdqa    xmm4, xmm6",
-        "pclmulqdq xmm4, xmm5, 0x00",
-        "pshufd    xmm2, xmm5, 0x4e",
-        "pxor      xmm2, xmm4",
-        "pxor      xmm3, xmm2",
+            // Fold the excess down in two halves.
+            "movq      xmm6, {polynomial}",
+            "movdqa    xmm4, xmm6",
+            "pclmulqdq xmm4, xmm2, 0x00",
+            "pshufd    xmm5, xmm2, 0x4e",
+            "pxor      xmm5, xmm4",
+            "movdqa    xmm4, xmm6",
+            "pclmulqdq xmm4, xmm5, 0x00",
+            "pshufd    xmm2, xmm5, 0x4e",
+            "pxor      xmm2, xmm4",
+            "pxor      xmm3, xmm2",
 
-        "pshufd    xmm3, xmm3, 0x4e",
-        "movdqu    [{value}], xmm3",
-        value = in(reg) value.as_mut_ptr(),
-        h = in(reg) h.as_ptr(),
-        polynomial = in(reg) POLYNOMIAL,
-        out("xmm0") _, out("xmm1") _, out("xmm2") _,
-        out("xmm3") _, out("xmm4") _, out("xmm5") _, out("xmm6") _,
-        options(nostack),
-    );
+            "pshufd    xmm3, xmm3, 0x4e",
+            "movdqu    [{value}], xmm3",
+            value = in(reg) value.as_mut_ptr(),
+            h = in(reg) h.as_ptr(),
+            polynomial = in(reg) POLYNOMIAL,
+            out("xmm0") _, out("xmm1") _, out("xmm2") _,
+            out("xmm3") _, out("xmm4") _, out("xmm5") _, out("xmm6") _,
+            options(nostack),
+        );
+    }
 }
 
 /// Multiplies in the whole of `blocks`, which is [`GROUP`] blocks,
@@ -128,71 +130,73 @@ pub(super) unsafe fn multiply_group(
     powers: &[[u64; 2]; super::MAX_GROUP],
     blocks: &[u8],
 ) {
-    debug_assert_eq!(blocks.len(), GROUP * super::BLOCK);
-    let count = GROUP as u32;
-    core::arch::asm!(
-        "movdqu    xmm7, [{reverse}]",
-        "pxor      xmm0, xmm0",
-        "pxor      xmm1, xmm1",
-        "pxor      xmm2, xmm2",
-        // The running hash joins the first block and nothing after
-        // it, so the register holding it is cleared once used.
-        "movdqu    xmm3, [{value}]",
-        "pshufd    xmm3, xmm3, 0x4e",
+    unsafe {
+        debug_assert_eq!(blocks.len(), GROUP * super::BLOCK);
+        let count = GROUP as u32;
+        core::arch::asm!(
+            "movdqu    xmm7, [{reverse}]",
+            "pxor      xmm0, xmm0",
+            "pxor      xmm1, xmm1",
+            "pxor      xmm2, xmm2",
+            // The running hash joins the first block and nothing after
+            // it, so the register holding it is cleared once used.
+            "movdqu    xmm3, [{value}]",
+            "pshufd    xmm3, xmm3, 0x4e",
 
-        "2:",
-        "movdqu    xmm4, [{blocks}]",
-        "pshufb    xmm4, xmm7",
-        "pxor      xmm4, xmm3",
-        "pxor      xmm3, xmm3",
-        "movdqu    xmm5, [{powers}]",
-        "movdqa    xmm6, xmm4",
-        "pclmulqdq xmm6, xmm5, 0x00",
-        "pxor      xmm0, xmm6",
-        "movdqa    xmm6, xmm4",
-        "pclmulqdq xmm6, xmm5, 0x11",
-        "pxor      xmm2, xmm6",
-        "movdqa    xmm6, xmm4",
-        "pclmulqdq xmm6, xmm5, 0x10",
-        "pxor      xmm1, xmm6",
-        "pclmulqdq xmm4, xmm5, 0x01",
-        "pxor      xmm1, xmm4",
-        "add       {blocks}, 16",
-        "sub       {powers}, 16",
-        "dec       {count:e}",
-        "jnz       2b",
+            "2:",
+            "movdqu    xmm4, [{blocks}]",
+            "pshufb    xmm4, xmm7",
+            "pxor      xmm4, xmm3",
+            "pxor      xmm3, xmm3",
+            "movdqu    xmm5, [{powers}]",
+            "movdqa    xmm6, xmm4",
+            "pclmulqdq xmm6, xmm5, 0x00",
+            "pxor      xmm0, xmm6",
+            "movdqa    xmm6, xmm4",
+            "pclmulqdq xmm6, xmm5, 0x11",
+            "pxor      xmm2, xmm6",
+            "movdqa    xmm6, xmm4",
+            "pclmulqdq xmm6, xmm5, 0x10",
+            "pxor      xmm1, xmm6",
+            "pclmulqdq xmm4, xmm5, 0x01",
+            "pxor      xmm1, xmm4",
+            "add       {blocks}, 16",
+            "sub       {powers}, 16",
+            "dec       {count:e}",
+            "jnz       2b",
 
-        // The middle third belongs half in each of the other two.
-        "movdqa    xmm4, xmm1",
-        "pslldq    xmm1, 8",
-        "psrldq    xmm4, 8",
-        "pxor      xmm0, xmm1",
-        "pxor      xmm2, xmm4",
+            // The middle third belongs half in each of the other two.
+            "movdqa    xmm4, xmm1",
+            "pslldq    xmm1, 8",
+            "psrldq    xmm4, 8",
+            "pxor      xmm0, xmm1",
+            "pxor      xmm2, xmm4",
 
-        // Fold the excess down in two halves, as for one block.
-        "movq      xmm6, {polynomial}",
-        "movdqa    xmm4, xmm6",
-        "pclmulqdq xmm4, xmm0, 0x00",
-        "pshufd    xmm5, xmm0, 0x4e",
-        "pxor      xmm5, xmm4",
-        "movdqa    xmm4, xmm6",
-        "pclmulqdq xmm4, xmm5, 0x00",
-        "pshufd    xmm0, xmm5, 0x4e",
-        "pxor      xmm0, xmm4",
-        "pxor      xmm2, xmm0",
+            // Fold the excess down in two halves, as for one block.
+            "movq      xmm6, {polynomial}",
+            "movdqa    xmm4, xmm6",
+            "pclmulqdq xmm4, xmm0, 0x00",
+            "pshufd    xmm5, xmm0, 0x4e",
+            "pxor      xmm5, xmm4",
+            "movdqa    xmm4, xmm6",
+            "pclmulqdq xmm4, xmm5, 0x00",
+            "pshufd    xmm0, xmm5, 0x4e",
+            "pxor      xmm0, xmm4",
+            "pxor      xmm2, xmm0",
 
-        "pshufd    xmm2, xmm2, 0x4e",
-        "movdqu    [{value}], xmm2",
-        value = in(reg) value.as_mut_ptr(),
-        // The first block meets the highest power, so this walks
-        // backwards through the table.
-        powers = inout(reg) powers.as_ptr().add(GROUP - 1) => _,
-        blocks = inout(reg) blocks.as_ptr() => _,
-        count = inout(reg) count => _,
-        reverse = in(reg) REVERSE.as_ptr(),
-        polynomial = in(reg) POLYNOMIAL,
-        out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
-        out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
-        options(nostack),
-    );
+            "pshufd    xmm2, xmm2, 0x4e",
+            "movdqu    [{value}], xmm2",
+            value = in(reg) value.as_mut_ptr(),
+            // The first block meets the highest power, so this walks
+            // backwards through the table.
+            powers = inout(reg) powers.as_ptr().add(GROUP - 1) => _,
+            blocks = inout(reg) blocks.as_ptr() => _,
+            count = inout(reg) count => _,
+            reverse = in(reg) REVERSE.as_ptr(),
+            polynomial = in(reg) POLYNOMIAL,
+            out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
+            out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
+            options(nostack),
+        );
+    }
 }

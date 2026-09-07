@@ -41,8 +41,10 @@ impl Compress32 for ShaNi {
     }
 
     unsafe fn compress(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
-        if !blocks.is_empty() {
-            compress(state, blocks.as_ptr().cast(), blocks.len());
+        unsafe {
+            if !blocks.is_empty() {
+                compress(state, blocks.as_ptr().cast(), blocks.len());
+            }
         }
     }
 }
@@ -110,110 +112,112 @@ macro_rules! load4 {
 /// Requires SHA-NI, SSSE3 and SSE4.1; `data` must point at `count`
 /// whole blocks.
 unsafe fn compress(state: &mut [u32; 8], data: *const u8, count: usize) {
-    // State words a..h in memory become ABEF in xmm1 and CDGH in
-    // xmm2, the layout the instructions want, and are put back at
-    // the end.
-    core::arch::asm!(
-        "movdqu xmm1, [{state}]",
-        "movdqu xmm2, [{state} + 16]",
-        "movdqa xmm8, [{swap}]",
-        "pshufd xmm1, xmm1, 0xb1",
-        "pshufd xmm2, xmm2, 0x1b",
-        "movdqa xmm7, xmm1",
-        "palignr xmm1, xmm2, 8",
-        "pblendw xmm2, xmm7, 0xf0",
+    unsafe {
+        // State words a..h in memory become ABEF in xmm1 and CDGH in
+        // xmm2, the layout the instructions want, and are put back at
+        // the end.
+        core::arch::asm!(
+            "movdqu xmm1, [{state}]",
+            "movdqu xmm2, [{state} + 16]",
+            "movdqa xmm8, [{swap}]",
+            "pshufd xmm1, xmm1, 0xb1",
+            "pshufd xmm2, xmm2, 0x1b",
+            "movdqa xmm7, xmm1",
+            "palignr xmm1, xmm2, 8",
+            "pblendw xmm2, xmm7, 0xf0",
 
-        "2:",
-        "movdqa xmm9, xmm1",
-        "movdqa xmm10, xmm2",
+            "2:",
+            "movdqa xmm9, xmm1",
+            "movdqa xmm10, xmm2",
 
-        // Rounds 0 to 15: load, then round, then start the schedule.
-        load4!(0, "xmm3"),
-        "movdqu xmm0, [{k}]",
-        "paddd xmm0, xmm3",
-        "sha256rnds2 xmm2, xmm1",
-        "pshufd xmm0, xmm0, 0x0e",
-        "sha256rnds2 xmm1, xmm2",
+            // Rounds 0 to 15: load, then round, then start the schedule.
+            load4!(0, "xmm3"),
+            "movdqu xmm0, [{k}]",
+            "paddd xmm0, xmm3",
+            "sha256rnds2 xmm2, xmm1",
+            "pshufd xmm0, xmm0, 0x0e",
+            "sha256rnds2 xmm1, xmm2",
 
-        load4!(16, "xmm4"),
-        "movdqu xmm0, [{k} + 16]",
-        "paddd xmm0, xmm4",
-        "sha256rnds2 xmm2, xmm1",
-        "pshufd xmm0, xmm0, 0x0e",
-        "sha256rnds2 xmm1, xmm2",
-        "sha256msg1 xmm3, xmm4",
+            load4!(16, "xmm4"),
+            "movdqu xmm0, [{k} + 16]",
+            "paddd xmm0, xmm4",
+            "sha256rnds2 xmm2, xmm1",
+            "pshufd xmm0, xmm0, 0x0e",
+            "sha256rnds2 xmm1, xmm2",
+            "sha256msg1 xmm3, xmm4",
 
-        load4!(32, "xmm5"),
-        "movdqu xmm0, [{k} + 32]",
-        "paddd xmm0, xmm5",
-        "sha256rnds2 xmm2, xmm1",
-        "pshufd xmm0, xmm0, 0x0e",
-        "sha256rnds2 xmm1, xmm2",
-        "sha256msg1 xmm4, xmm5",
+            load4!(32, "xmm5"),
+            "movdqu xmm0, [{k} + 32]",
+            "paddd xmm0, xmm5",
+            "sha256rnds2 xmm2, xmm1",
+            "pshufd xmm0, xmm0, 0x0e",
+            "sha256rnds2 xmm1, xmm2",
+            "sha256msg1 xmm4, xmm5",
 
-        load4!(48, "xmm6"),
-        rounds4!(48, "xmm6", "xmm3", "xmm4", "xmm5"),
-        // Rounds 16 to 51: full schedule.
-        rounds4!(64, "xmm3", "xmm4", "xmm5", "xmm6"),
-        rounds4!(80, "xmm4", "xmm5", "xmm6", "xmm3"),
-        rounds4!(96, "xmm5", "xmm6", "xmm3", "xmm4"),
-        rounds4!(112, "xmm6", "xmm3", "xmm4", "xmm5"),
-        rounds4!(128, "xmm3", "xmm4", "xmm5", "xmm6"),
-        rounds4!(144, "xmm4", "xmm5", "xmm6", "xmm3"),
-        rounds4!(160, "xmm5", "xmm6", "xmm3", "xmm4"),
-        rounds4!(176, "xmm6", "xmm3", "xmm4", "xmm5"),
-        rounds4!(192, "xmm3", "xmm4", "xmm5", "xmm6"),
-        // Rounds 52 to 59: msg2 only, the last words to finish.
-        "movdqu xmm0, [{k} + 208]",
-        "paddd xmm0, xmm4",
-        "sha256rnds2 xmm2, xmm1",
-        "pshufd xmm0, xmm0, 0x0e",
-        "sha256rnds2 xmm1, xmm2",
-        "movdqa xmm7, xmm4",
-        "palignr xmm7, xmm3, 4",
-        "paddd xmm5, xmm7",
-        "sha256msg2 xmm5, xmm4",
+            load4!(48, "xmm6"),
+            rounds4!(48, "xmm6", "xmm3", "xmm4", "xmm5"),
+            // Rounds 16 to 51: full schedule.
+            rounds4!(64, "xmm3", "xmm4", "xmm5", "xmm6"),
+            rounds4!(80, "xmm4", "xmm5", "xmm6", "xmm3"),
+            rounds4!(96, "xmm5", "xmm6", "xmm3", "xmm4"),
+            rounds4!(112, "xmm6", "xmm3", "xmm4", "xmm5"),
+            rounds4!(128, "xmm3", "xmm4", "xmm5", "xmm6"),
+            rounds4!(144, "xmm4", "xmm5", "xmm6", "xmm3"),
+            rounds4!(160, "xmm5", "xmm6", "xmm3", "xmm4"),
+            rounds4!(176, "xmm6", "xmm3", "xmm4", "xmm5"),
+            rounds4!(192, "xmm3", "xmm4", "xmm5", "xmm6"),
+            // Rounds 52 to 59: msg2 only, the last words to finish.
+            "movdqu xmm0, [{k} + 208]",
+            "paddd xmm0, xmm4",
+            "sha256rnds2 xmm2, xmm1",
+            "pshufd xmm0, xmm0, 0x0e",
+            "sha256rnds2 xmm1, xmm2",
+            "movdqa xmm7, xmm4",
+            "palignr xmm7, xmm3, 4",
+            "paddd xmm5, xmm7",
+            "sha256msg2 xmm5, xmm4",
 
-        "movdqu xmm0, [{k} + 224]",
-        "paddd xmm0, xmm5",
-        "sha256rnds2 xmm2, xmm1",
-        "pshufd xmm0, xmm0, 0x0e",
-        "sha256rnds2 xmm1, xmm2",
-        "movdqa xmm7, xmm5",
-        "palignr xmm7, xmm4, 4",
-        "paddd xmm6, xmm7",
-        "sha256msg2 xmm6, xmm5",
+            "movdqu xmm0, [{k} + 224]",
+            "paddd xmm0, xmm5",
+            "sha256rnds2 xmm2, xmm1",
+            "pshufd xmm0, xmm0, 0x0e",
+            "sha256rnds2 xmm1, xmm2",
+            "movdqa xmm7, xmm5",
+            "palignr xmm7, xmm4, 4",
+            "paddd xmm6, xmm7",
+            "sha256msg2 xmm6, xmm5",
 
-        // Rounds 60 to 63.
-        "movdqu xmm0, [{k} + 240]",
-        "paddd xmm0, xmm6",
-        "sha256rnds2 xmm2, xmm1",
-        "pshufd xmm0, xmm0, 0x0e",
-        "sha256rnds2 xmm1, xmm2",
+            // Rounds 60 to 63.
+            "movdqu xmm0, [{k} + 240]",
+            "paddd xmm0, xmm6",
+            "sha256rnds2 xmm2, xmm1",
+            "pshufd xmm0, xmm0, 0x0e",
+            "sha256rnds2 xmm1, xmm2",
 
-        "paddd xmm1, xmm9",
-        "paddd xmm2, xmm10",
-        "add {data}, 64",
-        "dec {count}",
-        "jnz 2b",
+            "paddd xmm1, xmm9",
+            "paddd xmm2, xmm10",
+            "add {data}, 64",
+            "dec {count}",
+            "jnz 2b",
 
-        "pshufd xmm1, xmm1, 0x1b",
-        "pshufd xmm2, xmm2, 0xb1",
-        "movdqa xmm7, xmm1",
-        "pblendw xmm1, xmm2, 0xf0",
-        "palignr xmm2, xmm7, 8",
-        "movdqu [{state}], xmm1",
-        "movdqu [{state} + 16], xmm2",
-        state = in(reg) state.as_mut_ptr(),
-        k = in(reg) K256.as_ptr(),
-        swap = in(reg) BYTE_SWAP.0.as_ptr(),
-        data = inout(reg) data => _,
-        count = inout(reg) count => _,
-        out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
-        out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
-        out("xmm8") _, out("xmm9") _, out("xmm10") _,
-        options(nostack),
-    );
+            "pshufd xmm1, xmm1, 0x1b",
+            "pshufd xmm2, xmm2, 0xb1",
+            "movdqa xmm7, xmm1",
+            "pblendw xmm1, xmm2, 0xf0",
+            "palignr xmm2, xmm7, 8",
+            "movdqu [{state}], xmm1",
+            "movdqu [{state} + 16], xmm2",
+            state = in(reg) state.as_mut_ptr(),
+            k = in(reg) K256.as_ptr(),
+            swap = in(reg) BYTE_SWAP.0.as_ptr(),
+            data = inout(reg) data => _,
+            count = inout(reg) count => _,
+            out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
+            out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
+            out("xmm8") _, out("xmm9") _, out("xmm10") _,
+            options(nostack),
+        );
+    }
 }
 
 #[cfg(test)]

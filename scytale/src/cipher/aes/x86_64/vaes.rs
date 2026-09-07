@@ -90,9 +90,11 @@ impl<const K: usize> Aes<K> {
     /// The caller must have confirmed that VAES, AVX2 and operating
     /// system support for 256-bit registers are available.
     pub(crate) unsafe fn new_unchecked(key: &[u8; K]) -> Result<Self, Error> {
-        let size = KeySize::for_key(key)?;
-        let keys = expand(key, size);
-        Ok(Aes { keys })
+        unsafe {
+            let size = KeySize::for_key(key)?;
+            let keys = expand(key, size);
+            Ok(Aes { keys })
+        }
     }
 
     /// Number of rounds: 10, 12 or 14 depending on key size.
@@ -181,16 +183,18 @@ impl<const K: usize> BlockCipher for Aes<K> {
 /// # Safety
 /// Requires VAES and AVX2; `data.len()` must be a multiple of 32.
 unsafe fn encrypt_pairs(keys: &RoundKeys, data: &mut [u8]) {
-    run(
-        keys.enc.as_ptr(),
-        keys.size.rounds(),
-        data,
-        encrypt8,
-        [
-            encrypt1, encrypt2, encrypt3, encrypt4, encrypt5, encrypt6,
-            encrypt7,
-        ],
-    )
+    unsafe {
+        run(
+            keys.enc.as_ptr(),
+            keys.size.rounds(),
+            data,
+            encrypt8,
+            [
+                encrypt1, encrypt2, encrypt3, encrypt4, encrypt5, encrypt6,
+                encrypt7,
+            ],
+        )
+    }
 }
 
 /// Decrypts a whole number of block pairs.
@@ -198,16 +202,18 @@ unsafe fn encrypt_pairs(keys: &RoundKeys, data: &mut [u8]) {
 /// # Safety
 /// Requires VAES and AVX2; `data.len()` must be a multiple of 32.
 unsafe fn decrypt_pairs(keys: &RoundKeys, data: &mut [u8]) {
-    run(
-        keys.dec.as_ptr(),
-        keys.size.rounds(),
-        data,
-        decrypt8,
-        [
-            decrypt1, decrypt2, decrypt3, decrypt4, decrypt5, decrypt6,
-            decrypt7,
-        ],
-    )
+    unsafe {
+        run(
+            keys.dec.as_ptr(),
+            keys.size.rounds(),
+            data,
+            decrypt8,
+            [
+                decrypt1, decrypt2, decrypt3, decrypt4, decrypt5, decrypt6,
+                decrypt7,
+            ],
+        )
+    }
 }
 
 /// A body that processes `n` register pairs at `data`.
@@ -226,15 +232,17 @@ unsafe fn run(
     groups: unsafe fn(*const u32, usize, *mut u8, usize),
     tails: [Body; 7],
 ) {
-    let pairs = data.len() / PAIR;
-    let full = pairs / 8;
-    let mut p = data.as_mut_ptr();
-    if full > 0 {
-        groups(rk, rounds, p, full);
-        p = p.add(full * 8 * PAIR);
-    }
-    if let Some(tail) = (pairs % 8).checked_sub(1) {
-        tails[tail](rk, rounds, p);
+    unsafe {
+        let pairs = data.len() / PAIR;
+        let full = pairs / 8;
+        let mut p = data.as_mut_ptr();
+        if full > 0 {
+            groups(rk, rounds, p, full);
+            p = p.add(full * 8 * PAIR);
+        }
+        if let Some(tail) = (pairs % 8).checked_sub(1) {
+            tails[tail](rk, rounds, p);
+        }
     }
 }
 
@@ -254,32 +262,34 @@ macro_rules! body {
         /// Requires VAES and AVX2; `rk` must point at `rounds + 1`
         /// round keys and `data` at the pairs this body handles.
         unsafe fn $name(rk: *const u32, rounds: usize, data: *mut u8) {
-            core::arch::asm!(
-                "vbroadcasti128 ymm8, [{rk}]",
-                $(concat!("vmovdqu ", $r, ", [{data} + ", $off, "]"),)+
-                $(concat!("vpxor ", $r, ", ", $r, ", ymm8"),)+
-                "lea {k}, [{rk} + 16]",
-                "mov {n}, {nr}",
-                "2:",
-                "vbroadcasti128 ymm8, [{k}]",
-                $(concat!($mid, " ", $r, ", ", $r, ", ymm8"),)+
-                "add {k}, 16",
-                "dec {n}",
-                "jnz 2b",
-                "vbroadcasti128 ymm8, [{k}]",
-                $(concat!($last, " ", $r, ", ", $r, ", ymm8"),)+
-                $(concat!("vmovdqu [{data} + ", $off, "], ", $r),)+
-                "vzeroupper",
-                rk = in(reg) rk,
-                nr = in(reg) rounds - 1,
-                data = in(reg) data,
-                k = out(reg) _,
-                n = out(reg) _,
-                out("ymm0") _, out("ymm1") _, out("ymm2") _, out("ymm3") _,
-                out("ymm4") _, out("ymm5") _, out("ymm6") _, out("ymm7") _,
-                out("ymm8") _,
-                options(nostack),
-            );
+            unsafe {
+                core::arch::asm!(
+                    "vbroadcasti128 ymm8, [{rk}]",
+                    $(concat!("vmovdqu ", $r, ", [{data} + ", $off, "]"),)+
+                    $(concat!("vpxor ", $r, ", ", $r, ", ymm8"),)+
+                    "lea {k}, [{rk} + 16]",
+                    "mov {n}, {nr}",
+                    "2:",
+                    "vbroadcasti128 ymm8, [{k}]",
+                    $(concat!($mid, " ", $r, ", ", $r, ", ymm8"),)+
+                    "add {k}, 16",
+                    "dec {n}",
+                    "jnz 2b",
+                    "vbroadcasti128 ymm8, [{k}]",
+                    $(concat!($last, " ", $r, ", ", $r, ", ymm8"),)+
+                    $(concat!("vmovdqu [{data} + ", $off, "], ", $r),)+
+                    "vzeroupper",
+                    rk = in(reg) rk,
+                    nr = in(reg) rounds - 1,
+                    data = in(reg) data,
+                    k = out(reg) _,
+                    n = out(reg) _,
+                    out("ymm0") _, out("ymm1") _, out("ymm2") _, out("ymm3") _,
+                    out("ymm4") _, out("ymm5") _, out("ymm6") _, out("ymm7") _,
+                    out("ymm8") _,
+                    options(nostack),
+                );
+            }
         }
     };
 }
@@ -297,72 +307,74 @@ macro_rules! groups {
             data: *mut u8,
             groups: usize,
         ) {
-            core::arch::asm!(
-                "3:",
-                "vbroadcasti128 ymm8, [{rk}]",
-                "vmovdqu ymm0, [{data}]",
-                "vmovdqu ymm1, [{data} + 32]",
-                "vmovdqu ymm2, [{data} + 64]",
-                "vmovdqu ymm3, [{data} + 96]",
-                "vmovdqu ymm4, [{data} + 128]",
-                "vmovdqu ymm5, [{data} + 160]",
-                "vmovdqu ymm6, [{data} + 192]",
-                "vmovdqu ymm7, [{data} + 224]",
-                "vpxor ymm0, ymm0, ymm8",
-                "vpxor ymm1, ymm1, ymm8",
-                "vpxor ymm2, ymm2, ymm8",
-                "vpxor ymm3, ymm3, ymm8",
-                "vpxor ymm4, ymm4, ymm8",
-                "vpxor ymm5, ymm5, ymm8",
-                "vpxor ymm6, ymm6, ymm8",
-                "vpxor ymm7, ymm7, ymm8",
-                "lea {k}, [{rk} + 16]",
-                "mov {n}, {nr}",
-                "2:",
-                "vbroadcasti128 ymm8, [{k}]",
-                concat!($mid, " ymm0, ymm0, ymm8"),
-                concat!($mid, " ymm1, ymm1, ymm8"),
-                concat!($mid, " ymm2, ymm2, ymm8"),
-                concat!($mid, " ymm3, ymm3, ymm8"),
-                concat!($mid, " ymm4, ymm4, ymm8"),
-                concat!($mid, " ymm5, ymm5, ymm8"),
-                concat!($mid, " ymm6, ymm6, ymm8"),
-                concat!($mid, " ymm7, ymm7, ymm8"),
-                "add {k}, 16",
-                "dec {n}",
-                "jnz 2b",
-                "vbroadcasti128 ymm8, [{k}]",
-                concat!($last, " ymm0, ymm0, ymm8"),
-                concat!($last, " ymm1, ymm1, ymm8"),
-                concat!($last, " ymm2, ymm2, ymm8"),
-                concat!($last, " ymm3, ymm3, ymm8"),
-                concat!($last, " ymm4, ymm4, ymm8"),
-                concat!($last, " ymm5, ymm5, ymm8"),
-                concat!($last, " ymm6, ymm6, ymm8"),
-                concat!($last, " ymm7, ymm7, ymm8"),
-                "vmovdqu [{data}], ymm0",
-                "vmovdqu [{data} + 32], ymm1",
-                "vmovdqu [{data} + 64], ymm2",
-                "vmovdqu [{data} + 96], ymm3",
-                "vmovdqu [{data} + 128], ymm4",
-                "vmovdqu [{data} + 160], ymm5",
-                "vmovdqu [{data} + 192], ymm6",
-                "vmovdqu [{data} + 224], ymm7",
-                "add {data}, 256",
-                "dec {groups}",
-                "jnz 3b",
-                "vzeroupper",
-                rk = in(reg) rk,
-                nr = in(reg) rounds - 1,
-                data = inout(reg) data => _,
-                groups = inout(reg) groups => _,
-                k = out(reg) _,
-                n = out(reg) _,
-                out("ymm0") _, out("ymm1") _, out("ymm2") _, out("ymm3") _,
-                out("ymm4") _, out("ymm5") _, out("ymm6") _, out("ymm7") _,
-                out("ymm8") _,
-                options(nostack),
-            );
+            unsafe {
+                core::arch::asm!(
+                    "3:",
+                    "vbroadcasti128 ymm8, [{rk}]",
+                    "vmovdqu ymm0, [{data}]",
+                    "vmovdqu ymm1, [{data} + 32]",
+                    "vmovdqu ymm2, [{data} + 64]",
+                    "vmovdqu ymm3, [{data} + 96]",
+                    "vmovdqu ymm4, [{data} + 128]",
+                    "vmovdqu ymm5, [{data} + 160]",
+                    "vmovdqu ymm6, [{data} + 192]",
+                    "vmovdqu ymm7, [{data} + 224]",
+                    "vpxor ymm0, ymm0, ymm8",
+                    "vpxor ymm1, ymm1, ymm8",
+                    "vpxor ymm2, ymm2, ymm8",
+                    "vpxor ymm3, ymm3, ymm8",
+                    "vpxor ymm4, ymm4, ymm8",
+                    "vpxor ymm5, ymm5, ymm8",
+                    "vpxor ymm6, ymm6, ymm8",
+                    "vpxor ymm7, ymm7, ymm8",
+                    "lea {k}, [{rk} + 16]",
+                    "mov {n}, {nr}",
+                    "2:",
+                    "vbroadcasti128 ymm8, [{k}]",
+                    concat!($mid, " ymm0, ymm0, ymm8"),
+                    concat!($mid, " ymm1, ymm1, ymm8"),
+                    concat!($mid, " ymm2, ymm2, ymm8"),
+                    concat!($mid, " ymm3, ymm3, ymm8"),
+                    concat!($mid, " ymm4, ymm4, ymm8"),
+                    concat!($mid, " ymm5, ymm5, ymm8"),
+                    concat!($mid, " ymm6, ymm6, ymm8"),
+                    concat!($mid, " ymm7, ymm7, ymm8"),
+                    "add {k}, 16",
+                    "dec {n}",
+                    "jnz 2b",
+                    "vbroadcasti128 ymm8, [{k}]",
+                    concat!($last, " ymm0, ymm0, ymm8"),
+                    concat!($last, " ymm1, ymm1, ymm8"),
+                    concat!($last, " ymm2, ymm2, ymm8"),
+                    concat!($last, " ymm3, ymm3, ymm8"),
+                    concat!($last, " ymm4, ymm4, ymm8"),
+                    concat!($last, " ymm5, ymm5, ymm8"),
+                    concat!($last, " ymm6, ymm6, ymm8"),
+                    concat!($last, " ymm7, ymm7, ymm8"),
+                    "vmovdqu [{data}], ymm0",
+                    "vmovdqu [{data} + 32], ymm1",
+                    "vmovdqu [{data} + 64], ymm2",
+                    "vmovdqu [{data} + 96], ymm3",
+                    "vmovdqu [{data} + 128], ymm4",
+                    "vmovdqu [{data} + 160], ymm5",
+                    "vmovdqu [{data} + 192], ymm6",
+                    "vmovdqu [{data} + 224], ymm7",
+                    "add {data}, 256",
+                    "dec {groups}",
+                    "jnz 3b",
+                    "vzeroupper",
+                    rk = in(reg) rk,
+                    nr = in(reg) rounds - 1,
+                    data = inout(reg) data => _,
+                    groups = inout(reg) groups => _,
+                    k = out(reg) _,
+                    n = out(reg) _,
+                    out("ymm0") _, out("ymm1") _, out("ymm2") _, out("ymm3") _,
+                    out("ymm4") _, out("ymm5") _, out("ymm6") _, out("ymm7") _,
+                    out("ymm8") _,
+                    options(nostack),
+                );
+            }
         }
     };
 }

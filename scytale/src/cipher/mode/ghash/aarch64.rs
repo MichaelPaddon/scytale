@@ -76,49 +76,51 @@ pub(super) fn prepare(h: &[u64; 2]) -> [u64; 2] {
 /// Requires the polynomial multiply.
 #[target_feature(enable = "aes")]
 pub(super) unsafe fn multiply(value: &mut [u64; 2], h: &[u64; 2]) {
-    core::arch::asm!(
-        // The words are held most significant first; a register
-        // wants them the other way round. The subkey is already in
-        // register order from prepare.
-        "ld1    {{v0.2d}}, [{value}]",
-        "ext    v0.16b, v0.16b, v0.16b, #8",
-        "ld1    {{v1.2d}}, [{h}]",
-        "movi   v7.16b, #0",
-        "fmov   d16, {polynomial}",
+    unsafe {
+        core::arch::asm!(
+            // The words are held most significant first; a register
+            // wants them the other way round. The subkey is already in
+            // register order from prepare.
+            "ld1    {{v0.2d}}, [{value}]",
+            "ext    v0.16b, v0.16b, v0.16b, #8",
+            "ld1    {{v1.2d}}, [{h}]",
+            "movi   v7.16b, #0",
+            "fmov   d16, {polynomial}",
 
-        // The four cross products of the two halves. Swapping the
-        // subkey's halves brings the two middle ones into reach of
-        // the same pair of instructions.
-        "pmull  v2.1q, v0.1d, v1.1d",
-        "pmull2 v3.1q, v0.2d, v1.2d",
-        "ext    v4.16b, v1.16b, v1.16b, #8",
-        "pmull  v5.1q, v0.1d, v4.1d",
-        "pmull2 v6.1q, v0.2d, v4.2d",
-        "eor    v5.16b, v5.16b, v6.16b",
+            // The four cross products of the two halves. Swapping the
+            // subkey's halves brings the two middle ones into reach of
+            // the same pair of instructions.
+            "pmull  v2.1q, v0.1d, v1.1d",
+            "pmull2 v3.1q, v0.2d, v1.2d",
+            "ext    v4.16b, v1.16b, v1.16b, #8",
+            "pmull  v5.1q, v0.1d, v4.1d",
+            "pmull2 v6.1q, v0.2d, v4.2d",
+            "eor    v5.16b, v5.16b, v6.16b",
 
-        // The middle products belong half in each end of the result.
-        "ext    v6.16b, v7.16b, v5.16b, #8",
-        "ext    v4.16b, v5.16b, v7.16b, #8",
-        "eor    v2.16b, v2.16b, v6.16b",
-        "eor    v3.16b, v3.16b, v4.16b",
+            // The middle products belong half in each end of the result.
+            "ext    v6.16b, v7.16b, v5.16b, #8",
+            "ext    v4.16b, v5.16b, v7.16b, #8",
+            "eor    v2.16b, v2.16b, v6.16b",
+            "eor    v3.16b, v3.16b, v4.16b",
 
-        // Fold the excess down in two halves.
-        "pmull  v4.1q, v16.1d, v2.1d",
-        "ext    v5.16b, v2.16b, v2.16b, #8",
-        "eor    v5.16b, v5.16b, v4.16b",
-        "pmull  v4.1q, v16.1d, v5.1d",
-        "ext    v2.16b, v5.16b, v5.16b, #8",
-        "eor    v2.16b, v2.16b, v4.16b",
-        "eor    v3.16b, v3.16b, v2.16b",
+            // Fold the excess down in two halves.
+            "pmull  v4.1q, v16.1d, v2.1d",
+            "ext    v5.16b, v2.16b, v2.16b, #8",
+            "eor    v5.16b, v5.16b, v4.16b",
+            "pmull  v4.1q, v16.1d, v5.1d",
+            "ext    v2.16b, v5.16b, v5.16b, #8",
+            "eor    v2.16b, v2.16b, v4.16b",
+            "eor    v3.16b, v3.16b, v2.16b",
 
-        "ext    v3.16b, v3.16b, v3.16b, #8",
-        "st1    {{v3.2d}}, [{value}]",
-        value = in(reg) value.as_mut_ptr(),
-        h = in(reg) h.as_ptr(),
-        polynomial = in(reg) POLYNOMIAL,
-        out("v0") _, out("v1") _, out("v2") _, out("v3") _,
-        out("v4") _, out("v5") _, out("v6") _, out("v7") _,
-        out("v16") _,
-        options(nostack),
-    );
+            "ext    v3.16b, v3.16b, v3.16b, #8",
+            "st1    {{v3.2d}}, [{value}]",
+            value = in(reg) value.as_mut_ptr(),
+            h = in(reg) h.as_ptr(),
+            polynomial = in(reg) POLYNOMIAL,
+            out("v0") _, out("v1") _, out("v2") _, out("v3") _,
+            out("v4") _, out("v5") _, out("v6") _, out("v7") _,
+            out("v16") _,
+            options(nostack),
+        );
+    }
 }

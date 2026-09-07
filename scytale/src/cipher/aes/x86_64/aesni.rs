@@ -86,9 +86,11 @@ impl<const K: usize> Aes<K> {
     /// # Safety
     /// The caller must have confirmed that AES-NI is available.
     pub(crate) unsafe fn new_unchecked(key: &[u8; K]) -> Result<Self, Error> {
-        let size = super::KeySize::for_key(key)?;
-        let keys = expand(key, size);
-        Ok(Aes { keys })
+        unsafe {
+            let size = super::KeySize::for_key(key)?;
+            let keys = expand(key, size);
+            Ok(Aes { keys })
+        }
     }
 
     /// Number of rounds: 10, 12 or 14 depending on key size.
@@ -166,16 +168,18 @@ impl<const K: usize> BlockCipher for Aes<K> {
 /// # Safety
 /// Requires AES-NI; `data.len()` must be a multiple of 16.
 pub(super) unsafe fn encrypt_blocks(keys: &RoundKeys, data: &mut [u8]) {
-    run(
-        keys.enc.as_ptr(),
-        keys.size.rounds(),
-        data,
-        encrypt8,
-        [
-            encrypt1, encrypt2, encrypt3, encrypt4, encrypt5, encrypt6,
-            encrypt7,
-        ],
-    )
+    unsafe {
+        run(
+            keys.enc.as_ptr(),
+            keys.size.rounds(),
+            data,
+            encrypt8,
+            [
+                encrypt1, encrypt2, encrypt3, encrypt4, encrypt5, encrypt6,
+                encrypt7,
+            ],
+        )
+    }
 }
 
 /// Decrypts a whole number of blocks.
@@ -183,16 +187,18 @@ pub(super) unsafe fn encrypt_blocks(keys: &RoundKeys, data: &mut [u8]) {
 /// # Safety
 /// Requires AES-NI; `data.len()` must be a multiple of 16.
 pub(super) unsafe fn decrypt_blocks(keys: &RoundKeys, data: &mut [u8]) {
-    run(
-        keys.dec.as_ptr(),
-        keys.size.rounds(),
-        data,
-        decrypt8,
-        [
-            decrypt1, decrypt2, decrypt3, decrypt4, decrypt5, decrypt6,
-            decrypt7,
-        ],
-    )
+    unsafe {
+        run(
+            keys.dec.as_ptr(),
+            keys.size.rounds(),
+            data,
+            decrypt8,
+            [
+                decrypt1, decrypt2, decrypt3, decrypt4, decrypt5, decrypt6,
+                decrypt7,
+            ],
+        )
+    }
 }
 
 /// A body that processes `n` blocks at `data`.
@@ -211,15 +217,17 @@ unsafe fn run(
     groups: unsafe fn(*const u32, usize, *mut u8, usize),
     tails: [Body; 7],
 ) {
-    let blocks = data.len() / BLOCK_SIZE;
-    let full = blocks / 8;
-    let mut p = data.as_mut_ptr();
-    if full > 0 {
-        groups(rk, rounds, p, full);
-        p = p.add(full * 8 * BLOCK_SIZE);
-    }
-    if let Some(tail) = (blocks % 8).checked_sub(1) {
-        tails[tail](rk, rounds, p);
+    unsafe {
+        let blocks = data.len() / BLOCK_SIZE;
+        let full = blocks / 8;
+        let mut p = data.as_mut_ptr();
+        if full > 0 {
+            groups(rk, rounds, p, full);
+            p = p.add(full * 8 * BLOCK_SIZE);
+        }
+        if let Some(tail) = (blocks % 8).checked_sub(1) {
+            tails[tail](rk, rounds, p);
+        }
     }
 }
 
@@ -238,31 +246,33 @@ macro_rules! body {
         /// Requires AES-NI; `rk` must point at `rounds + 1` round keys
         /// and `data` at the blocks this body handles.
         unsafe fn $name(rk: *const u32, rounds: usize, data: *mut u8) {
-            core::arch::asm!(
-                "movdqu xmm8, [{rk}]",
-                $(concat!("movdqu ", $r, ", [{data} + ", $off, "]"),)+
-                $(concat!("pxor ", $r, ", xmm8"),)+
-                "lea {k}, [{rk} + 16]",
-                "mov {n}, {nr}",
-                "2:",
-                "movdqu xmm8, [{k}]",
-                $(concat!($mid, " ", $r, ", xmm8"),)+
-                "add {k}, 16",
-                "dec {n}",
-                "jnz 2b",
-                "movdqu xmm8, [{k}]",
-                $(concat!($last, " ", $r, ", xmm8"),)+
-                $(concat!("movdqu [{data} + ", $off, "], ", $r),)+
-                rk = in(reg) rk,
-                nr = in(reg) rounds - 1,
-                data = in(reg) data,
-                k = out(reg) _,
-                n = out(reg) _,
-                out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
-                out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
-                out("xmm8") _,
-                options(nostack),
-            );
+            unsafe {
+                core::arch::asm!(
+                    "movdqu xmm8, [{rk}]",
+                    $(concat!("movdqu ", $r, ", [{data} + ", $off, "]"),)+
+                    $(concat!("pxor ", $r, ", xmm8"),)+
+                    "lea {k}, [{rk} + 16]",
+                    "mov {n}, {nr}",
+                    "2:",
+                    "movdqu xmm8, [{k}]",
+                    $(concat!($mid, " ", $r, ", xmm8"),)+
+                    "add {k}, 16",
+                    "dec {n}",
+                    "jnz 2b",
+                    "movdqu xmm8, [{k}]",
+                    $(concat!($last, " ", $r, ", xmm8"),)+
+                    $(concat!("movdqu [{data} + ", $off, "], ", $r),)+
+                    rk = in(reg) rk,
+                    nr = in(reg) rounds - 1,
+                    data = in(reg) data,
+                    k = out(reg) _,
+                    n = out(reg) _,
+                    out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
+                    out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
+                    out("xmm8") _,
+                    options(nostack),
+                );
+            }
         }
     };
 }
@@ -279,71 +289,73 @@ macro_rules! groups {
             data: *mut u8,
             groups: usize,
         ) {
-            core::arch::asm!(
-                "3:",
-                "movdqu xmm8, [{rk}]",
-                "movdqu xmm0, [{data}]",
-                "movdqu xmm1, [{data} + 16]",
-                "movdqu xmm2, [{data} + 32]",
-                "movdqu xmm3, [{data} + 48]",
-                "movdqu xmm4, [{data} + 64]",
-                "movdqu xmm5, [{data} + 80]",
-                "movdqu xmm6, [{data} + 96]",
-                "movdqu xmm7, [{data} + 112]",
-                "pxor xmm0, xmm8",
-                "pxor xmm1, xmm8",
-                "pxor xmm2, xmm8",
-                "pxor xmm3, xmm8",
-                "pxor xmm4, xmm8",
-                "pxor xmm5, xmm8",
-                "pxor xmm6, xmm8",
-                "pxor xmm7, xmm8",
-                "lea {k}, [{rk} + 16]",
-                "mov {n}, {nr}",
-                "2:",
-                "movdqu xmm8, [{k}]",
-                concat!($mid, " xmm0, xmm8"),
-                concat!($mid, " xmm1, xmm8"),
-                concat!($mid, " xmm2, xmm8"),
-                concat!($mid, " xmm3, xmm8"),
-                concat!($mid, " xmm4, xmm8"),
-                concat!($mid, " xmm5, xmm8"),
-                concat!($mid, " xmm6, xmm8"),
-                concat!($mid, " xmm7, xmm8"),
-                "add {k}, 16",
-                "dec {n}",
-                "jnz 2b",
-                "movdqu xmm8, [{k}]",
-                concat!($last, " xmm0, xmm8"),
-                concat!($last, " xmm1, xmm8"),
-                concat!($last, " xmm2, xmm8"),
-                concat!($last, " xmm3, xmm8"),
-                concat!($last, " xmm4, xmm8"),
-                concat!($last, " xmm5, xmm8"),
-                concat!($last, " xmm6, xmm8"),
-                concat!($last, " xmm7, xmm8"),
-                "movdqu [{data}], xmm0",
-                "movdqu [{data} + 16], xmm1",
-                "movdqu [{data} + 32], xmm2",
-                "movdqu [{data} + 48], xmm3",
-                "movdqu [{data} + 64], xmm4",
-                "movdqu [{data} + 80], xmm5",
-                "movdqu [{data} + 96], xmm6",
-                "movdqu [{data} + 112], xmm7",
-                "add {data}, 128",
-                "dec {groups}",
-                "jnz 3b",
-                rk = in(reg) rk,
-                nr = in(reg) rounds - 1,
-                data = inout(reg) data => _,
-                groups = inout(reg) groups => _,
-                k = out(reg) _,
-                n = out(reg) _,
-                out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
-                out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
-                out("xmm8") _,
-                options(nostack),
-            );
+            unsafe {
+                core::arch::asm!(
+                    "3:",
+                    "movdqu xmm8, [{rk}]",
+                    "movdqu xmm0, [{data}]",
+                    "movdqu xmm1, [{data} + 16]",
+                    "movdqu xmm2, [{data} + 32]",
+                    "movdqu xmm3, [{data} + 48]",
+                    "movdqu xmm4, [{data} + 64]",
+                    "movdqu xmm5, [{data} + 80]",
+                    "movdqu xmm6, [{data} + 96]",
+                    "movdqu xmm7, [{data} + 112]",
+                    "pxor xmm0, xmm8",
+                    "pxor xmm1, xmm8",
+                    "pxor xmm2, xmm8",
+                    "pxor xmm3, xmm8",
+                    "pxor xmm4, xmm8",
+                    "pxor xmm5, xmm8",
+                    "pxor xmm6, xmm8",
+                    "pxor xmm7, xmm8",
+                    "lea {k}, [{rk} + 16]",
+                    "mov {n}, {nr}",
+                    "2:",
+                    "movdqu xmm8, [{k}]",
+                    concat!($mid, " xmm0, xmm8"),
+                    concat!($mid, " xmm1, xmm8"),
+                    concat!($mid, " xmm2, xmm8"),
+                    concat!($mid, " xmm3, xmm8"),
+                    concat!($mid, " xmm4, xmm8"),
+                    concat!($mid, " xmm5, xmm8"),
+                    concat!($mid, " xmm6, xmm8"),
+                    concat!($mid, " xmm7, xmm8"),
+                    "add {k}, 16",
+                    "dec {n}",
+                    "jnz 2b",
+                    "movdqu xmm8, [{k}]",
+                    concat!($last, " xmm0, xmm8"),
+                    concat!($last, " xmm1, xmm8"),
+                    concat!($last, " xmm2, xmm8"),
+                    concat!($last, " xmm3, xmm8"),
+                    concat!($last, " xmm4, xmm8"),
+                    concat!($last, " xmm5, xmm8"),
+                    concat!($last, " xmm6, xmm8"),
+                    concat!($last, " xmm7, xmm8"),
+                    "movdqu [{data}], xmm0",
+                    "movdqu [{data} + 16], xmm1",
+                    "movdqu [{data} + 32], xmm2",
+                    "movdqu [{data} + 48], xmm3",
+                    "movdqu [{data} + 64], xmm4",
+                    "movdqu [{data} + 80], xmm5",
+                    "movdqu [{data} + 96], xmm6",
+                    "movdqu [{data} + 112], xmm7",
+                    "add {data}, 128",
+                    "dec {groups}",
+                    "jnz 3b",
+                    rk = in(reg) rk,
+                    nr = in(reg) rounds - 1,
+                    data = inout(reg) data => _,
+                    groups = inout(reg) groups => _,
+                    k = out(reg) _,
+                    n = out(reg) _,
+                    out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
+                    out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
+                    out("xmm8") _,
+                    options(nostack),
+                );
+            }
         }
     };
 }

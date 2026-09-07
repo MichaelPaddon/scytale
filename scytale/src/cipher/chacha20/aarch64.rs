@@ -35,7 +35,7 @@ impl Backend for Neon {
         counter: u32,
         data: &mut [u8],
     ) {
-        xor(key, nonce, counter, data)
+        unsafe { xor(key, nonce, counter, data) }
     }
 }
 
@@ -64,21 +64,23 @@ fn states(
 /// # Safety
 /// Requires NEON.
 unsafe fn xor(key: &[u32; 8], nonce: &[u32; 3], counter: u32, data: &mut [u8]) {
-    debug_assert_eq!(data.len() % BLOCK_SIZE, 0);
-    let mut counter = counter;
-    let mut chunks = data.chunks_exact_mut(BLOCK_SIZE * GROUP);
-    for group in &mut chunks {
-        group4(&states(key, nonce, counter), group.as_mut_ptr());
-        counter = counter.wrapping_add(GROUP as u32);
-    }
-    let rest = chunks.into_remainder();
-    if !rest.is_empty() {
-        // A short group: keystream into a scratch buffer, then only
-        // as much of it as is wanted.
-        let mut scratch = [0u8; BLOCK_SIZE * GROUP];
-        group4(&states(key, nonce, counter), scratch.as_mut_ptr());
-        for (d, k) in rest.iter_mut().zip(&scratch) {
-            *d ^= k;
+    unsafe {
+        debug_assert_eq!(data.len() % BLOCK_SIZE, 0);
+        let mut counter = counter;
+        let mut chunks = data.chunks_exact_mut(BLOCK_SIZE * GROUP);
+        for group in &mut chunks {
+            group4(&states(key, nonce, counter), group.as_mut_ptr());
+            counter = counter.wrapping_add(GROUP as u32);
+        }
+        let rest = chunks.into_remainder();
+        if !rest.is_empty() {
+            // A short group: keystream into a scratch buffer, then only
+            // as much of it as is wanted.
+            let mut scratch = [0u8; BLOCK_SIZE * GROUP];
+            group4(&states(key, nonce, counter), scratch.as_mut_ptr());
+            for (d, k) in rest.iter_mut().zip(&scratch) {
+                *d ^= k;
+            }
         }
     }
 }
@@ -149,47 +151,49 @@ macro_rules! output {
 /// Requires NEON; `data` must point at 256 writable bytes.
 #[target_feature(enable = "neon")]
 unsafe fn group4(states: &[[u32; 16]; GROUP], data: *mut u8) {
-    core::arch::asm!(
-        "mov {p}, {state}",
-        "ld1 {{v0.4s, v1.4s, v2.4s, v3.4s}}, [{p}], #64",
-        "ld1 {{v4.4s, v5.4s, v6.4s, v7.4s}}, [{p}], #64",
-        "ld1 {{v8.4s, v9.4s, v10.4s, v11.4s}}, [{p}], #64",
-        "ld1 {{v12.4s, v13.4s, v14.4s, v15.4s}}, [{p}]",
-        "mov {n}, #10",
-        "2:",
-        quarter!("v0", "v1", "v2", "v3", "v16"),
-        quarter!("v4", "v5", "v6", "v7", "v17"),
-        quarter!("v8", "v9", "v10", "v11", "v18"),
-        quarter!("v12", "v13", "v14", "v15", "v19"),
-        diagonal!("v1", "v2", "v3", "4", "12"),
-        diagonal!("v5", "v6", "v7", "4", "12"),
-        diagonal!("v9", "v10", "v11", "4", "12"),
-        diagonal!("v13", "v14", "v15", "4", "12"),
-        quarter!("v0", "v1", "v2", "v3", "v16"),
-        quarter!("v4", "v5", "v6", "v7", "v17"),
-        quarter!("v8", "v9", "v10", "v11", "v18"),
-        quarter!("v12", "v13", "v14", "v15", "v19"),
-        diagonal!("v1", "v2", "v3", "12", "4"),
-        diagonal!("v5", "v6", "v7", "12", "4"),
-        diagonal!("v9", "v10", "v11", "12", "4"),
-        diagonal!("v13", "v14", "v15", "12", "4"),
-        "subs {n}, {n}, #1",
-        "b.ne 2b",
-        output!("v0", "v1", "v2", "v3", 0),
-        output!("v4", "v5", "v6", "v7", 64),
-        output!("v8", "v9", "v10", "v11", 128),
-        output!("v12", "v13", "v14", "v15", 192),
-        state = inout(reg) states.as_ptr() => _,
-        data = inout(reg) data => _,
-        p = out(reg) _,
-        n = out(reg) _,
-        out("v0") _, out("v1") _, out("v2") _, out("v3") _,
-        out("v4") _, out("v5") _, out("v6") _, out("v7") _,
-        out("v8") _, out("v9") _, out("v10") _, out("v11") _,
-        out("v12") _, out("v13") _, out("v14") _, out("v15") _,
-        out("v16") _, out("v17") _, out("v18") _, out("v19") _,
-        options(nostack),
-    );
+    unsafe {
+        core::arch::asm!(
+            "mov {p}, {state}",
+            "ld1 {{v0.4s, v1.4s, v2.4s, v3.4s}}, [{p}], #64",
+            "ld1 {{v4.4s, v5.4s, v6.4s, v7.4s}}, [{p}], #64",
+            "ld1 {{v8.4s, v9.4s, v10.4s, v11.4s}}, [{p}], #64",
+            "ld1 {{v12.4s, v13.4s, v14.4s, v15.4s}}, [{p}]",
+            "mov {n}, #10",
+            "2:",
+            quarter!("v0", "v1", "v2", "v3", "v16"),
+            quarter!("v4", "v5", "v6", "v7", "v17"),
+            quarter!("v8", "v9", "v10", "v11", "v18"),
+            quarter!("v12", "v13", "v14", "v15", "v19"),
+            diagonal!("v1", "v2", "v3", "4", "12"),
+            diagonal!("v5", "v6", "v7", "4", "12"),
+            diagonal!("v9", "v10", "v11", "4", "12"),
+            diagonal!("v13", "v14", "v15", "4", "12"),
+            quarter!("v0", "v1", "v2", "v3", "v16"),
+            quarter!("v4", "v5", "v6", "v7", "v17"),
+            quarter!("v8", "v9", "v10", "v11", "v18"),
+            quarter!("v12", "v13", "v14", "v15", "v19"),
+            diagonal!("v1", "v2", "v3", "12", "4"),
+            diagonal!("v5", "v6", "v7", "12", "4"),
+            diagonal!("v9", "v10", "v11", "12", "4"),
+            diagonal!("v13", "v14", "v15", "12", "4"),
+            "subs {n}, {n}, #1",
+            "b.ne 2b",
+            output!("v0", "v1", "v2", "v3", 0),
+            output!("v4", "v5", "v6", "v7", 64),
+            output!("v8", "v9", "v10", "v11", 128),
+            output!("v12", "v13", "v14", "v15", 192),
+            state = inout(reg) states.as_ptr() => _,
+            data = inout(reg) data => _,
+            p = out(reg) _,
+            n = out(reg) _,
+            out("v0") _, out("v1") _, out("v2") _, out("v3") _,
+            out("v4") _, out("v5") _, out("v6") _, out("v7") _,
+            out("v8") _, out("v9") _, out("v10") _, out("v11") _,
+            out("v12") _, out("v13") _, out("v14") _, out("v15") _,
+            out("v16") _, out("v17") _, out("v18") _, out("v19") _,
+            options(nostack),
+        );
+    }
 }
 
 #[cfg(test)]

@@ -130,8 +130,10 @@ impl<const K: usize> Aes<K> {
     /// The caller must have confirmed that the AES instructions are
     /// available.
     pub(crate) unsafe fn new_unchecked(key: &[u8; K]) -> Result<Self, Error> {
-        let size = KeySize::for_key(key)?;
-        Ok(expand(key, size))
+        unsafe {
+            let size = KeySize::for_key(key)?;
+            Ok(expand(key, size))
+        }
     }
 
     /// Number of rounds: 10, 12 or 14 depending on key size.
@@ -230,24 +232,26 @@ unsafe fn sub_word(w: u32) -> u32 {
 /// Requires the AES instructions.
 #[target_feature(enable = "aes")]
 unsafe fn expand<const K: usize>(key: &[u8; K], size: KeySize) -> Aes<K> {
-    let rounds = size.rounds();
-    let enc = expand_words(key, size, |w| sub_word(w));
+    unsafe {
+        let rounds = size.rounds();
+        let enc = expand_words(key, size, |w| sub_word(w));
 
-    // Decryption runs the round keys backwards, with the inner ones
-    // passed through InvMixColumns so `aesd`/`aesimc` can use them
-    // directly.
-    let mut dec = [0u32; MAX_WORDS];
-    dec[..4].copy_from_slice(&enc[4 * rounds..4 * rounds + 4]);
-    for r in 1..rounds {
-        let src = 4 * (rounds - r);
-        // SAFETY: both slices are four words; vld1q/vst1q have no
-        // alignment demand.
-        let k = vld1q_u8(enc[src..].as_ptr() as *const u8);
-        vst1q_u8(dec[4 * r..].as_mut_ptr() as *mut u8, vaesimcq_u8(k));
+        // Decryption runs the round keys backwards, with the inner ones
+        // passed through InvMixColumns so `aesd`/`aesimc` can use them
+        // directly.
+        let mut dec = [0u32; MAX_WORDS];
+        dec[..4].copy_from_slice(&enc[4 * rounds..4 * rounds + 4]);
+        for r in 1..rounds {
+            let src = 4 * (rounds - r);
+            // SAFETY: both slices are four words; vld1q/vst1q have no
+            // alignment demand.
+            let k = vld1q_u8(enc[src..].as_ptr() as *const u8);
+            vst1q_u8(dec[4 * r..].as_mut_ptr() as *mut u8, vaesimcq_u8(k));
+        }
+        dec[4 * rounds..4 * rounds + 4].copy_from_slice(&enc[..4]);
+
+        Aes { enc, dec, size }
     }
-    dec[4 * rounds..4 * rounds + 4].copy_from_slice(&enc[..4]);
-
-    Aes { enc, dec, size }
 }
 
 /// Encrypts a whole number of blocks.
@@ -260,16 +264,18 @@ unsafe fn encrypt_blocks(
     rounds: usize,
     data: &mut [u8],
 ) {
-    run(
-        rk.as_ptr(),
-        rounds,
-        data,
-        encrypt8,
-        [
-            encrypt1, encrypt2, encrypt3, encrypt4, encrypt5, encrypt6,
-            encrypt7,
-        ],
-    )
+    unsafe {
+        run(
+            rk.as_ptr(),
+            rounds,
+            data,
+            encrypt8,
+            [
+                encrypt1, encrypt2, encrypt3, encrypt4, encrypt5, encrypt6,
+                encrypt7,
+            ],
+        )
+    }
 }
 
 /// Decrypts a whole number of blocks.
@@ -282,16 +288,18 @@ unsafe fn decrypt_blocks(
     rounds: usize,
     data: &mut [u8],
 ) {
-    run(
-        rk.as_ptr(),
-        rounds,
-        data,
-        decrypt8,
-        [
-            decrypt1, decrypt2, decrypt3, decrypt4, decrypt5, decrypt6,
-            decrypt7,
-        ],
-    )
+    unsafe {
+        run(
+            rk.as_ptr(),
+            rounds,
+            data,
+            decrypt8,
+            [
+                decrypt1, decrypt2, decrypt3, decrypt4, decrypt5, decrypt6,
+                decrypt7,
+            ],
+        )
+    }
 }
 
 /// A body that processes `n` blocks at `data`.
@@ -311,15 +319,17 @@ unsafe fn run(
     groups: unsafe fn(*const u32, usize, *mut u8, usize),
     tails: [Body; 7],
 ) {
-    let blocks = data.len() / BLOCK_SIZE;
-    let full = blocks / 8;
-    let mut p = data.as_mut_ptr();
-    if full > 0 {
-        groups(rk, rounds, p, full);
-        p = p.add(full * 8 * BLOCK_SIZE);
-    }
-    if let Some(tail) = (blocks % 8).checked_sub(1) {
-        tails[tail](rk, rounds, p);
+    unsafe {
+        let blocks = data.len() / BLOCK_SIZE;
+        let full = blocks / 8;
+        let mut p = data.as_mut_ptr();
+        if full > 0 {
+            groups(rk, rounds, p, full);
+            p = p.add(full * 8 * BLOCK_SIZE);
+        }
+        if let Some(tail) = (blocks % 8).checked_sub(1) {
+            tails[tail](rk, rounds, p);
+        }
     }
 }
 
@@ -342,33 +352,35 @@ macro_rules! body {
         /// handles.
         #[target_feature(enable = "aes")]
         unsafe fn $name(rk: *const u32, rounds: usize, data: *mut u8) {
-            core::arch::asm!(
-                "mov {p}, {data}",
-                $(concat!("ld1 {{", $r, ".16b}}, [{p}], #16"),)+
-                "mov {k}, {rk}",
-                "mov {n}, {nr}",
-                "2:",
-                "ld1 {{v8.16b}}, [{k}], #16",
-                $(concat!($mid, " ", $r, ".16b, v8.16b"),
-                  concat!($mix, " ", $r, ".16b, ", $r, ".16b"),)+
-                "subs {n}, {n}, #1",
-                "b.ne 2b",
-                "ld1 {{v8.16b, v9.16b}}, [{k}]",
-                $(concat!($mid, " ", $r, ".16b, v8.16b"),
-                  concat!("eor ", $r, ".16b, ", $r, ".16b, v9.16b"),)+
-                "mov {p}, {data}",
-                $(concat!("st1 {{", $r, ".16b}}, [{p}], #16"),)+
-                rk = in(reg) rk,
-                nr = in(reg) rounds - 1,
-                data = in(reg) data,
-                p = out(reg) _,
-                k = out(reg) _,
-                n = out(reg) _,
-                out("v0") _, out("v1") _, out("v2") _, out("v3") _,
-                out("v4") _, out("v5") _, out("v6") _, out("v7") _,
-                out("v8") _, out("v9") _,
-                options(nostack),
-            );
+            unsafe {
+                core::arch::asm!(
+                    "mov {p}, {data}",
+                    $(concat!("ld1 {{", $r, ".16b}}, [{p}], #16"),)+
+                    "mov {k}, {rk}",
+                    "mov {n}, {nr}",
+                    "2:",
+                    "ld1 {{v8.16b}}, [{k}], #16",
+                    $(concat!($mid, " ", $r, ".16b, v8.16b"),
+                      concat!($mix, " ", $r, ".16b, ", $r, ".16b"),)+
+                    "subs {n}, {n}, #1",
+                    "b.ne 2b",
+                    "ld1 {{v8.16b, v9.16b}}, [{k}]",
+                    $(concat!($mid, " ", $r, ".16b, v8.16b"),
+                      concat!("eor ", $r, ".16b, ", $r, ".16b, v9.16b"),)+
+                    "mov {p}, {data}",
+                    $(concat!("st1 {{", $r, ".16b}}, [{p}], #16"),)+
+                    rk = in(reg) rk,
+                    nr = in(reg) rounds - 1,
+                    data = in(reg) data,
+                    p = out(reg) _,
+                    k = out(reg) _,
+                    n = out(reg) _,
+                    out("v0") _, out("v1") _, out("v2") _, out("v3") _,
+                    out("v4") _, out("v5") _, out("v6") _, out("v7") _,
+                    out("v8") _, out("v9") _,
+                    options(nostack),
+                );
+            }
         }
     };
 }
@@ -387,66 +399,68 @@ macro_rules! groups {
             data: *mut u8,
             groups: usize,
         ) {
-            core::arch::asm!(
-                "3:",
-                "add {p}, {data}, #64",
-                "ld1 {{v0.16b, v1.16b, v2.16b, v3.16b}}, [{data}]",
-                "ld1 {{v4.16b, v5.16b, v6.16b, v7.16b}}, [{p}]",
-                "mov {k}, {rk}",
-                "mov {n}, {nr}",
-                "2:",
-                "ld1 {{v8.16b}}, [{k}], #16",
-                concat!($mid, " v0.16b, v8.16b"),
-                concat!($mix, " v0.16b, v0.16b"),
-                concat!($mid, " v1.16b, v8.16b"),
-                concat!($mix, " v1.16b, v1.16b"),
-                concat!($mid, " v2.16b, v8.16b"),
-                concat!($mix, " v2.16b, v2.16b"),
-                concat!($mid, " v3.16b, v8.16b"),
-                concat!($mix, " v3.16b, v3.16b"),
-                concat!($mid, " v4.16b, v8.16b"),
-                concat!($mix, " v4.16b, v4.16b"),
-                concat!($mid, " v5.16b, v8.16b"),
-                concat!($mix, " v5.16b, v5.16b"),
-                concat!($mid, " v6.16b, v8.16b"),
-                concat!($mix, " v6.16b, v6.16b"),
-                concat!($mid, " v7.16b, v8.16b"),
-                concat!($mix, " v7.16b, v7.16b"),
-                "subs {n}, {n}, #1",
-                "b.ne 2b",
-                "ld1 {{v8.16b, v9.16b}}, [{k}]",
-                concat!($mid, " v0.16b, v8.16b"),
-                "eor v0.16b, v0.16b, v9.16b",
-                concat!($mid, " v1.16b, v8.16b"),
-                "eor v1.16b, v1.16b, v9.16b",
-                concat!($mid, " v2.16b, v8.16b"),
-                "eor v2.16b, v2.16b, v9.16b",
-                concat!($mid, " v3.16b, v8.16b"),
-                "eor v3.16b, v3.16b, v9.16b",
-                concat!($mid, " v4.16b, v8.16b"),
-                "eor v4.16b, v4.16b, v9.16b",
-                concat!($mid, " v5.16b, v8.16b"),
-                "eor v5.16b, v5.16b, v9.16b",
-                concat!($mid, " v6.16b, v8.16b"),
-                "eor v6.16b, v6.16b, v9.16b",
-                concat!($mid, " v7.16b, v8.16b"),
-                "eor v7.16b, v7.16b, v9.16b",
-                "st1 {{v0.16b, v1.16b, v2.16b, v3.16b}}, [{data}], #64",
-                "st1 {{v4.16b, v5.16b, v6.16b, v7.16b}}, [{data}], #64",
-                "subs {groups}, {groups}, #1",
-                "b.ne 3b",
-                rk = in(reg) rk,
-                nr = in(reg) rounds - 1,
-                data = inout(reg) data => _,
-                groups = inout(reg) groups => _,
-                p = out(reg) _,
-                k = out(reg) _,
-                n = out(reg) _,
-                out("v0") _, out("v1") _, out("v2") _, out("v3") _,
-                out("v4") _, out("v5") _, out("v6") _, out("v7") _,
-                out("v8") _, out("v9") _,
-                options(nostack),
-            );
+            unsafe {
+                core::arch::asm!(
+                    "3:",
+                    "add {p}, {data}, #64",
+                    "ld1 {{v0.16b, v1.16b, v2.16b, v3.16b}}, [{data}]",
+                    "ld1 {{v4.16b, v5.16b, v6.16b, v7.16b}}, [{p}]",
+                    "mov {k}, {rk}",
+                    "mov {n}, {nr}",
+                    "2:",
+                    "ld1 {{v8.16b}}, [{k}], #16",
+                    concat!($mid, " v0.16b, v8.16b"),
+                    concat!($mix, " v0.16b, v0.16b"),
+                    concat!($mid, " v1.16b, v8.16b"),
+                    concat!($mix, " v1.16b, v1.16b"),
+                    concat!($mid, " v2.16b, v8.16b"),
+                    concat!($mix, " v2.16b, v2.16b"),
+                    concat!($mid, " v3.16b, v8.16b"),
+                    concat!($mix, " v3.16b, v3.16b"),
+                    concat!($mid, " v4.16b, v8.16b"),
+                    concat!($mix, " v4.16b, v4.16b"),
+                    concat!($mid, " v5.16b, v8.16b"),
+                    concat!($mix, " v5.16b, v5.16b"),
+                    concat!($mid, " v6.16b, v8.16b"),
+                    concat!($mix, " v6.16b, v6.16b"),
+                    concat!($mid, " v7.16b, v8.16b"),
+                    concat!($mix, " v7.16b, v7.16b"),
+                    "subs {n}, {n}, #1",
+                    "b.ne 2b",
+                    "ld1 {{v8.16b, v9.16b}}, [{k}]",
+                    concat!($mid, " v0.16b, v8.16b"),
+                    "eor v0.16b, v0.16b, v9.16b",
+                    concat!($mid, " v1.16b, v8.16b"),
+                    "eor v1.16b, v1.16b, v9.16b",
+                    concat!($mid, " v2.16b, v8.16b"),
+                    "eor v2.16b, v2.16b, v9.16b",
+                    concat!($mid, " v3.16b, v8.16b"),
+                    "eor v3.16b, v3.16b, v9.16b",
+                    concat!($mid, " v4.16b, v8.16b"),
+                    "eor v4.16b, v4.16b, v9.16b",
+                    concat!($mid, " v5.16b, v8.16b"),
+                    "eor v5.16b, v5.16b, v9.16b",
+                    concat!($mid, " v6.16b, v8.16b"),
+                    "eor v6.16b, v6.16b, v9.16b",
+                    concat!($mid, " v7.16b, v8.16b"),
+                    "eor v7.16b, v7.16b, v9.16b",
+                    "st1 {{v0.16b, v1.16b, v2.16b, v3.16b}}, [{data}], #64",
+                    "st1 {{v4.16b, v5.16b, v6.16b, v7.16b}}, [{data}], #64",
+                    "subs {groups}, {groups}, #1",
+                    "b.ne 3b",
+                    rk = in(reg) rk,
+                    nr = in(reg) rounds - 1,
+                    data = inout(reg) data => _,
+                    groups = inout(reg) groups => _,
+                    p = out(reg) _,
+                    k = out(reg) _,
+                    n = out(reg) _,
+                    out("v0") _, out("v1") _, out("v2") _, out("v3") _,
+                    out("v4") _, out("v5") _, out("v6") _, out("v7") _,
+                    out("v8") _, out("v9") _,
+                    options(nostack),
+                );
+            }
         }
     };
 }
