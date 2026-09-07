@@ -39,7 +39,7 @@ pub mod x86_64;
 use core::fmt;
 use core::sync::atomic::{AtomicU8, Ordering};
 
-use crate::cipher::BlockCipher;
+use crate::cipher::{BlockCipher, ByteOrder};
 use crate::{BlockType, Error, KeyType};
 
 /// AES block size in bytes.
@@ -356,10 +356,15 @@ impl<const K: usize> BlockCipher for Aes<K> {
         Aes::decrypt_blocks(self, blocks)
     }
 
-    fn xor_counter_blocks(&self, counter: &mut Self::Block, data: &mut [u8]) {
+    fn xor_counter_blocks(
+        &self,
+        counter: &mut Self::Block,
+        order: ByteOrder,
+        data: &mut [u8],
+    ) {
         dispatch!(
             self,
-            aes => BlockCipher::xor_counter_blocks(aes, counter, data)
+            aes => BlockCipher::xor_counter_blocks(aes, counter, order, data)
         )
     }
 }

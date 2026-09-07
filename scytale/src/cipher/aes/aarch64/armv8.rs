@@ -48,7 +48,7 @@ use core::arch::aarch64::{
 use core::fmt;
 
 use crate::cipher::aes::{BLOCK_SIZE, KeySize, MAX_WORDS, expand_words};
-use crate::cipher::{BlockCipher, add_low32};
+use crate::cipher::{BlockCipher, ByteOrder, add_counter};
 use crate::{BlockType, Error, KeyType};
 use zeroize::ZeroizeOnDrop;
 
@@ -184,9 +184,11 @@ impl<const K: usize> Aes<K> {
     pub fn xor_counter_blocks(
         &self,
         counter: &mut [u8; BLOCK_SIZE],
+        order: ByteOrder,
         data: &mut [u8],
     ) {
         debug_assert_eq!(data.len() % BLOCK_SIZE, 0);
+        let shuffle = shuffle_for(order);
         let rk = self.enc.as_ptr();
         let rounds = self.rounds();
         let mut data = data;
@@ -205,6 +207,7 @@ impl<const K: usize> Aes<K> {
                     counter.as_mut_ptr(),
                     whole.as_mut_ptr(),
                     groups,
+                    shuffle,
                 );
             }
             data = rest;
@@ -220,9 +223,10 @@ impl<const K: usize> Aes<K> {
                     rounds,
                     counter.as_ptr(),
                     data.as_mut_ptr(),
+                    shuffle,
                 );
             }
-            add_low32(counter, blocks as u32);
+            add_counter(counter, order, blocks as u32);
         }
     }
 }
@@ -243,6 +247,21 @@ struct Words<const N: usize>([u32; N]);
 /// reach it.
 static BSWAP: Mask =
     Mask([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]);
+
+/// Leaves a register alone. A counter in the first four bytes, least
+/// significant first, is already the low word, so the same loop
+/// serves it with nothing to reverse.
+static KEEP: Mask =
+    Mask([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+
+/// The table that puts a block's counter field in the low word, and
+/// afterwards puts it back.
+fn shuffle_for(order: ByteOrder) -> *const u8 {
+    match order {
+        ByteOrder::Big => BSWAP.0.as_ptr(),
+        ByteOrder::Little => KEEP.0.as_ptr(),
+    }
+}
 
 /// What each register adds to the base counter to make its block,
 /// then one group's worth to move the base on.
@@ -294,8 +313,13 @@ impl<const K: usize> BlockCipher for Aes<K> {
         Aes::decrypt_blocks(self, blocks)
     }
 
-    fn xor_counter_blocks(&self, counter: &mut Self::Block, data: &mut [u8]) {
-        Aes::xor_counter_blocks(self, counter, data)
+    fn xor_counter_blocks(
+        &self,
+        counter: &mut Self::Block,
+        order: ByteOrder,
+        data: &mut [u8],
+    ) {
+        Aes::xor_counter_blocks(self, counter, order, data)
     }
 }
 
@@ -569,6 +593,7 @@ unsafe fn counter_groups(
     counter: *mut u8,
     data: *mut u8,
     groups: usize,
+    shuffle: *const u8,
 ) {
     unsafe {
         core::arch::asm!(
@@ -577,7 +602,7 @@ unsafe fn counter_groups(
             "ld1 {{v16.16b, v17.16b, v18.16b, v19.16b}}, [{offs}], #64",
             "ld1 {{v20.16b, v21.16b, v22.16b, v23.16b}}, [{offs}], #64",
             "ld1 {{v12.16b}}, [{offs}]",
-            "ld1 {{v10.16b}}, [{bswap}]",
+            "ld1 {{v10.16b}}, [{shuffle}]",
             // The base counter, byte-reversed so the field adds.
             "ld1 {{v11.16b}}, [{counter}]",
             "tbl v11.16b, {{v11.16b}}, v10.16b",
@@ -664,7 +689,7 @@ unsafe fn counter_groups(
             data = inout(reg) data => _,
             groups = inout(reg) groups => _,
             offs = inout(reg) OFFSETS.0.as_ptr() => _,
-            bswap = in(reg) BSWAP.0.as_ptr(),
+            shuffle = in(reg) shuffle,
             p = out(reg) _,
             k = out(reg) _,
             n = out(reg) _,
@@ -696,10 +721,11 @@ macro_rules! counter_body {
             rounds: usize,
             counter: *const u8,
             data: *mut u8,
+            shuffle: *const u8,
         ) {
             unsafe {
                 core::arch::asm!(
-                    "ld1 {{v10.16b}}, [{bswap}]",
+                    "ld1 {{v10.16b}}, [{shuffle}]",
                     "ld1 {{v11.16b}}, [{counter}]",
                     "tbl v11.16b, {{v11.16b}}, v10.16b",
                     "mov {p}, {offs}",
@@ -731,7 +757,7 @@ macro_rules! counter_body {
                     counter = in(reg) counter,
                     data = in(reg) data,
                     offs = in(reg) OFFSETS.0.as_ptr(),
-                    bswap = in(reg) BSWAP.0.as_ptr(),
+                    shuffle = in(reg) shuffle,
                     p = out(reg) _,
                     k = out(reg) _,
                     n = out(reg) _,
@@ -795,9 +821,14 @@ counter_body!(
     ]
 );
 
+/// A counter body: the round keys, the round count, the counter
+/// block, the data, and the shuffle that puts the counter field
+/// where an add can reach it.
+type CounterBody = unsafe fn(*const u32, usize, *const u8, *mut u8, *const u8);
+
 /// The bodies by block count, so that a tail of `n` blocks is one
 /// call.
-static TAILS: [unsafe fn(*const u32, usize, *const u8, *mut u8); 7] = [
+static TAILS: [CounterBody; 7] = [
     counter1, counter2, counter3, counter4, counter5, counter6, counter7,
 ];
 
@@ -865,6 +896,15 @@ mod tests {
         let Some(aes) = aes(&[0x5au8; 16]) else {
             return;
         };
+        // Both conventions: GCM's last four bytes and GCM-SIV's
+        // first four, which is the same loop with nothing to
+        // reverse.
+        for order in [ByteOrder::Big, ByteOrder::Little] {
+            counter_blocks_match(&aes, order);
+        }
+    }
+
+    fn counter_blocks_match<const K: usize>(aes: &Aes<K>, order: ByteOrder) {
         const N: usize = (2 * GROUP + 5) * BLOCK_SIZE;
         let start = [0x77u8; BLOCK_SIZE];
 
@@ -874,18 +914,18 @@ mod tests {
             let mut block = counter;
             aes.encrypt_block(&mut block);
             chunk.copy_from_slice(&block);
-            add_low32(&mut counter, 1);
+            add_counter(&mut counter, order, 1);
         }
 
         for blocks in 0..=N / BLOCK_SIZE {
             let n = blocks * BLOCK_SIZE;
             let mut got = [0u8; N];
             let mut counter = start;
-            aes.xor_counter_blocks(&mut counter, &mut got[..n]);
+            aes.xor_counter_blocks(&mut counter, order, &mut got[..n]);
             assert_eq!(got[..n], want[..n], "{blocks} blocks");
             // And the counter is left on the block after the last.
             let mut want_counter = start;
-            add_low32(&mut want_counter, blocks as u32);
+            add_counter(&mut want_counter, order, blocks as u32);
             assert_eq!(counter, want_counter, "{blocks} blocks, counter");
         }
     }

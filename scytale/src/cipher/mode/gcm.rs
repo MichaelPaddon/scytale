@@ -68,7 +68,7 @@ use core::fmt;
 use super::ghash::{BLOCK, Ghash};
 use super::xor;
 use crate::Error;
-use crate::cipher::BlockCipher;
+use crate::cipher::{BlockCipher, ByteOrder};
 use crate::util;
 
 /// The most message bytes GCM may protect under one key and nonce:
@@ -305,8 +305,11 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
         // what the cipher's counter loop does, so there is no
         // boundary to split at.
         let (whole, tail) = data.as_chunks_mut::<BLOCK>();
-        self.cipher
-            .xor_counter_blocks(&mut self.counter, whole.as_flattened_mut());
+        self.cipher.xor_counter_blocks(
+            &mut self.counter,
+            ByteOrder::Big,
+            whole.as_flattened_mut(),
+        );
 
         if !tail.is_empty() {
             self.keystream = self.counter;

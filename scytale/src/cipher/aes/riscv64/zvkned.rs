@@ -43,7 +43,9 @@ use core::fmt;
 
 use super::{has_zvbb, has_zvkned};
 use crate::cipher::aes::{BLOCK_SIZE, KeySize, MAX_WORDS, expand_words};
-use crate::cipher::{BlockCipher, add_low32, counter_blocks_via_ecb};
+use crate::cipher::{
+    BlockCipher, ByteOrder, add_counter, counter_blocks_via_ecb,
+};
 use crate::{BlockType, Error, KeyType};
 use zeroize::ZeroizeOnDrop;
 
@@ -168,6 +170,7 @@ impl<const K: usize> Aes<K> {
     pub fn xor_counter_blocks(
         &self,
         counter: &mut [u8; BLOCK_SIZE],
+        order: ByteOrder,
         data: &mut [u8],
     ) {
         debug_assert_eq!(data.len() % BLOCK_SIZE, 0);
@@ -175,41 +178,65 @@ impl<const K: usize> Aes<K> {
             return;
         }
         if !self.zvbb {
-            return counter_blocks_via_ecb(self, counter, data);
+            return counter_blocks_via_ecb(self, counter, order, data);
         }
-        // The block as four big-endian words: the first three are
-        // fixed, the last is the counter. Read this way they need no
-        // reversing on the way in, only on the way out.
-        let word = |i: usize| {
-            u32::from_be_bytes([
-                counter[i],
-                counter[i + 1],
-                counter[i + 2],
-                counter[i + 3],
-            ])
-        };
         let blocks = data.len() / BLOCK_SIZE;
         let rk = self.keys.as_ptr();
+        // The block as four words, read the way round the counter is,
+        // so that the counter is a plain number and the other three
+        // need no reversing on the way in.
+        let word = |i: usize| {
+            let b =
+                [counter[i], counter[i + 1], counter[i + 2], counter[i + 3]];
+            match order {
+                ByteOrder::Big => u32::from_be_bytes(b),
+                ByteOrder::Little => u32::from_le_bytes(b),
+            }
+        };
         // SAFETY: the struct only exists if try_new confirmed the
         // vector AES instructions, and `zvbb` says `vrev8.v` is here;
         // `data` holds `blocks` whole blocks and `blocks >= 1`.
         unsafe {
-            let run = match self.size {
-                KeySize::Aes128 => counter10,
-                KeySize::Aes192 => counter12,
-                KeySize::Aes256 => counter14,
-            };
-            run(
-                rk,
-                word(0),
-                word(4),
-                word(8),
-                word(12),
-                data.as_mut_ptr(),
-                blocks,
-            );
+            match order {
+                // The counter is the last word; the first three are
+                // fixed, and a reverse puts the pass in block order.
+                ByteOrder::Big => {
+                    let run = match self.size {
+                        KeySize::Aes128 => counter10,
+                        KeySize::Aes192 => counter12,
+                        KeySize::Aes256 => counter14,
+                    };
+                    run(
+                        rk,
+                        word(12),
+                        word(0),
+                        word(4),
+                        word(8),
+                        data.as_mut_ptr(),
+                        blocks,
+                    );
+                }
+                // The counter is the first word, and the block is
+                // already in the order the vector wants.
+                ByteOrder::Little => {
+                    let run = match self.size {
+                        KeySize::Aes128 => counter10_le,
+                        KeySize::Aes192 => counter12_le,
+                        KeySize::Aes256 => counter14_le,
+                    };
+                    run(
+                        rk,
+                        word(0),
+                        word(4),
+                        word(8),
+                        word(12),
+                        data.as_mut_ptr(),
+                        blocks,
+                    );
+                }
+            }
         }
-        add_low32(counter, blocks as u32);
+        add_counter(counter, order, blocks as u32);
     }
 
     /// # Safety
@@ -279,8 +306,13 @@ impl<const K: usize> BlockCipher for Aes<K> {
         Aes::decrypt_blocks(self, blocks)
     }
 
-    fn xor_counter_blocks(&self, counter: &mut Self::Block, data: &mut [u8]) {
-        Aes::xor_counter_blocks(self, counter, data)
+    fn xor_counter_blocks(
+        &self,
+        counter: &mut Self::Block,
+        order: ByteOrder,
+        data: &mut [u8],
+    ) {
+        Aes::xor_counter_blocks(self, counter, order, data)
     }
 }
 
@@ -567,7 +599,8 @@ macro_rules! vaes_body {
 /// Only that word is added to, so a carry out of it would be lost;
 /// the caller splits its run at that boundary.
 macro_rules! counter_body {
-    ($name:ident, $first:literal, [$($mid:literal),*], $last:literal) => {
+    ($name:ident, $first:literal, [$($mid:literal),*], $last:literal,
+     $lane:literal, [$a:literal, $b:literal, $c:literal], $rev:literal) => {
         /// # Safety
         /// Requires the vector extension, Zvkned and Zvbb with
         /// VLEN >= 128; `rk` must point at 15 round keys and `data`
@@ -575,10 +608,10 @@ macro_rules! counter_body {
         #[allow(clippy::too_many_arguments)]
         unsafe fn $name(
             rk: *const u32,
+            n: u32,
             c0: u32,
             c1: u32,
             c2: u32,
-            n: u32,
             data: *mut u8,
             blocks: usize,
         ) {
@@ -624,20 +657,20 @@ macro_rules! counter_body {
                     "vand.vi v12, v8, 3",
                     "vsrl.vi v8, v8, 2",
                     "vadd.vx v8, v8, {n}",
-                    "vmseq.vi v0, v12, 0",
+                    concat!("vmseq.vi v0, v12, ", $a),
                     "vmerge.vxm v8, v8, {c0}, v0",
-                    "vmseq.vi v0, v12, 1",
+                    concat!("vmseq.vi v0, v12, ", $b),
                     "vmerge.vxm v8, v8, {c1}, v0",
-                    "vmseq.vi v0, v12, 2",
+                    concat!("vmseq.vi v0, v12, ", $c),
                     "vmerge.vxm v8, v8, {c2}, v0",
                     "srli {t}, {vl}, 2",
                     "vmv.v.i v4, 0",
-                    "vmseq.vi v0, v12, 3",
+                    concat!("vmseq.vi v0, v12, ", $lane),
                     "vmerge.vxm v4, v4, {t}, v0",
                     "2:",
                     "vsetvli {vl}, {avl}, e32, m4, ta, ma",
                     "vmv.v.v v12, v8",
-                    "vrev8.v v12, v12",
+                    $rev,
                     concat!("vaesz.vs v12, ", $first),
                     $(concat!("vaesem.vs v12, ", $mid),)*
                     concat!("vaesef.vs v12, ", $last),
@@ -676,13 +709,18 @@ macro_rules! counter_body {
     };
 }
 
+// GCM counts in the last word, so the block is read big-endian
+// and one reverse puts each pass back into block order.
 counter_body!(
     counter10,
     "v16",
     [
         "v17", "v18", "v19", "v20", "v21", "v22", "v23", "v24", "v25"
     ],
-    "v26"
+    "v26",
+    3,
+    [0, 1, 2],
+    "vrev8.v v12, v12"
 );
 counter_body!(
     counter12,
@@ -691,7 +729,10 @@ counter_body!(
         "v17", "v18", "v19", "v20", "v21", "v22", "v23", "v24", "v25", "v26",
         "v27"
     ],
-    "v28"
+    "v28",
+    3,
+    [0, 1, 2],
+    "vrev8.v v12, v12"
 );
 counter_body!(
     counter14,
@@ -700,7 +741,49 @@ counter_body!(
         "v17", "v18", "v19", "v20", "v21", "v22", "v23", "v24", "v25", "v26",
         "v27", "v28", "v29"
     ],
-    "v30"
+    "v30",
+    3,
+    [0, 1, 2],
+    "vrev8.v v12, v12"
+);
+
+// GCM-SIV counts in the first word, least significant byte
+// first, which is the order the vector holds it in already:
+// nothing to reverse, and the fixed words are the other three.
+counter_body!(
+    counter10_le,
+    "v16",
+    [
+        "v17", "v18", "v19", "v20", "v21", "v22", "v23", "v24", "v25"
+    ],
+    "v26",
+    0,
+    [1, 2, 3],
+    ""
+);
+counter_body!(
+    counter12_le,
+    "v16",
+    [
+        "v17", "v18", "v19", "v20", "v21", "v22", "v23", "v24", "v25", "v26",
+        "v27"
+    ],
+    "v28",
+    0,
+    [1, 2, 3],
+    ""
+);
+counter_body!(
+    counter14_le,
+    "v16",
+    [
+        "v17", "v18", "v19", "v20", "v21", "v22", "v23", "v24", "v25", "v26",
+        "v27", "v28", "v29"
+    ],
+    "v30",
+    0,
+    [1, 2, 3],
+    ""
 );
 
 // Encryption: key 0, middle rounds with keys 1..R-1, final with R.
@@ -797,6 +880,15 @@ mod tests {
         let Some(aes) = aes(&[0x5au8; 16]) else {
             return;
         };
+        // Both conventions: GCM's last four bytes and GCM-SIV's
+        // first four, which is the same loop with nothing to
+        // reverse.
+        for order in [ByteOrder::Big, ByteOrder::Little] {
+            counter_blocks_match(&aes, order);
+        }
+    }
+
+    fn counter_blocks_match<const K: usize>(aes: &Aes<K>, order: ByteOrder) {
         const N: usize = 37 * BLOCK_SIZE;
         let start = [0x77u8; BLOCK_SIZE];
 
@@ -806,18 +898,18 @@ mod tests {
             let mut block = counter;
             aes.encrypt_block(&mut block);
             chunk.copy_from_slice(&block);
-            add_low32(&mut counter, 1);
+            add_counter(&mut counter, order, 1);
         }
 
         for blocks in 0..=N / BLOCK_SIZE {
             let n = blocks * BLOCK_SIZE;
             let mut got = [0u8; N];
             let mut counter = start;
-            aes.xor_counter_blocks(&mut counter, &mut got[..n]);
+            aes.xor_counter_blocks(&mut counter, order, &mut got[..n]);
             assert_eq!(got[..n], want[..n], "{blocks} blocks");
             // And the counter is left on the block after the last.
             let mut want_counter = start;
-            add_low32(&mut want_counter, blocks as u32);
+            add_counter(&mut want_counter, order, blocks as u32);
             assert_eq!(counter, want_counter, "{blocks} blocks, counter");
         }
     }

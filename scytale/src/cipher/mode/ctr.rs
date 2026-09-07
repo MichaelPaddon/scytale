@@ -55,7 +55,7 @@
 use core::fmt;
 
 use super::xor;
-use crate::cipher::BlockCipher;
+use crate::cipher::{BlockCipher, ByteOrder};
 use crate::{ByteArray, Error};
 
 /// Counter mode over a block cipher.
@@ -198,6 +198,7 @@ where
             let run = &mut whole[done..done + take];
             self.cipher.xor_counter_blocks(
                 &mut self.counter,
+                ByteOrder::Big,
                 <C::Block as ByteArray>::flatten_mut(run),
             );
             if take == room {

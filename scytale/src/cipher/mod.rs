@@ -78,9 +78,9 @@ pub trait BlockCipher: BlockType + KeyType {
     fn decrypt_blocks(&self, blocks: &mut [Self::Block]);
 
     /// Encrypts the run of blocks made from `counter` by adding
-    /// 0, 1, 2 and so on to its last four bytes, read as one
-    /// big-endian number, and XORs each result into `data`. Leaves
-    /// `counter` on the block after the last.
+    /// 0, 1, 2 and so on to the field `order` names, and XORs each
+    /// result into `data`. Leaves `counter` on the block after the
+    /// last.
     ///
     /// This is counter mode's inner loop, and it is here rather than
     /// assembled from [`encrypt_blocks`](Self::encrypt_blocks) by the
@@ -94,9 +94,28 @@ pub trait BlockCipher: BlockType + KeyType {
     /// in the whole block splits its run at that boundary.
     ///
     /// The default does assemble it from `encrypt_blocks`.
-    fn xor_counter_blocks(&self, counter: &mut Self::Block, data: &mut [u8]) {
-        counter_blocks_via_ecb(self, counter, data)
+    fn xor_counter_blocks(
+        &self,
+        counter: &mut Self::Block,
+        order: ByteOrder,
+        data: &mut [u8],
+    ) {
+        counter_blocks_via_ecb(self, counter, order, data)
     }
+}
+
+/// Which four bytes of a block hold a counter, and which way round.
+///
+/// GCM counts in the last four, most significant first; GCM-SIV, as
+/// RFC 8452 defines it, counts in the first four, least significant
+/// first. Read the matching way, both are the low thirty-two bits of
+/// the block, which is why one loop serves them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ByteOrder {
+    /// The last four bytes, most significant first.
+    Big,
+    /// The first four bytes, least significant first.
+    Little,
 }
 
 /// [`BlockCipher::xor_counter_blocks`] assembled from
@@ -107,6 +126,7 @@ pub trait BlockCipher: BlockType + KeyType {
 pub(crate) fn counter_blocks_via_ecb<C>(
     cipher: &C,
     counter: &mut C::Block,
+    order: ByteOrder,
     data: &mut [u8],
 ) where
     C: BlockCipher + ?Sized,
@@ -120,7 +140,7 @@ pub(crate) fn counter_blocks_via_ecb<C>(
         let keystream = &mut keystream[..group.len() / size];
         for block in keystream.iter_mut() {
             *block = *counter;
-            add_low32(counter.as_mut(), 1);
+            add_counter(counter.as_mut(), order, 1);
         }
         cipher.encrypt_blocks(keystream);
         for (chunk, key) in group.chunks_mut(size).zip(&*keystream) {
@@ -129,15 +149,24 @@ pub(crate) fn counter_blocks_via_ecb<C>(
     }
 }
 
-/// Adds `count` to the last four bytes of `block`, read as one
-/// big-endian number, wrapping inside them rather than carrying out.
+/// Adds `count` to the counter field `order` names, wrapping inside
+/// those four bytes rather than carrying out.
 #[inline]
-pub(crate) fn add_low32(block: &mut [u8], count: u32) {
+pub(crate) fn add_counter(block: &mut [u8], order: ByteOrder, count: u32) {
     debug_assert!(block.len() >= 4);
-    let start = block.len() - 4;
-    let field = &mut block[start..];
-    let n = u32::from_be_bytes([field[0], field[1], field[2], field[3]]);
-    field.copy_from_slice(&n.wrapping_add(count).to_be_bytes());
+    match order {
+        ByteOrder::Big => {
+            let start = block.len() - 4;
+            let f = &mut block[start..];
+            let n = u32::from_be_bytes([f[0], f[1], f[2], f[3]]);
+            f.copy_from_slice(&n.wrapping_add(count).to_be_bytes());
+        }
+        ByteOrder::Little => {
+            let f = &mut block[..4];
+            let n = u32::from_le_bytes([f[0], f[1], f[2], f[3]]);
+            f.copy_from_slice(&n.wrapping_add(count).to_le_bytes());
+        }
+    }
 }
 
 #[cfg(test)]
