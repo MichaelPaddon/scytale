@@ -203,10 +203,19 @@ impl Options {
 
     /// Whether a row belongs in this run. Every filter word must
     /// appear somewhere in the implementation or algorithm name, so
-    /// `gcm aesni` narrows to one implementation's GCM rows.
+    /// `gcm aesni` narrows to one implementation's GCM rows. A word
+    /// may offer alternatives separated by commas, so `ctr,ecb-enc`
+    /// keeps rows matching either.
+    ///
+    /// The two go together: a comparison between rows only means
+    /// anything when they were measured in the same run, since the
+    /// clock and which core the thread lands on both move between
+    /// runs, and a conjunction alone cannot ask for two rows.
     fn wants(&self, implementation: &str, algorithm: &str) -> bool {
         let name = format!("{implementation} {algorithm}");
-        self.filters.iter().all(|filter| name.contains(filter))
+        self.filters
+            .iter()
+            .all(|filter| filter.split(',').any(|word| name.contains(word)))
     }
 }
 
@@ -218,7 +227,9 @@ usage: cargo bench --bench speed -- [options] [filter...]
   --help        this text
 
 A filter is a bare word; a row runs when its implementation and
-algorithm names together contain every filter given.
+algorithm names together contain every filter given. Commas inside a
+word offer alternatives, so `auto ctr,ecb-enc` keeps both of those
+rows, measured in the one run and so comparable.
 ";
 
 /// Runs every implementation the processor supports.
@@ -1916,6 +1927,30 @@ fn self_test() -> ExitCode {
     check(
         "a filter must appear",
         !options.wants("aesni", "aes-128-ctr"),
+    );
+
+    // Commas inside a word offer alternatives, so that two rows can
+    // be asked for and compared within one run.
+    let options =
+        Options::parse(["auto", "ctr,ecb-enc"].into_iter().map(String::from))
+            .ok()
+            .flatten()
+            .expect("filters parse");
+    check(
+        "the first alternative matches",
+        options.wants("auto", "aes-128-ctr"),
+    );
+    check(
+        "the second alternative matches",
+        options.wants("auto", "aes-128-ecb-enc"),
+    );
+    check(
+        "neither alternative matches",
+        !options.wants("auto", "aes-128-ofb"),
+    );
+    check(
+        "the other words still have to match",
+        !options.wants("vaes", "aes-128-ctr"),
     );
 
     check(
