@@ -39,7 +39,11 @@ const REDUCE: u64 = 0xe100_0000_0000_0000;
 
 /// The most blocks any architecture here hashes in one group. It
 /// fixes the size of the table of powers of the subkey.
-const MAX_GROUP: usize = 8;
+///
+/// Visible to the rest of the modes so that a caller which has to
+/// transform blocks on their way in, as POLYVAL does, can work in
+/// batches that reach the group multiply rather than block by block.
+pub(super) const MAX_GROUP: usize = 8;
 
 // The accelerated multiply for whichever architecture this is. Each
 // offers the same set of items, so the code below needs no

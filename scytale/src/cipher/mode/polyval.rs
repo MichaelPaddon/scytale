@@ -8,7 +8,16 @@
 //! tested multiplication is worth more than the few operations saved
 //! by writing the field arithmetic out again.
 
-use super::ghash::{BLOCK, Ghash, multiply_by_x};
+use super::ghash::{BLOCK, Ghash, MAX_GROUP, multiply_by_x};
+
+/// Blocks reversed at a time on the way into GHASH.
+///
+/// GHASH hashes a whole group of blocks at once only when a single
+/// call brings it one; handed a block at a time it waits out the
+/// full latency of a multiply for each. Reversing in batches is what
+/// lets the blocks arrive in groups. A multiple of the group means
+/// every batch is an exact number of them.
+const BATCH: usize = 2 * MAX_GROUP;
 
 /// A POLYVAL computation in progress.
 #[derive(Clone)]
@@ -25,6 +34,17 @@ fn reverse(block: &[u8]) -> [u8; BLOCK] {
     out.copy_from_slice(block);
     out.reverse();
     out
+}
+
+/// Reverses each block of `src`, which is [`BATCH`] whole blocks,
+/// into `dst`.
+fn reverse_batch(src: &[u8], dst: &mut [[u8; BLOCK]; BATCH]) {
+    debug_assert_eq!(src.len(), BATCH * BLOCK);
+    let (blocks, _) = src.as_chunks::<BLOCK>();
+    for (block, out) in blocks.iter().zip(dst.iter_mut()) {
+        *out = *block;
+        out.reverse();
+    }
 }
 
 impl Polyval {
@@ -55,7 +75,15 @@ impl Polyval {
             self.absorb(&block);
             self.used = 0;
         }
-        let mut blocks = data.chunks_exact(BLOCK);
+        // Whole batches first, so that GHASH sees whole groups.
+        let mut batches = data.chunks_exact(BATCH * BLOCK);
+        let mut reversed = [[0u8; BLOCK]; BATCH];
+        for batch in &mut batches {
+            reverse_batch(batch, &mut reversed);
+            self.inner.update(reversed.as_flattened());
+        }
+
+        let mut blocks = batches.remainder().chunks_exact(BLOCK);
         for block in &mut blocks {
             self.absorb(block);
         }
@@ -150,6 +178,34 @@ mod tests {
                     "{len} bytes in pieces of {piece}"
                 );
             }
+        }
+    }
+
+    /// Blocks are reversed a batch at a time so that GHASH sees
+    /// whole groups, which puts a seam at every batch boundary and
+    /// another where the last batch gives way to single blocks.
+    /// Pieces that straddle those seams must hash the same as one
+    /// call over the lot.
+    #[test]
+    fn batches_agree_with_one_call() {
+        let h = hex::<16>(H);
+        const LEN: usize = (2 * BATCH + 3) * BLOCK + 5;
+        let data: [u8; LEN] = core::array::from_fn(|i| (i * 11 + 1) as u8);
+
+        let mut whole = Polyval::new(&h);
+        whole.update(&data);
+        whole.pad();
+        let want = whole.finish();
+
+        // Sizes that land inside a batch, on its boundary and just
+        // past it, and one that is a whole batch itself.
+        for piece in [BLOCK, BATCH * BLOCK - 1, BATCH * BLOCK, 129] {
+            let mut p = Polyval::new(&h);
+            for part in data.chunks(piece) {
+                p.update(part);
+            }
+            p.pad();
+            assert_eq!(p.finish(), want, "pieces of {piece}");
         }
     }
 
