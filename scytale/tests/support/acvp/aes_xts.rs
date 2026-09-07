@@ -8,9 +8,9 @@
 //! for the groups that also give a sequence number.
 
 use super::{groups as suite_groups, hex, key_of};
-use scytale::cipher::mode::Xts;
-use scytale::cipher::BlockCipher;
 use scytale::KeyType;
+use scytale::cipher::BlockCipher;
+use scytale::cipher::mode::Xts;
 use serde_json::Value;
 
 const FILE: &str = "ACVP-AES-XTS-1.0/internalProjection.json";

@@ -42,13 +42,13 @@
 #![allow(unsafe_code)]
 
 use core::arch::aarch64::{
-    vaeseq_u8, vaesimcq_u8, vdupq_n_u32, vdupq_n_u8, vgetq_lane_u32, vld1q_u8,
-    vreinterpretq_u32_u8, vreinterpretq_u8_u32, vst1q_u8,
+    vaeseq_u8, vaesimcq_u8, vdupq_n_u8, vdupq_n_u32, vgetq_lane_u32, vld1q_u8,
+    vreinterpretq_u8_u32, vreinterpretq_u32_u8, vst1q_u8,
 };
 use core::fmt;
 
-use crate::cipher::aes::{expand_words, KeySize, BLOCK_SIZE, MAX_WORDS};
 use crate::cipher::BlockCipher;
+use crate::cipher::aes::{BLOCK_SIZE, KeySize, MAX_WORDS, expand_words};
 use crate::{BlockType, Error, KeyType};
 use zeroize::ZeroizeOnDrop;
 

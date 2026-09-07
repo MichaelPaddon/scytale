@@ -5,10 +5,10 @@
 //! decryption cases carry a tag that must be rejected.
 
 use super::{cipher_of, groups as suite_groups, hex};
-use scytale::cipher::mode::Xpn;
-use scytale::cipher::BlockCipher;
 use scytale::Error;
 use scytale::KeyType;
+use scytale::cipher::BlockCipher;
+use scytale::cipher::mode::Xpn;
 use serde_json::Value;
 
 const FILE: &str = "ACVP-AES-XPN-1.0/internalProjection.json";

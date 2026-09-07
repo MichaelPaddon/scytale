@@ -6,10 +6,10 @@
 //! wrapping is refused rather than quietly accepted.
 
 use super::{cipher_of, groups as suite_groups, hex};
-use scytale::cipher::mode::Kw;
-use scytale::cipher::BlockCipher;
 use scytale::Error;
 use scytale::KeyType;
+use scytale::cipher::BlockCipher;
+use scytale::cipher::mode::Kw;
 use serde_json::Value;
 
 const FILE: &str = "ACVP-AES-KW-1.0/internalProjection.json";

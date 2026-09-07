@@ -40,8 +40,8 @@
 use core::fmt;
 
 use super::{bit, set_bit, shift_in_bit};
-use crate::cipher::BlockCipher;
 use crate::Error;
+use crate::cipher::BlockCipher;
 
 /// CFB with 1-bit segments over a block cipher.
 #[derive(Clone)]

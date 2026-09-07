@@ -37,8 +37,8 @@
 use core::fmt;
 
 use super::shift_in_byte;
-use crate::cipher::BlockCipher;
 use crate::Error;
+use crate::cipher::BlockCipher;
 
 /// CFB with 8-bit segments over a block cipher.
 #[derive(Clone)]

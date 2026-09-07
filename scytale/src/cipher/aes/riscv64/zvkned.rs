@@ -42,8 +42,8 @@
 use core::fmt;
 
 use super::has_zvkned;
-use crate::cipher::aes::{expand_words, KeySize, BLOCK_SIZE, MAX_WORDS};
 use crate::cipher::BlockCipher;
+use crate::cipher::aes::{BLOCK_SIZE, KeySize, MAX_WORDS, expand_words};
 use crate::{BlockType, Error, KeyType};
 use zeroize::ZeroizeOnDrop;
 
@@ -491,7 +491,9 @@ macro_rules! vaes_body {
 vaes_body!(
     encrypt10,
     "v16",
-    ["v17", "v18", "v19", "v20", "v21", "v22", "v23", "v24", "v25"],
+    [
+        "v17", "v18", "v19", "v20", "v21", "v22", "v23", "v24", "v25"
+    ],
     "v26",
     "vaesem.vs",
     "vaesef.vs"
@@ -524,7 +526,9 @@ vaes_body!(
 vaes_body!(
     decrypt10,
     "v26",
-    ["v25", "v24", "v23", "v22", "v21", "v20", "v19", "v18", "v17"],
+    [
+        "v25", "v24", "v23", "v22", "v21", "v20", "v19", "v18", "v17"
+    ],
     "v16",
     "vaesdm.vs",
     "vaesdf.vs"

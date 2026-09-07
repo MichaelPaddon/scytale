@@ -65,10 +65,10 @@
 use core::fmt;
 
 use super::ghash::BLOCK;
-use super::{xor, LANES};
+use super::{LANES, xor};
+use crate::Error;
 use crate::cipher::BlockCipher;
 use crate::util;
-use crate::Error;
 
 /// XTS over a block cipher.
 ///

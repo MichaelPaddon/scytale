@@ -11,9 +11,9 @@
 
 use super::super::acvp::hex;
 use super::load;
+use scytale::Error;
 use scytale::cipher::chacha20::{Backend, Cipher};
 use scytale::cipher::mode::ChaCha20Poly1305;
-use scytale::Error;
 
 const FILE: &str = "wycheproof/chacha20_poly1305_test.json";
 

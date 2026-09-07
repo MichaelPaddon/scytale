@@ -39,7 +39,7 @@
 
 use core::fmt;
 
-use super::kw::{apply, unwrap_body, wrap_body, SEMIBLOCK};
+use super::kw::{SEMIBLOCK, apply, unwrap_body, wrap_body};
 use crate::cipher::{BlockCipher, Error};
 use crate::util;
 

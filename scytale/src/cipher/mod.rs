@@ -81,7 +81,7 @@ pub trait BlockCipher: BlockType + KeyType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cipher::aes::{portable, Aes256};
+    use crate::cipher::aes::{Aes256, portable};
 
     /// Two implementations behind one object type agree.
     #[test]

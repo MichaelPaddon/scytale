@@ -18,7 +18,7 @@
 
 #![allow(unsafe_code)]
 
-use crate::arch::riscv64::{hwprobe_ima_ext_0, vlenb, EXT_ZVKG, IMA_V};
+use crate::arch::riscv64::{EXT_ZVKG, IMA_V, hwprobe_ima_ext_0, vlenb};
 
 /// How many blocks the group multiply takes at once. `vgmul` does a
 /// whole field multiplication in one instruction, so there is no

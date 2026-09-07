@@ -106,10 +106,10 @@
 //! whose reads never depend on `d` or the primes. Verification, and
 //! the padding checks on both sides, handle only public values.
 
-use crate::hash::Hash;
-use crate::math::rsa::{mgf1_xor, Private, Public};
-use crate::random::Random;
 use crate::Error;
+use crate::hash::Hash;
+use crate::math::rsa::{Private, Public, mgf1_xor};
+use crate::random::Random;
 
 /// A hash that PKCS#1 v1.5 can name: one with a DER `DigestInfo`
 /// prefix. All the SHA-2 and SHA-3 digests have one, under the one
@@ -676,8 +676,8 @@ mod tests {
     const SALT: &str =
         "65c7df7043958a926270dca4bf17f29c8ecb6e2a5dd08ecb331df85a5b4d501d";
 
-    const N2048: &str =
-        "ba5d6c10c1d21779df565ebeba34c4e297f2d39e886edb20ff84f39522d62437\
+    const N2048: &str = "\
+         ba5d6c10c1d21779df565ebeba34c4e297f2d39e886edb20ff84f39522d62437\
          b8226ebbfd03aa28427c1105eb24f5aa823c25f8a34658a1e0717f0998b4f6f4\
          7eb7bb1d1747a3db256bea209b32a70f2ef5e72ef88caf8696fdb452d8abc583\
          87b0a34016c022947798efc51b2b90d4a1998ae3f267c2623f8fabc4bf7e431d\
@@ -686,8 +686,8 @@ mod tests {
          fdb0e35b15cead4e8f925e4809e25d603b2cec1c72c644ca7f5cb5083a75f147\
          0c9ea038935fcac5c5744156aaf70c8d771da6d2a5e802d571f07d95edfa9721";
 
-    const D2048: &str =
-        "0e04ed162d9e6249b6b546974e669dd0f5e13c6e16915046a1321d28c0e01f05\
+    const D2048: &str = "\
+         0e04ed162d9e6249b6b546974e669dd0f5e13c6e16915046a1321d28c0e01f05\
          5a02ad15d328ad6a2de62b59a8a0b522487dc1d57c62d454091040a0362e96cd\
          39a3149e519c0005824125f1a1fb237a0eec4ca1c9ecbb5f82883f42642e37c3\
          7737a07037c5e85406d32866496ef38c2b43e3a0d6215c0c0c0000c9e225db62\
@@ -696,8 +696,8 @@ mod tests {
          fc800b54b7dc697c37a93effb601a46323670ad5f289c7894bb8df2a74bf271f\
          24c48d037f06551ed47ad41d60b258728397734a41c0e40b71aa60d790a6fd61";
 
-    const V15_SHA256: &str =
-        "16ec653a7b69873aea0a15006b7fa90df5d6f1473cb5c2d0a10dda835d6cef86\
+    const V15_SHA256: &str = "\
+         16ec653a7b69873aea0a15006b7fa90df5d6f1473cb5c2d0a10dda835d6cef86\
          7ee607ac3592c780ee780b48e6077559c80c36689baa6a23d7d3fed16a712de7\
          6defc4d3512b83ce1fb7d0c49fa22edc51636482604ee14431a1ea92c1df1be6\
          3ac508ed5e835a0f8c132ac4553e208a5d14922853a89ed582e2c970b5e02a7a\
@@ -706,8 +706,8 @@ mod tests {
          132a5eef050f7ca0321a1d856b333a937b24fa68dc4283fc4b6b09b6ad71cddf\
          450b1f7d4a183b7d9452c5db9c43fb90d2cb3e2c479650d514026d760f59ce13";
 
-    const V15_SHA512: &str =
-        "1927f6ec5588b69c88f13a993a9e483d92ad5c3377d25679c9eb5db9ff01e0c3\
+    const V15_SHA512: &str = "\
+         1927f6ec5588b69c88f13a993a9e483d92ad5c3377d25679c9eb5db9ff01e0c3\
          4fcbb0e4054abe5883c19e328393718406c8fdd01cbdd96a5f5cc02d5ff4da02\
          517d4d2c17288938521302a56d495a41828f859299832ae242d06202a1092d83\
          9ece3c2e9ad50171c8ec83f1e56503d851967a113217cb6be5700c229942a5a8\
@@ -716,8 +716,8 @@ mod tests {
          b6b09ec76f826dc27f995627d012cdf6127131eb64518634fea9515714c300d9\
          245011176934a83fdb197465bbf3b888a68a0a13b50597931abf6afa858e0e4a";
 
-    const PSS_SHA256_SALT32: &str =
-        "2caa1d373513dca2174700db35674f96f1093c3bafb3af899d70117fb5536bfd\
+    const PSS_SHA256_SALT32: &str = "\
+         2caa1d373513dca2174700db35674f96f1093c3bafb3af899d70117fb5536bfd\
          7ff04b9dbcd1d05812b945383dd6bbcf131e2b0ea791fa026d1f96f6e9c2b8d4\
          94595ef8d8eeba40099bc54eebce75c7ee8e694e58ef3be1f385807b8b806ece\
          09412eacffeb8ab82b45d679d4060895549490d2a1cb7bbde0dc1b5ae28f9577\
@@ -726,8 +726,8 @@ mod tests {
          8d27fc9f0f4b83cef525d7c8e1aa9f5b8d89c7be33736f5fe22d6c4c111a54ae\
          42897e65e977fee49e5c9445c0e1cd33534683b1ad3d3d61f5d1a85c68a758d2";
 
-    const PSS_SHA256_SALT0: &str =
-        "51074c83ad34151fc8831856759e58e429a151393ffd54675d0baf7aa14dbe31\
+    const PSS_SHA256_SALT0: &str = "\
+         51074c83ad34151fc8831856759e58e429a151393ffd54675d0baf7aa14dbe31\
          79a3b4db881938bd7fd80cd4d626c7412e34daa56118be635bdb42ec17bb99ed\
          3084613bd10fe9e333c6d8eff1ea254c5a4a54d7ebcae7fa47048243b5444caa\
          c4539f1685c3628d11695244f388dfb220bc62b39ee5d562b069ed98cc000e9d\
@@ -736,26 +736,26 @@ mod tests {
          be497a2295f2bdd4e696a64d63789070f7a0104839193d29d7ed327e8d5ad105\
          d75a69132cf1862eaba21925b51aba99c010aed0b050cfda9b78672950fc2977";
 
-    const N1024: &str =
-        "cf2a9ef8634206418550ed3586e4f9cde5a43e54d528ac70f1424d6f9472e478\
+    const N1024: &str = "\
+         cf2a9ef8634206418550ed3586e4f9cde5a43e54d528ac70f1424d6f9472e478\
          e17815dae8b0b3dce84522e7db2ab04f7473e0cbe4881cffd6a4d0cafb3852d4\
          34f7ef03d5de1c180dc3a175d8f47b434dd672839497c4499d5dada21ca4de6f\
          f531f0b91dd883eda6eda3384b783831e5f8c63a14733e9b428257ba4a71aa29";
 
-    const D1024: &str =
-        "463303965890156d9b5ece5a9e80b5b352f72255fdbb201fcf68efb37922ab8f\
+    const D1024: &str = "\
+         463303965890156d9b5ece5a9e80b5b352f72255fdbb201fcf68efb37922ab8f\
          d89b2810bb5bb13f1087e8e997273282620c2826ff242e6b7510f95d66de7196\
          31ca4e2977985f7479b068ac0a6fa7fbae5b2e972cbf0a7a662ec5cc4e2a43b6\
          a6a898d3a42a4ca5e7cd511c0451fcecdf01081e7a6e9ba688c06b089821df17";
 
-    const V15_1024_SHA256: &str =
-        "139491453d895b6c59534d4301a0b732abffacc06501f3c3b2a69f0f6bcd04a0\
+    const V15_1024_SHA256: &str = "\
+         139491453d895b6c59534d4301a0b732abffacc06501f3c3b2a69f0f6bcd04a0\
          e626eb143b14b1c763a4d97ee767942432784d9d6abd76a180d3bc1bd4c8476b\
          b30c4a02ed11d6c18a854dfef32c3692316649ccc4ce4e1e802f7603161df727\
          e68da996e4cf700a69720971c543eb1edac08ed60eb2dab98e05d6a1578f6715";
 
-    const PSS_1024_SHA384_SALT32: &str =
-        "2c4d6b7546da625ae4c235e5814170542111e50afe17a6e05ba8fe90f64d6e89\
+    const PSS_1024_SHA384_SALT32: &str = "\
+         2c4d6b7546da625ae4c235e5814170542111e50afe17a6e05ba8fe90f64d6e89\
          de3880bae7ee0d3ad40f9cd45e07074b4d25a9d28c4c367c32f00b3b81fabbb1\
          fc9a26cbaa03f8127a6d095444b57e8039e58b4412e900f43e8813538158ebd6\
          0bb18c574470aa9eef2a17394bf912a352823bb7497687176063ad80e69793b5";
@@ -916,32 +916,32 @@ mod tests {
         ));
     }
 
-    const P2048: &str =
-        "c04e0031d3404e9e48359b0b872df10ddab383ef8a7d3552e8160bdba70265e5\
+    const P2048: &str = "\
+         c04e0031d3404e9e48359b0b872df10ddab383ef8a7d3552e8160bdba70265e5\
          5e547b4fea93ff124612c55a1810e8c868b06924577437d6470326d30a7a979e\
          24c9f0e1e0db637b83a6878722342840e62c97a3ec07ebbda011b621276519e4\
          6f9bb82f65e98ed31937795b2e9eaee610bbda1ddfef977274bb295687e1dee5";
 
-    const Q2048: &str =
-        "f817c62d739807f8e64e3a010ce43165eeb93c825875afe6351dd4b1bef7d124\
+    const Q2048: &str = "\
+         f817c62d739807f8e64e3a010ce43165eeb93c825875afe6351dd4b1bef7d124\
          5a9608408f93e4c17bec44644f7244c59f9ccf923875ef7a33d172cee7f245cd\
          e19285cd796f6d8479341643308405b976543b4968be72a578e25e611b7f8e76\
          dedee163025f11341f1e1d072dd890e9c2b5c58e307707267510a46d0457578d";
 
-    const DP2048: &str =
-        "9c38c17fb895ed48387113db719da8ce1074f5218be7db81d678d279465b745b\
+    const DP2048: &str = "\
+         9c38c17fb895ed48387113db719da8ce1074f5218be7db81d678d279465b745b\
          b91df86f1ba9cef51167fe5b0a61f2399c927357ca93e72873d7e39a5e50e90a\
          d7e8157fea234fd5ef4541a44ded012677d691f9e0ad2e9d8583dde9610f88d1\
          42b9c60efb43997b7468d4757692029373d4a784cd7ede1165330689fd2948e1";
 
-    const DQ2048: &str =
-        "d1bdd7afa96048ad2697cff5ff5e145d26dbb7ca42db0c20c59b38ac24d5021d\
+    const DQ2048: &str = "\
+         d1bdd7afa96048ad2697cff5ff5e145d26dbb7ca42db0c20c59b38ac24d5021d\
          87effb7e0964712b1a877eb2877005b045e69e9df1d9d2e22f58cd851b16f9e8\
          bae1d2f909c72881acae5a7be752563c9b4b4eec1aff97914987a75ed58e9b74\
          e7aaea457845c3179b8f2bdf5be5116e6f4c997e427efeae869dd144d13cbe29";
 
-    const QINV2048: &str =
-        "7066b0f24630677e6ff95fabbefc030c8723481efdd8e7d9af52e057d10f6f98\
+    const QINV2048: &str = "\
+         7066b0f24630677e6ff95fabbefc030c8723481efdd8e7d9af52e057d10f6f98\
          bd9a82b664dd1c057281a6970421a8324021125cb72f27f97b9857343e388e32\
          5bdf3aea9c167bf33468a4318fd38f8002b92bfc284074aa499587f18ddebefc\
          298a443f2ba98d20f0411d6a37f6aac042e57333e7817abd31e915795968d909";
@@ -1147,24 +1147,24 @@ mod tests {
         let _ = key;
     }
 
-    const P1024: &str =
-        "ded94047096410d910e4b796a631463c8ba4bc51a7f51007e47d00fe74b7bacc\
+    const P1024: &str = "\
+         ded94047096410d910e4b796a631463c8ba4bc51a7f51007e47d00fe74b7bacc\
          5e1bef5fa160eb536e3ffbeb13d85458fd4cfa34308b779103a15be78c936247";
 
-    const Q1024: &str =
-        "edfc25751deed003561b8708d4403c9fff4f3d87f7f1127a82dfdb2b70bf9cb9\
+    const Q1024: &str = "\
+         edfc25751deed003561b8708d4403c9fff4f3d87f7f1127a82dfdb2b70bf9cb9\
          eea5a3c9db922400f7c204a31663ed1b09b8d0e62a6558db73473c7e3c85d80f";
 
-    const DP1024: &str =
-        "52c9ccfa56ffc8ce8b5b1ce527aaa898379ca4a5854b22807c1f006e87b7f5fa\
+    const DP1024: &str = "\
+         52c9ccfa56ffc8ce8b5b1ce527aaa898379ca4a5854b22807c1f006e87b7f5fa\
          947fb64705b1f6dad0db8e603fc81f55cc0c7beb45999a7ad22970f62da05763";
 
-    const DQ1024: &str =
-        "a65b8003a26cf1d3a33992e74517b24955bb1a941569db34f08f7331a69b0aff\
+    const DQ1024: &str = "\
+         a65b8003a26cf1d3a33992e74517b24955bb1a941569db34f08f7331a69b0aff\
          9e27039b737570dd8c537fd2513080ea499d7bc9a9113750100157f41672a959";
 
-    const QINV1024: &str =
-        "2203ff0aa7f1629991e463adfebe4629dc50aee793221bf728347fb5ab03de34\
+    const QINV1024: &str = "\
+         2203ff0aa7f1629991e463adfebe4629dc50aee793221bf728347fb5ab03de34\
          086cdad1fc21bbc9cbbcade52b5e77f017ac74377a8b566b4953e2d3ae47b23c";
 
     type CrtParts1024 = ([u8; 64], [u8; 64], [u8; 64], [u8; 64], [u8; 64]);

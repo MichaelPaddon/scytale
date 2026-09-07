@@ -15,8 +15,8 @@
 
 #![allow(unsafe_code)]
 
-use super::{Backend, Cipher, Sealed, BLOCK_SIZE};
-use crate::arch::riscv64::{hwprobe_ima_ext_0, vlenb, EXT_ZVBB, IMA_V};
+use super::{BLOCK_SIZE, Backend, Cipher, Sealed};
+use crate::arch::riscv64::{EXT_ZVBB, IMA_V, hwprobe_ima_ext_0, vlenb};
 
 /// ChaCha20 with the vector extension and Zvbb.
 pub type ChaCha20 = Cipher<Zvbb>;

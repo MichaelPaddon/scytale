@@ -21,9 +21,9 @@
 //! initiator group.
 
 use super::{hex, load};
+use scytale::hash::Hash;
 use scytale::hash::sha1::Sha1;
 use scytale::hash::sha2::Sha512;
-use scytale::hash::Hash;
 use scytale::pke::rsa::Rsa2048PrivateKey;
 use serde_json::Value;
 

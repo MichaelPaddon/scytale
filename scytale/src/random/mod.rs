@@ -101,8 +101,8 @@ use core::fmt;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::cipher::aes::{Aes256, BLOCK_SIZE};
 use crate::Error;
+use crate::cipher::aes::{Aes256, BLOCK_SIZE};
 
 pub use source::{External, Processor, System};
 

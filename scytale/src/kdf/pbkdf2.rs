@@ -40,8 +40,8 @@
 //! keys keep working.
 
 use crate::hash::Hash;
-use crate::mac::hmac::Hmac;
 use crate::mac::Mac;
+use crate::mac::hmac::Hmac;
 use crate::{BlockType, Error};
 
 /// Fills `key` from `password` and `salt` with `iterations` rounds.

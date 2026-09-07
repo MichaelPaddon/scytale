@@ -8,9 +8,9 @@
 //! expanded form alike.
 
 use super::{hex, load};
+use scytale::Error;
 use scytale::random::Random;
 use scytale::sig::ml_dsa::{ml_dsa_44, ml_dsa_65, ml_dsa_87};
-use scytale::Error;
 use serde_json::Value;
 
 /// A random source that yields fixed bytes.

@@ -16,7 +16,7 @@
 
 use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
 
-use super::{Backend, Cipher, Sealed, BLOCK_SIZE};
+use super::{BLOCK_SIZE, Backend, Cipher, Sealed};
 
 /// ChaCha20 with AVX2.
 pub type ChaCha20 = Cipher<Avx2>;
@@ -272,10 +272,10 @@ unsafe fn group4(state: &[u32; 16], data: *mut u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Error;
     use crate::cipher::chacha20::tests::{
         check_known_answers, check_matches_portable,
     };
-    use crate::Error;
 
     #[test]
     fn known_answers() {

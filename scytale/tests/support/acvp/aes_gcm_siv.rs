@@ -5,10 +5,10 @@
 //! whose tags must be rejected.
 
 use super::{groups as suite_groups, hex, key_of};
-use scytale::cipher::mode::GcmSiv;
-use scytale::cipher::BlockCipher;
 use scytale::Error;
 use scytale::KeyType;
+use scytale::cipher::BlockCipher;
+use scytale::cipher::mode::GcmSiv;
 use serde_json::Value;
 
 const FILE: &str = "ACVP-AES-GCM-SIV-1.0/internalProjection.json";

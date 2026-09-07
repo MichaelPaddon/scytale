@@ -34,8 +34,8 @@
 
 use core::fmt;
 
-use crate::cipher::aes::{expand_words, KeySize, BLOCK_SIZE};
 use crate::cipher::BlockCipher;
+use crate::cipher::aes::{BLOCK_SIZE, KeySize, expand_words};
 use crate::{BlockType, Error, KeyType};
 use zeroize::ZeroizeOnDrop;
 

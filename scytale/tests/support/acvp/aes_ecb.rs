@@ -1,8 +1,8 @@
 //! ACVP-AES-ECB 1.0, run through the [`BlockCipher`] trait.
 
 use super::{cipher_of, groups as suite_groups, hex, key_of};
-use scytale::cipher::BlockCipher;
 use scytale::KeyType;
+use scytale::cipher::BlockCipher;
 use serde_json::Value;
 
 const FILE: &str = "ACVP-AES-ECB-1.0/internalProjection.json";

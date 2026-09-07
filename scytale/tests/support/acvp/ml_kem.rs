@@ -7,9 +7,9 @@
 //! secret the file gives.
 
 use super::{hex, load};
-use scytale::kem::ml_kem::{ml_kem_1024, ml_kem_512, ml_kem_768};
-use scytale::random::Random;
 use scytale::Error;
+use scytale::kem::ml_kem::{ml_kem_512, ml_kem_768, ml_kem_1024};
+use scytale::random::Random;
 use serde_json::Value;
 
 /// A random source that yields fixed bytes, so a vector's `d`, `z`

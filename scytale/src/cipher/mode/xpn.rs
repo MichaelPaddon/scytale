@@ -58,8 +58,8 @@ use core::fmt;
 
 use super::gcm::{Gcm, SHORT_NONCE, TAG};
 use super::ghash::BLOCK;
-use crate::cipher::BlockCipher;
 use crate::Error;
+use crate::cipher::BlockCipher;
 
 /// The length of both the salt and the frame identifier.
 const HALF: usize = SHORT_NONCE;

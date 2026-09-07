@@ -53,10 +53,10 @@ use core::fmt;
 
 use super::ghash::BLOCK;
 use super::polyval::Polyval;
-use super::{xor, LANES};
+use super::{LANES, xor};
+use crate::Error;
 use crate::cipher::BlockCipher;
 use crate::util;
-use crate::Error;
 use zeroize::Zeroize;
 
 /// The nonce length, fixed by the standard.

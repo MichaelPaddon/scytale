@@ -8,7 +8,7 @@
 // Only the trait impl is unsafe, and it calls safe code.
 #![allow(unsafe_code)]
 
-use super::engine::{Permutation, Sponge, LANES};
+use super::engine::{LANES, Permutation, Sponge};
 use super::variant;
 
 /// SHA3-224, portably.

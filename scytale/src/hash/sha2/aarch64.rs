@@ -318,11 +318,11 @@ unsafe fn compress512(state: &mut [u64; 8], data: *const u8, count: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hash::Hash;
     use crate::hash::sha2::portable;
     use crate::hash::sha2::tests::{
         check_known_answers, check_matches_portable,
     };
-    use crate::hash::Hash;
 
     #[test]
     fn known_answers() {

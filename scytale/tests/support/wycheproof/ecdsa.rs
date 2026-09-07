@@ -7,8 +7,8 @@
 
 use super::super::acvp::hex;
 use super::load;
-use scytale::hash::sha2::{Sha256, Sha384};
 use scytale::hash::Hash;
+use scytale::hash::sha2::{Sha256, Sha384};
 use scytale::sig::ecdsa::{p256, p384};
 use serde_json::Value;
 

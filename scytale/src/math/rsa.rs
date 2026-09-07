@@ -8,13 +8,13 @@
 
 use zeroize::Zeroize;
 
+use crate::Error;
 use crate::der::{self, Algorithm, Reader, Writer};
 use crate::hash::Hash;
 use crate::math::montgomery::Montgomery;
 use crate::math::uint::Uint;
 use crate::pem;
 use crate::random::Random;
-use crate::Error;
 
 /// The public half of an RSA key: the modulus in Montgomery form and
 /// the public exponent.

@@ -43,8 +43,8 @@
 use core::fmt;
 
 use super::has_zkn;
-use crate::cipher::aes::{KeySize, BLOCK_SIZE};
 use crate::cipher::BlockCipher;
+use crate::cipher::aes::{BLOCK_SIZE, KeySize};
 use crate::{BlockType, Error, KeyType};
 use zeroize::ZeroizeOnDrop;
 

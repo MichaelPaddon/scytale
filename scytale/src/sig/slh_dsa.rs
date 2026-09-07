@@ -56,8 +56,8 @@ use zeroize::Zeroize;
 use crate::hash::sha2::{Sha256, Sha512};
 use crate::hash::sha3::Shake256;
 use crate::hash::{Hash, Xof, XofReader};
-use crate::mac::hmac::Hmac;
 use crate::mac::Mac;
+use crate::mac::hmac::Hmac;
 use crate::util;
 use crate::{BlockType, Error};
 
@@ -1103,9 +1103,9 @@ macro_rules! parameter_set {
     ($params:expr, $family:ty, $arc:literal, $name:literal) => {
         use zeroize::Zeroize;
 
+        use crate::Error;
         use crate::random::Random;
         use crate::sig::slh_dsa::{self, Params};
-        use crate::Error;
 
         const P: &Params = &$params;
 

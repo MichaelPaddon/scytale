@@ -78,11 +78,11 @@
 
 use zeroize::Zeroize;
 
+use crate::Error;
 use crate::hash::Hash;
-use crate::math::rsa::{mgf1_xor, Private, Public};
+use crate::math::rsa::{Private, Public, mgf1_xor};
 use crate::math::uint::Uint;
 use crate::random::Random;
-use crate::Error;
 
 /// An RSA encryption key of `LIMBS` 64-bit words; `BYTES` is the
 /// same width in bytes, 8 times `LIMBS`, and is the length of every
@@ -566,8 +566,8 @@ mod tests {
         out
     }
 
-    const N2048: &str =
-        "ba5d6c10c1d21779df565ebeba34c4e297f2d39e886edb20ff84f39522d62437\
+    const N2048: &str = "\
+         ba5d6c10c1d21779df565ebeba34c4e297f2d39e886edb20ff84f39522d62437\
          b8226ebbfd03aa28427c1105eb24f5aa823c25f8a34658a1e0717f0998b4f6f4\
          7eb7bb1d1747a3db256bea209b32a70f2ef5e72ef88caf8696fdb452d8abc583\
          87b0a34016c022947798efc51b2b90d4a1998ae3f267c2623f8fabc4bf7e431d\
@@ -576,8 +576,8 @@ mod tests {
          fdb0e35b15cead4e8f925e4809e25d603b2cec1c72c644ca7f5cb5083a75f147\
          0c9ea038935fcac5c5744156aaf70c8d771da6d2a5e802d571f07d95edfa9721";
 
-    const D2048: &str =
-        "0e04ed162d9e6249b6b546974e669dd0f5e13c6e16915046a1321d28c0e01f05\
+    const D2048: &str = "\
+         0e04ed162d9e6249b6b546974e669dd0f5e13c6e16915046a1321d28c0e01f05\
          5a02ad15d328ad6a2de62b59a8a0b522487dc1d57c62d454091040a0362e96cd\
          39a3149e519c0005824125f1a1fb237a0eec4ca1c9ecbb5f82883f42642e37c3\
          7737a07037c5e85406d32866496ef38c2b43e3a0d6215c0c0c0000c9e225db62\
@@ -586,14 +586,14 @@ mod tests {
          fc800b54b7dc697c37a93effb601a46323670ad5f289c7894bb8df2a74bf271f\
          24c48d037f06551ed47ad41d60b258728397734a41c0e40b71aa60d790a6fd61";
 
-    const N1024: &str =
-        "cf2a9ef8634206418550ed3586e4f9cde5a43e54d528ac70f1424d6f9472e478\
+    const N1024: &str = "\
+         cf2a9ef8634206418550ed3586e4f9cde5a43e54d528ac70f1424d6f9472e478\
          e17815dae8b0b3dce84522e7db2ab04f7473e0cbe4881cffd6a4d0cafb3852d4\
          34f7ef03d5de1c180dc3a175d8f47b434dd672839497c4499d5dada21ca4de6f\
          f531f0b91dd883eda6eda3384b783831e5f8c63a14733e9b428257ba4a71aa29";
 
-    const D1024: &str =
-        "463303965890156d9b5ece5a9e80b5b352f72255fdbb201fcf68efb37922ab8f\
+    const D1024: &str = "\
+         463303965890156d9b5ece5a9e80b5b352f72255fdbb201fcf68efb37922ab8f\
          d89b2810bb5bb13f1087e8e997273282620c2826ff242e6b7510f95d66de7196\
          31ca4e2977985f7479b068ac0a6fa7fbae5b2e972cbf0a7a662ec5cc4e2a43b6\
          a6a898d3a42a4ca5e7cd511c0451fcecdf01081e7a6e9ba688c06b089821df17";
@@ -613,8 +613,8 @@ mod tests {
     const OAEP_SEED256: &str =
         "afa64f41e1e367d9972a04d1d5ad16500c55c7dc8ad700cfd013b3249233e0ab";
 
-    const OAEP_SHA256_NOLABEL: &str =
-        "6c873891ace82ee30335d64cb0f10e2ca182129f2fa3ef25ced68943d1267cac\
+    const OAEP_SHA256_NOLABEL: &str = "\
+         6c873891ace82ee30335d64cb0f10e2ca182129f2fa3ef25ced68943d1267cac\
          00c5dcd316bd7d5e615e5ee315e40a8f7e7da786f7c182ce7ea72b292fff6dce\
          cde22e13bdefb0fdf1b4f84fa9c276389672d919c124f78a38fb058a9189395e\
          1fb088c86060c2f5cc6f88dc0d1deb026c6cb852f8f468369a19de86954526fc\
@@ -623,8 +623,8 @@ mod tests {
          1306ca3af74e20fa9f44a16ec60c0c62d5fd52bd7317f01acfb3acec81fb6c98\
          1af64549e9faa69f8917987154ca83128e66d8b16af1bd16f49ed92c996dd618";
 
-    const OAEP_SHA256_LABEL: &str =
-        "11d42b6db867974fc4e0bf205b1f44f83d4d663b8c100c426142094b615ac840\
+    const OAEP_SHA256_LABEL: &str = "\
+         11d42b6db867974fc4e0bf205b1f44f83d4d663b8c100c426142094b615ac840\
          847d43ee33a878185c352c9b0f76d4233e07c1c61a3927fe61f95ba7c5b1a5a8\
          9fcaecc666fbcd693ee03a056c3628ca10de3fb0a04e24cf5e4028da85740a48\
          7276ee9df78e4bdd104f671389af6c97eed1db7b43dac52e299b830d0850fb7a\
@@ -633,8 +633,8 @@ mod tests {
          3f338e4216fcf5f5357c957d4220be215f7288e243c4c89ea09df6220f954a93\
          5141beda826aa5a37da12933dd0e9edaebe9adfbab5668432373f7c96ee0e81f";
 
-    const OAEP_SHA512: &str =
-        "43f41cb0ee6164d5a4035ac86ed250408ede7a45120ec94ff7d8810d2d0b2318\
+    const OAEP_SHA512: &str = "\
+         43f41cb0ee6164d5a4035ac86ed250408ede7a45120ec94ff7d8810d2d0b2318\
          bfb201bbee46ee795ba801b1201cc7f6b64a82ecda24f1291bd14c4382884081\
          29c5bd293dd88812d97339b341e127fa7c0cfda7f01c2a847e3bf3bcfb3488b3\
          39b84446466e07274ef6a53076f43f1c129cc4b8448d46fc3d54873d44c53788\
@@ -643,8 +643,8 @@ mod tests {
          134006eb65da88bed184fecbf6a2db827280b2b20ae7d756ae3374eaa34adcd7\
          5ebca5f7374717ee9c41f33d497b93ab3498ef0e2e2eb94545ddf60230922228";
 
-    const OAEP_SHA256_MAX: &str =
-        "2fdba0e5a0e0ea429e9d42c864107ebb35aa363fee342edfb2585930b56a416e\
+    const OAEP_SHA256_MAX: &str = "\
+         2fdba0e5a0e0ea429e9d42c864107ebb35aa363fee342edfb2585930b56a416e\
          a5fe332d0f6dfacbe7231a4e95e2811630e3318b7d7aae07ba473d4a51d6466f\
          3335e4d220a7de0ac74b84154e28b01c6e2af8289f19ea8fa7cdd33495e3e65b\
          91b3acf26cbe96c65c6b9e1a299b76cbaacc9255acb1c451a7d5f1a1d96ce344\

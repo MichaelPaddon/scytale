@@ -55,9 +55,9 @@
 use core::fmt;
 
 use super::ghash::BLOCK;
+use crate::Error;
 use crate::cipher::BlockCipher;
 use crate::math::natural::Natural;
-use crate::Error;
 use zeroize::Zeroize;
 
 /// Rounds of the Feistel network, fixed by the standard.

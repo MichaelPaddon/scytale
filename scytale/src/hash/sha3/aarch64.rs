@@ -11,7 +11,7 @@
 
 #![allow(unsafe_code)]
 
-use super::engine::{Permutation, Sponge, LANES};
+use super::engine::{LANES, Permutation, Sponge};
 use super::portable::ROUND_CONSTANTS;
 use super::variant;
 
@@ -228,11 +228,11 @@ unsafe fn keccak_f1600(state: *mut u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hash::Hash;
     use crate::hash::sha3::portable::{self, keccak_f1600 as reference};
     use crate::hash::sha3::tests::{
         check_known_answers, check_matches_portable,
     };
-    use crate::hash::Hash;
 
     #[test]
     fn known_answers() {

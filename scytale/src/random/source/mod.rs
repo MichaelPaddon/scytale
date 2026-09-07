@@ -53,9 +53,9 @@
 
 mod bare;
 
-use crate::random::health::{Health, STARTUP};
-use crate::random::Entropy;
 use crate::Error;
+use crate::random::Entropy;
+use crate::random::health::{Health, STARTUP};
 
 use bare::Sampler;
 

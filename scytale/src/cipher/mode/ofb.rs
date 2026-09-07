@@ -41,8 +41,8 @@
 use core::fmt;
 
 use super::xor;
-use crate::cipher::BlockCipher;
 use crate::Error;
+use crate::cipher::BlockCipher;
 
 /// OFB over a block cipher.
 #[derive(Clone)]

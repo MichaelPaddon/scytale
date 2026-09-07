@@ -67,28 +67,28 @@ use cpu_time::ThreadTime;
 use scytale::cipher::chacha20;
 use scytale::cipher::mode::ChaCha20Poly1305;
 use scytale::cipher::mode::{
-    Cbc, Cfb1, Cfb128, Cfb8, Ctr, Gcm, GcmSiv, Kw, Kwp, Ofb, Xpn, Xts,
+    Cbc, Cfb1, Cfb8, Cfb128, Ctr, Gcm, GcmSiv, Kw, Kwp, Ofb, Xpn, Xts,
 };
 use scytale::cipher::mode::{Ff1, Ff3_1};
-use scytale::cipher::{aes, BlockCipher};
+use scytale::cipher::{BlockCipher, aes};
 
 /// The portable AES implementations at a key width; their paths
 /// alone are too long.
 type Bitsliced<const K: usize> = aes::portable::bitsliced::Aes<K>;
 type Ttable<const K: usize> = aes::portable::ttable::Aes<K>;
+use scytale::BlockType;
+use scytale::Error;
 use scytale::hash::sha1::Sha1;
-use scytale::hash::{sha2, sha3};
 use scytale::hash::{Hash, Xof, XofReader};
+use scytale::hash::{sha2, sha3};
 use scytale::kdf::{hkdf, pbkdf2};
 use scytale::kex::{ecdh, x25519};
+use scytale::mac::Mac;
 use scytale::mac::hmac::Hmac;
 use scytale::mac::poly1305::Poly1305;
-use scytale::mac::Mac;
 use scytale::pke::rsa as oaep;
 use scytale::random::{Random, Rng};
 use scytale::sig::{ecdsa, ed25519, rsa};
-use scytale::BlockType;
-use scytale::Error;
 
 /// Buffer sizes reported, the ones `openssl speed` uses.
 const SIZES: [usize; 6] = [16, 64, 256, 1024, 8192, 16384];
@@ -418,7 +418,7 @@ where
     let (mut sha256, mut sha512) = match (S256::try_new(), S512::try_new()) {
         (Ok(a), Ok(b)) => (a, b),
         (Err(Error::NotSupported), _) | (_, Err(Error::NotSupported)) => {
-            return false
+            return false;
         }
         (Err(e), _) | (_, Err(e)) => {
             eprintln!("speed: {implementation}: {e}");

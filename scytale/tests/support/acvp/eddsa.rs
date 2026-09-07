@@ -4,8 +4,8 @@
 //! bytes; sigVer and keyVer carry the deliberately damaged cases.
 
 use super::{hex, load};
-use scytale::sig::ed25519;
 use scytale::Error;
+use scytale::sig::ed25519;
 
 /// Runs the generation suite; a no-op without the vendored vectors.
 pub fn run_sig_gen() {

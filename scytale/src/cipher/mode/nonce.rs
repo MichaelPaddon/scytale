@@ -58,8 +58,8 @@
 //! # }
 //! ```
 
-use crate::random::Random;
 use crate::Error;
+use crate::random::Random;
 
 /// The nonce length this builds, in bytes.
 const NONCE: usize = 12;
@@ -131,7 +131,7 @@ impl Nonces {
 mod tests {
     use super::*;
 
-    use crate::random::{Rng, MIN_SEED};
+    use crate::random::{MIN_SEED, Rng};
 
     /// The layout the standard describes: the prefix unchanged in
     /// every nonce, the counter advancing by one, most significant

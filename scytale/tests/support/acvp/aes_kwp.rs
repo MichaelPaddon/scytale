@@ -8,10 +8,10 @@
 //! standard handles separately is covered too.
 
 use super::{cipher_of, groups as suite_groups, hex};
-use scytale::cipher::mode::Kwp;
-use scytale::cipher::BlockCipher;
 use scytale::Error;
 use scytale::KeyType;
+use scytale::cipher::BlockCipher;
+use scytale::cipher::mode::Kwp;
 use serde_json::Value;
 
 const FILE: &str = "ACVP-AES-KWP-1.0/internalProjection.json";

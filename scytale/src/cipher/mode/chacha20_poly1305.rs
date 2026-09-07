@@ -50,10 +50,10 @@ use core::fmt;
 
 use zeroize::Zeroize;
 
-use crate::cipher::chacha20::{AutoStream, ChaCha20, NONCE_SIZE};
-use crate::mac::poly1305::Poly1305;
-use crate::mac::Mac;
 use crate::Error;
+use crate::cipher::chacha20::{AutoStream, ChaCha20, NONCE_SIZE};
+use crate::mac::Mac;
+use crate::mac::poly1305::Poly1305;
 
 /// The tag length, in bytes.
 const TAG: usize = 16;

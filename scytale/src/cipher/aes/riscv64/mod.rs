@@ -11,7 +11,7 @@ pub mod zkn;
 pub mod zvkned;
 
 use crate::arch::riscv64::{
-    hwprobe_ima_ext_0, vlenb, EXT_ZKND, EXT_ZKNE, EXT_ZVKNED, IMA_V,
+    EXT_ZKND, EXT_ZKNE, EXT_ZVKNED, IMA_V, hwprobe_ima_ext_0, vlenb,
 };
 
 /// Whether the scalar AES instructions (Zkne and Zknd) are available.

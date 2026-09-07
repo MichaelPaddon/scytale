@@ -66,8 +66,8 @@ pub mod xts;
 
 pub use cbc::Cbc;
 pub use cfb1::Cfb1;
-pub use cfb128::Cfb128;
 pub use cfb8::Cfb8;
+pub use cfb128::Cfb128;
 pub use chacha20_poly1305::ChaCha20Poly1305;
 pub use ctr::Ctr;
 pub use ff1::Ff1;

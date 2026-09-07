@@ -7,10 +7,10 @@
 //! and nonces of 96 bits and otherwise.
 
 use super::{cipher_of, groups as suite_groups, hex};
-use scytale::cipher::mode::Gcm;
-use scytale::cipher::BlockCipher;
 use scytale::Error;
 use scytale::KeyType;
+use scytale::cipher::BlockCipher;
+use scytale::cipher::mode::Gcm;
 use serde_json::Value;
 
 const FILE: &str = "ACVP-AES-GCM-1.0/internalProjection.json";

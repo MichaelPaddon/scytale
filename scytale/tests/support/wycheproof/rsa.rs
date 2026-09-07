@@ -12,12 +12,12 @@
 
 use super::super::acvp::hex;
 use super::load;
+use scytale::Error;
+use scytale::hash::Hash;
 use scytale::hash::sha1::Sha1;
 use scytale::hash::sha2::{Sha256, Sha512};
-use scytale::hash::Hash;
 use scytale::pke::rsa::PrivateKey;
 use scytale::sig::rsa::{DigestInfo, PublicKey};
-use scytale::Error;
 use serde_json::Value;
 
 /// Runs every vendored file; each is separately optional.

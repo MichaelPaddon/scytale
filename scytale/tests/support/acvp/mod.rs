@@ -33,8 +33,8 @@ pub mod shake;
 pub mod slh_dsa;
 pub mod xecdh;
 
-use scytale::cipher::BlockCipher;
 use scytale::KeyType;
+use scytale::cipher::BlockCipher;
 use serde_json::Value;
 
 pub fn hex(v: &Value) -> Vec<u8> {

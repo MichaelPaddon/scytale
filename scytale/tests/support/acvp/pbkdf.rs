@@ -3,9 +3,9 @@
 //! are its own.
 
 use super::{hex, load};
+use scytale::BlockType;
 use scytale::hash::Hash;
 use scytale::kdf::pbkdf2::pbkdf2;
-use scytale::BlockType;
 
 const FILE: &str = "ACVP-PBKDF-1.0/internalProjection.json";
 

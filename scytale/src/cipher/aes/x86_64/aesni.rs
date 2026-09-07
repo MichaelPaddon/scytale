@@ -39,9 +39,9 @@
 
 use core::fmt;
 
-use super::{expand, has_aesni, RoundKeys};
-use crate::cipher::aes::BLOCK_SIZE;
+use super::{RoundKeys, expand, has_aesni};
 use crate::cipher::BlockCipher;
+use crate::cipher::aes::BLOCK_SIZE;
 use crate::{BlockType, Error, KeyType};
 use zeroize::ZeroizeOnDrop;
 

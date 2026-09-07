@@ -65,11 +65,11 @@
 
 use core::fmt;
 
-use super::ghash::{Ghash, BLOCK};
-use super::{xor, LANES};
+use super::ghash::{BLOCK, Ghash};
+use super::{LANES, xor};
+use crate::Error;
 use crate::cipher::BlockCipher;
 use crate::util;
-use crate::Error;
 
 /// The most message bytes GCM may protect under one key and nonce:
 /// 2^39 - 256 bits, the limit at which counter mode would repeat.

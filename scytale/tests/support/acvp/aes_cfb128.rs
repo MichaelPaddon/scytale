@@ -1,9 +1,9 @@
 //! ACVP-AES-CFB128 1.0, run through [`Cfb128`] over any block cipher.
 
 use super::{cipher_of, groups as suite_groups, hex, key_of};
-use scytale::cipher::mode::Cfb128;
-use scytale::cipher::BlockCipher;
 use scytale::KeyType;
+use scytale::cipher::BlockCipher;
+use scytale::cipher::mode::Cfb128;
 use serde_json::Value;
 
 /// The IV as the cipher's block type.

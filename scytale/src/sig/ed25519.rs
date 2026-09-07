@@ -39,11 +39,11 @@
 
 use zeroize::Zeroize;
 
-use crate::der;
-use crate::hash::sha2::Sha512;
-use crate::hash::Hash;
-use crate::math::fe25519::Fe;
 use crate::Error;
+use crate::der;
+use crate::hash::Hash;
+use crate::hash::sha2::Sha512;
+use crate::math::fe25519::Fe;
 
 /// The length of a secret key.
 pub const KEY_SIZE: usize = 32;

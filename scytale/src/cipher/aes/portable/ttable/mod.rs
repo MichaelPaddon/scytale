@@ -52,8 +52,8 @@ pub(crate) mod tables;
 
 use core::fmt;
 
-use crate::cipher::aes::{expand_words, KeySize, BLOCK_SIZE, MAX_WORDS};
 use crate::cipher::BlockCipher;
+use crate::cipher::aes::{BLOCK_SIZE, KeySize, MAX_WORDS, expand_words};
 use crate::{BlockType, Error, KeyType};
 use tables::{INV_SBOX, SBOX, TD, TE};
 use zeroize::ZeroizeOnDrop;

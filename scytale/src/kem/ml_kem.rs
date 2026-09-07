@@ -55,10 +55,10 @@
 
 use zeroize::Zeroize;
 
+use crate::Error;
 use crate::hash::sha3::{Sha3_256, Sha3_512, Shake128, Shake256};
 use crate::hash::{Hash, Xof, XofReader};
 use crate::util;
-use crate::Error;
 
 /// The modulus.
 const Q: u32 = 3329;

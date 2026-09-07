@@ -38,7 +38,7 @@
 
 use core::fmt;
 
-use super::{xor, LANES};
+use super::{LANES, xor};
 use crate::cipher::BlockCipher;
 use crate::{ByteArray, Error};
 

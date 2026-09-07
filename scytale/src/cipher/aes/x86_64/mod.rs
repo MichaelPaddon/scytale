@@ -12,7 +12,7 @@ pub mod vaes;
 use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
 use zeroize::ZeroizeOnDrop;
 
-use super::{expand_words, KeySize, MAX_WORDS};
+use super::{KeySize, MAX_WORDS, expand_words};
 
 /// Whether the processor reports AES-NI (CPUID leaf 1, ECX bit 25).
 pub(super) fn has_aesni() -> bool {

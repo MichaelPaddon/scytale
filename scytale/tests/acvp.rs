@@ -17,7 +17,7 @@
 mod support;
 
 use support::acvp::{
-    aes_cbc as cbc, aes_cfb1 as cfb1, aes_cfb128 as cfb128, aes_cfb8 as cfb8,
+    aes_cbc as cbc, aes_cfb1 as cfb1, aes_cfb8 as cfb8, aes_cfb128 as cfb128,
     aes_ctr as ctr, aes_ecb as ecb, aes_ff1 as ff1, aes_ff3_1 as ff3_1,
     aes_gcm as gcm, aes_gcm_siv as gcm_siv, aes_gmac as gmac, aes_kw as kw,
     aes_kwp as kwp, aes_ofb as ofb, aes_xpn as xpn, aes_xts as xts,
@@ -365,8 +365,8 @@ macro_rules! sha2_suites {
      $family:expr, $what:literal) => {
         mod $name {
             use super::*;
-            use scytale::hash::Hash;
             use scytale::Error;
+            use scytale::hash::Hash;
 
             /// Whether to run, reporting a skip when the processor
             /// cannot. A silent skip would look like a pass.
@@ -586,8 +586,8 @@ macro_rules! shake_suites {
      $what:literal) => {
         mod $name {
             use super::*;
-            use scytale::hash::Xof;
             use scytale::Error;
+            use scytale::hash::Xof;
 
             fn supported() -> bool {
                 match <$ty>::try_new() {
@@ -718,8 +718,8 @@ macro_rules! hmac_suite {
      $what:literal) => {
         mod $name {
             use super::*;
-            use scytale::mac::hmac::Hmac;
             use scytale::Error;
+            use scytale::mac::hmac::Hmac;
 
             #[test]
             fn acvp_aft() {
@@ -1148,10 +1148,10 @@ mod hkdf {
 /// cargo test --test acvp inventory -- --nocapture
 /// ```
 mod inventory {
-    use scytale::cipher::chacha20::Backend;
-    use scytale::cipher::{aes, chacha20, BlockCipher};
-    use scytale::hash::{sha2, sha3, Hash};
     use scytale::Error;
+    use scytale::cipher::chacha20::Backend;
+    use scytale::cipher::{BlockCipher, aes, chacha20};
+    use scytale::hash::{Hash, sha2, sha3};
 
     /// Whether a block cipher can be built on this processor.
     fn cipher<C: BlockCipher>() -> bool {

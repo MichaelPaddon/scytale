@@ -220,10 +220,10 @@ pub trait BitXof: Xof {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BlockType;
     use crate::hash::sha1::Sha1;
     use crate::hash::sha2::{Sha256, Sha512, Sha512_256};
     use crate::hash::sha3::{self, Sha3_256, Shake128, Shake256};
-    use crate::BlockType;
 
     /// Fed through an object, a hash gives the digest its type gives.
     #[test]

@@ -13,7 +13,7 @@
 
 #![allow(unsafe_code)]
 
-use super::{Backend, Cipher, Sealed, BLOCK_SIZE};
+use super::{BLOCK_SIZE, Backend, Cipher, Sealed};
 
 /// ChaCha20 with NEON.
 pub type ChaCha20 = Cipher<Neon>;

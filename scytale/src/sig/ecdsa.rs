@@ -56,8 +56,8 @@
 //! scanned whole, and inversions are exponentiations. Verification
 //! handles only public values.
 
-use crate::hash::Hash;
 use crate::BlockType;
+use crate::hash::Hash;
 
 macro_rules! ecdsa_curve {
     (
@@ -146,8 +146,8 @@ pub mod p384 {
 mod tests {
     use super::p256;
     use super::p384;
-    use crate::hash::sha2::{Sha256, Sha384};
     use crate::Error;
+    use crate::hash::sha2::{Sha256, Sha384};
 
     fn unhex<'a>(hex: &str, buf: &'a mut [u8]) -> &'a [u8] {
         let hex = hex.as_bytes();
@@ -180,8 +180,8 @@ mod tests {
         -----END EC PRIVATE KEY-----\n";
     const P256_SECRET: &str =
         "07f68ea33df1757a676fe2e8094d87de7988fbef3a75a2a5b46421b46c6f671d";
-    const P256_SIGNATURE_DER: &str =
-        "30440220062f924d2ae58a58efc01e2df5aeb87d884c1568d590c9f3d527dd48\
+    const P256_SIGNATURE_DER: &str = "\
+         30440220062f924d2ae58a58efc01e2df5aeb87d884c1568d590c9f3d527dd48\
          f0f3dc7902205b7ca9329a561b30afd7fc115d654a26184f16b82c1ef60cfbf5\
          1c9d0ad2280f";
 
@@ -197,8 +197,8 @@ mod tests {
         AV+nyBGnzupqg7IuYrrg19ohn1vd58Zpf5M4dMJr4Hv/bOPG09k+G2xq3hW/a3R0\n\
         BwGQOW0BBjGuie7BdVNVrlU7KVQyTo6Z\n\
         -----END PUBLIC KEY-----\n";
-    const P384_SIGNATURE_DER: &str =
-        "306402300bc7023f1082d37078ef30b86b20701896a653b185204bc9e127c5fd\
+    const P384_SIGNATURE_DER: &str = "\
+         306402300bc7023f1082d37078ef30b86b20701896a653b185204bc9e127c5fd\
          1797629b2f76fb0d83a17b84b1120a82291a762802305275911bc84a2b0dd15c\
          339414ce5a032fa12c368da5b6d13a5c0111b3a4b0dc2268bac6d63ad46cfe8c\
          b75c6ede83f5";

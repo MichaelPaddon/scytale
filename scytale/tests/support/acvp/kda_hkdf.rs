@@ -9,12 +9,12 @@
 //! is [`hkdf::extract`] followed by repeated [`hkdf::expand`].
 
 use super::{hex, load};
+use scytale::BlockType;
+use scytale::hash::Hash;
 use scytale::hash::sha2::{Sha224, Sha256, Sha384, Sha512};
 use scytale::hash::sha2::{Sha512_224, Sha512_256};
 use scytale::hash::sha3::{Sha3_224, Sha3_256, Sha3_384, Sha3_512};
-use scytale::hash::Hash;
 use scytale::kdf::hkdf;
-use scytale::BlockType;
 use serde_json::Value;
 
 /// Dispatches on the group's HMAC hash, which names the whole

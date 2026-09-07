@@ -10,7 +10,7 @@
 // Only the trait impl is unsafe, and it calls safe code.
 #![allow(unsafe_code)]
 
-use super::{Backend, Cipher, Sealed, BLOCK_SIZE, CONSTANTS};
+use super::{BLOCK_SIZE, Backend, CONSTANTS, Cipher, Sealed};
 
 /// ChaCha20, portably.
 pub type ChaCha20 = Cipher<Portable>;

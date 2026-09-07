@@ -58,10 +58,10 @@
 
 use zeroize::Zeroize;
 
+use crate::Error;
 use crate::hash::sha3::{Shake128, Shake256};
 use crate::hash::{Xof, XofReader};
 use crate::util;
-use crate::Error;
 
 /// The modulus.
 const Q: u32 = 8_380_417;
@@ -964,10 +964,10 @@ macro_rules! parameter_set {
     ($k:literal, $l:literal, $arc:literal, $name:literal) => {
         use zeroize::Zeroize;
 
+        use crate::Error;
         use crate::der::SeedOrExpanded;
         use crate::random::Random;
         use crate::sig::ml_dsa::{self, params};
-        use crate::Error;
 
         /// The length of a private key's seed, the form to store.
         pub const SEED_SIZE: usize = 32;

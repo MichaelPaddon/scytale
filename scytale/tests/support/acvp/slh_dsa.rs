@@ -6,9 +6,9 @@
 //! randomness the same way; both must reproduce the file's bytes.
 
 use super::{hex, load};
+use scytale::Error;
 use scytale::random::Random;
 use scytale::sig::slh_dsa::*;
-use scytale::Error;
 use serde_json::Value;
 
 /// A random source that yields fixed bytes.

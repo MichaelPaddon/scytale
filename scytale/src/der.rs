@@ -23,8 +23,8 @@
 
 use zeroize::Zeroize;
 
-use crate::pem;
 use crate::Error;
+use crate::pem;
 
 // The universal tags in use.
 const INTEGER: u8 = 0x02;

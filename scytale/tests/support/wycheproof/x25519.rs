@@ -6,8 +6,8 @@
 
 use super::super::acvp::hex;
 use super::load;
-use scytale::kex::x25519;
 use scytale::Error;
+use scytale::kex::x25519;
 
 const FILE: &str = "wycheproof/x25519_test.json";
 

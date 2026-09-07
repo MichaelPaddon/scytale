@@ -8,7 +8,7 @@
 //! tested multiplication is worth more than the few operations saved
 //! by writing the field arithmetic out again.
 
-use super::ghash::{multiply_by_x, Ghash, BLOCK};
+use super::ghash::{BLOCK, Ghash, multiply_by_x};
 
 /// A POLYVAL computation in progress.
 #[derive(Clone)]

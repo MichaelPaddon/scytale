@@ -3,10 +3,10 @@
 //! the file.
 
 use super::{hex, load};
-use scytale::hash::Hash;
-use scytale::mac::hmac::Hmac;
-use scytale::mac::Mac;
 use scytale::BlockType;
+use scytale::hash::Hash;
+use scytale::mac::Mac;
+use scytale::mac::hmac::Hmac;
 
 /// Runs every case against HMAC over `H`; a no-op without the
 /// vendored vectors. Tags are compared over `macLen` bits, a prefix

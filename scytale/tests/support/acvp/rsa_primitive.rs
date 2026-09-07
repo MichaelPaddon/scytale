@@ -14,9 +14,9 @@
 //! above the modulus.
 
 use super::{hex, load};
+use scytale::Error;
 use scytale::pke::rsa::PublicKey as PkePublicKey;
 use scytale::sig::rsa::PrivateKey;
-use scytale::Error;
 use serde_json::Value;
 
 /// One signature-primitive case at a fixed width. Returns whether

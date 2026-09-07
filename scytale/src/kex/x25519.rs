@@ -35,9 +35,9 @@
 
 use zeroize::Zeroize;
 
+use crate::Error;
 use crate::der;
 use crate::math::fe25519::Fe;
-use crate::Error;
 
 /// The length of a secret key, a public key, and the shared secret.
 pub const KEY_SIZE: usize = 32;

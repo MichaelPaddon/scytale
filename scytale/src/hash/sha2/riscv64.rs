@@ -10,10 +10,10 @@
 
 use super::engine::{Compress32, Compress64, Engine32, Engine64};
 use super::portable::{
-    compress256, compress512, Compress, Functions32, Functions64,
+    Compress, Functions32, Functions64, compress256, compress512,
 };
 use super::variant;
-use crate::arch::riscv64::{hwprobe_ima_ext_0, EXT_ZKNH};
+use crate::arch::riscv64::{EXT_ZKNH, hwprobe_ima_ext_0};
 
 /// SHA-224 with Zknh.
 pub type Sha224 = Engine32<Zknh, variant::Sha224>;
@@ -116,11 +116,11 @@ impl Compress64 for Zknh {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hash::Hash;
     use crate::hash::sha2::portable;
     use crate::hash::sha2::tests::{
         check_known_answers, check_matches_portable,
     };
-    use crate::hash::Hash;
 
     #[test]
     fn known_answers() {

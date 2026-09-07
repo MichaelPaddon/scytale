@@ -9,9 +9,9 @@
 
 use super::super::acvp::hex;
 use super::load;
+use scytale::Error;
 use scytale::random::Random;
 use scytale::sig::ml_dsa::{ml_dsa_44, ml_dsa_65, ml_dsa_87};
-use scytale::Error;
 use serde_json::Value;
 
 /// A random source that yields fixed bytes.
@@ -231,11 +231,7 @@ fn run_set<S: Set>(set: &str, counts: &mut Counts) {
 
 /// A hex field that may be absent, standing for the empty string.
 fn opt_hex(v: &Value) -> Vec<u8> {
-    if v.is_null() {
-        Vec::new()
-    } else {
-        hex(v)
-    }
+    if v.is_null() { Vec::new() } else { hex(v) }
 }
 
 /// Whether a case is for the internal interface, which signs the

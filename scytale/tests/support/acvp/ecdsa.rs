@@ -12,14 +12,14 @@
 //! hashing; that scheme is not offered, so those groups are skipped.
 
 use super::{hex, load};
+use scytale::BlockType;
+use scytale::Error;
+use scytale::hash::Hash;
 use scytale::hash::sha2::{
     Sha224, Sha256, Sha384, Sha512, Sha512_224, Sha512_256,
 };
 use scytale::hash::sha3::{Sha3_224, Sha3_256, Sha3_384, Sha3_512};
-use scytale::hash::Hash;
 use scytale::sig::ecdsa::{p256, p384};
-use scytale::BlockType;
-use scytale::Error;
 use serde_json::Value;
 
 /// One curve's key types, so a driver can be written once.

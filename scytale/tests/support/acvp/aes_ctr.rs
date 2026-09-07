@@ -12,9 +12,9 @@
 //! record them as zero.
 
 use super::{cipher_of, groups as suite_groups, hex};
-use scytale::cipher::mode::Ctr;
-use scytale::cipher::BlockCipher;
 use scytale::KeyType;
+use scytale::cipher::BlockCipher;
+use scytale::cipher::mode::Ctr;
 use serde_json::Value;
 
 /// The IV as the cipher's block type.

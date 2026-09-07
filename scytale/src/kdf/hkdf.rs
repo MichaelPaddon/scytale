@@ -45,8 +45,8 @@
 //! something else wrong.
 
 use crate::hash::Hash;
-use crate::mac::hmac::Hmac;
 use crate::mac::Mac;
+use crate::mac::hmac::Hmac;
 use crate::{BlockType, Error};
 
 /// Extracts a pseudorandom key from `ikm` under `salt`, which may be

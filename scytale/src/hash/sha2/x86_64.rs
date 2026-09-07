@@ -223,12 +223,12 @@ unsafe fn compress(state: &mut [u32; 8], data: *const u8, count: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Error;
+    use crate::hash::Hash;
     use crate::hash::sha2::portable;
     use crate::hash::sha2::tests::{
         check_known_answers, check_matches_portable,
     };
-    use crate::hash::Hash;
-    use crate::Error;
 
     #[test]
     fn known_answers() {
