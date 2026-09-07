@@ -37,8 +37,9 @@
 use core::fmt;
 
 use super::{RoundKeys, aesni, expand, has_vaes256};
-use crate::cipher::BlockCipher;
 use crate::cipher::aes::{BLOCK_SIZE, KeySize};
+use crate::cipher::mode::xor;
+use crate::cipher::{BlockCipher, add_low32};
 use crate::{BlockType, Error, KeyType};
 use zeroize::ZeroizeOnDrop;
 
@@ -138,7 +139,74 @@ impl<const K: usize> Aes<K> {
             aesni::decrypt_blocks(&self.keys, odd);
         }
     }
+
+    /// Counter mode's inner loop; see
+    /// [`BlockCipher::xor_counter_blocks`].
+    ///
+    /// The counters are made in registers and encrypted where they
+    /// lie, then XORed over the data on the way to a single store,
+    /// so a block is read once and written once, which is what plain
+    /// ECB costs. Whole groups go first, then one pass of exactly the
+    /// pairs left over, then a last odd block.
+    pub fn xor_counter_blocks(
+        &self,
+        counter: &mut [u8; BLOCK_SIZE],
+        data: &mut [u8],
+    ) {
+        debug_assert_eq!(data.len() % BLOCK_SIZE, 0);
+        let rk = self.keys.enc.as_ptr();
+        let rounds = self.keys.size.rounds();
+        let mut data = data;
+
+        let groups = data.len() / (GROUP * BLOCK_SIZE);
+        if groups > 0 {
+            let (whole, rest) = data.split_at_mut(groups * GROUP * BLOCK_SIZE);
+            // SAFETY: the struct only exists if try_new confirmed
+            // VAES; `whole` is `groups` whole groups, at least one.
+            // The loop leaves `counter` on the block after the last.
+            unsafe {
+                counter_groups(
+                    rk,
+                    rounds,
+                    counter.as_mut_ptr(),
+                    whole.as_mut_ptr(),
+                    groups,
+                );
+            }
+            data = rest;
+        }
+
+        // At most seven pairs are left, each with a body of its own
+        // width so that the tail costs one pass and not a group.
+        let pairs = data.len() / PAIR;
+        if pairs > 0 {
+            let (whole, rest) = data.split_at_mut(pairs * PAIR);
+            // SAFETY: as above, and `pairs` is 1 to 7, which indexes
+            // the table, with `whole` exactly that many pairs.
+            unsafe {
+                PAIRS[pairs - 1](
+                    rk,
+                    rounds,
+                    counter.as_ptr(),
+                    whole.as_mut_ptr(),
+                );
+            }
+            add_low32(counter, 2 * pairs as u32);
+            data = rest;
+        }
+
+        if !data.is_empty() {
+            let mut block = *counter;
+            self.encrypt_block(&mut block);
+            xor(data, &block);
+            add_low32(counter, 1);
+        }
+    }
 }
+
+/// Blocks the counter loop puts through the cipher at once: eight
+/// 256-bit registers, two blocks in each.
+const GROUP: usize = 16;
 
 impl<const K: usize> BlockType for Aes<K> {
     type Block = [u8; BLOCK_SIZE];
@@ -175,6 +243,10 @@ impl<const K: usize> BlockCipher for Aes<K> {
 
     fn decrypt_blocks(&self, blocks: &mut [Self::Block]) {
         Aes::decrypt_blocks(self, blocks)
+    }
+
+    fn xor_counter_blocks(&self, counter: &mut Self::Block, data: &mut [u8]) {
+        Aes::xor_counter_blocks(self, counter, data)
     }
 }
 
@@ -378,6 +450,272 @@ macro_rules! groups {
         }
     };
 }
+
+/// Constants the counter loop reads, kept at the width it loads them.
+#[repr(align(32))]
+struct Mask([u8; 32]);
+
+#[repr(align(32))]
+struct Words<const N: usize>([u32; N]);
+
+/// Reverses the bytes of each 128-bit lane. The counter is the last
+/// four bytes of a block, most significant first; reversed, it is the
+/// low doubleword of the lane, least significant first, which is
+/// where a doubleword add can reach it.
+static BSWAP: Mask = Mask([
+    15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11,
+    10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
+]);
+
+/// What each register adds to the base counter: register `i` carries
+/// blocks `2i` and `2i + 1`, one in each lane.
+static OFFSETS: Words<64> = {
+    let mut w = [0u32; 64];
+    let mut i = 0;
+    while i < 8 {
+        w[8 * i] = 2 * i as u32;
+        w[8 * i + 4] = 2 * i as u32 + 1;
+        i += 1;
+    }
+    Words(w)
+};
+
+/// One group's worth, added to the base after each pass.
+static ADVANCE: Words<8> =
+    Words([GROUP as u32, 0, 0, 0, GROUP as u32, 0, 0, 0]);
+
+/// Runs whole groups of counter blocks through the cipher and XORs
+/// them over `data`, leaving `counter` on the block after the last.
+///
+/// The counters are made in registers from a single base rather than
+/// read from memory, and the result is XORed against the data on its
+/// way out, so a block is read once and written once. Only the low
+/// doubleword is added to, so a carry out of the counter field would
+/// be lost; the caller splits its run at that boundary.
+///
+/// # Safety
+/// Requires VAES and AVX2; `rk` must point at `rounds + 1` round
+/// keys, `counter` at a block, and `data` at `groups * 256` writable
+/// bytes, with `groups >= 1`.
+unsafe fn counter_groups(
+    rk: *const u32,
+    rounds: usize,
+    counter: *mut u8,
+    data: *mut u8,
+    groups: usize,
+) {
+    unsafe {
+        core::arch::asm!(
+            "vmovdqa ymm10, [{bswap}]",
+            "vmovdqa ymm11, [{advance}]",
+            // The base counter, a copy in each lane, byte-reversed.
+            "vbroadcasti128 ymm9, [{counter}]",
+            "vpshufb ymm9, ymm9, ymm10",
+            "3:",
+            // Eight registers of counters from the one base, then
+            // the base moved on while they are turned back into
+            // blocks: the add and the shuffles do not depend on each
+            // other and fill the slots the cipher leaves idle.
+            "vpaddd ymm0, ymm9, [{offs}]",
+            "vpaddd ymm1, ymm9, [{offs} + 32]",
+            "vpaddd ymm2, ymm9, [{offs} + 64]",
+            "vpaddd ymm3, ymm9, [{offs} + 96]",
+            "vpaddd ymm4, ymm9, [{offs} + 128]",
+            "vpaddd ymm5, ymm9, [{offs} + 160]",
+            "vpaddd ymm6, ymm9, [{offs} + 192]",
+            "vpaddd ymm7, ymm9, [{offs} + 224]",
+            "vpaddd ymm9, ymm9, ymm11",
+            "vpshufb ymm0, ymm0, ymm10",
+            "vpshufb ymm1, ymm1, ymm10",
+            "vpshufb ymm2, ymm2, ymm10",
+            "vpshufb ymm3, ymm3, ymm10",
+            "vpshufb ymm4, ymm4, ymm10",
+            "vpshufb ymm5, ymm5, ymm10",
+            "vpshufb ymm6, ymm6, ymm10",
+            "vpshufb ymm7, ymm7, ymm10",
+            "vbroadcasti128 ymm8, [{rk}]",
+            "vpxor ymm0, ymm0, ymm8",
+            "vpxor ymm1, ymm1, ymm8",
+            "vpxor ymm2, ymm2, ymm8",
+            "vpxor ymm3, ymm3, ymm8",
+            "vpxor ymm4, ymm4, ymm8",
+            "vpxor ymm5, ymm5, ymm8",
+            "vpxor ymm6, ymm6, ymm8",
+            "vpxor ymm7, ymm7, ymm8",
+            "lea {k}, [{rk} + 16]",
+            "mov {n}, {nr}",
+            "2:",
+            "vbroadcasti128 ymm8, [{k}]",
+            "vaesenc ymm0, ymm0, ymm8",
+            "vaesenc ymm1, ymm1, ymm8",
+            "vaesenc ymm2, ymm2, ymm8",
+            "vaesenc ymm3, ymm3, ymm8",
+            "vaesenc ymm4, ymm4, ymm8",
+            "vaesenc ymm5, ymm5, ymm8",
+            "vaesenc ymm6, ymm6, ymm8",
+            "vaesenc ymm7, ymm7, ymm8",
+            "add {k}, 16",
+            "dec {n}",
+            "jnz 2b",
+            "vbroadcasti128 ymm8, [{k}]",
+            "vaesenclast ymm0, ymm0, ymm8",
+            "vaesenclast ymm1, ymm1, ymm8",
+            "vaesenclast ymm2, ymm2, ymm8",
+            "vaesenclast ymm3, ymm3, ymm8",
+            "vaesenclast ymm4, ymm4, ymm8",
+            "vaesenclast ymm5, ymm5, ymm8",
+            "vaesenclast ymm6, ymm6, ymm8",
+            "vaesenclast ymm7, ymm7, ymm8",
+            // The keystream never reaches memory: it is XORed over
+            // the data on the way to the one store.
+            "vpxor ymm0, ymm0, [{data}]",
+            "vpxor ymm1, ymm1, [{data} + 32]",
+            "vpxor ymm2, ymm2, [{data} + 64]",
+            "vpxor ymm3, ymm3, [{data} + 96]",
+            "vpxor ymm4, ymm4, [{data} + 128]",
+            "vpxor ymm5, ymm5, [{data} + 160]",
+            "vpxor ymm6, ymm6, [{data} + 192]",
+            "vpxor ymm7, ymm7, [{data} + 224]",
+            "vmovdqu [{data}], ymm0",
+            "vmovdqu [{data} + 32], ymm1",
+            "vmovdqu [{data} + 64], ymm2",
+            "vmovdqu [{data} + 96], ymm3",
+            "vmovdqu [{data} + 128], ymm4",
+            "vmovdqu [{data} + 160], ymm5",
+            "vmovdqu [{data} + 192], ymm6",
+            "vmovdqu [{data} + 224], ymm7",
+            "add {data}, 256",
+            "dec {groups}",
+            "jnz 3b",
+            // Hand the counter back in block order.
+            "vpshufb ymm9, ymm9, ymm10",
+            "vmovdqu [{counter}], xmm9",
+            "vzeroupper",
+            rk = in(reg) rk,
+            nr = in(reg) rounds - 1,
+            counter = in(reg) counter,
+            data = inout(reg) data => _,
+            groups = inout(reg) groups => _,
+            offs = in(reg) OFFSETS.0.as_ptr(),
+            bswap = in(reg) BSWAP.0.as_ptr(),
+            advance = in(reg) ADVANCE.0.as_ptr(),
+            k = out(reg) _,
+            n = out(reg) _,
+            out("ymm0") _, out("ymm1") _, out("ymm2") _, out("ymm3") _,
+            out("ymm4") _, out("ymm5") _, out("ymm6") _, out("ymm7") _,
+            out("ymm8") _, out("ymm9") _, out("ymm10") _, out("ymm11") _,
+            options(nostack),
+        );
+    }
+}
+
+/// Defines a counter body for a fixed number of pairs: it makes its
+/// counters from `counter`, encrypts them and XORs them over `data`.
+/// Advancing `counter` is left to the caller, which knows the width.
+macro_rules! counter_body {
+    ($name:ident, [$(($r:literal, $off:literal)),+]) => {
+        /// # Safety
+        /// Requires VAES and AVX2; `rk` must point at `rounds + 1`
+        /// round keys, `counter` at a block, and `data` at the pairs
+        /// this body handles.
+        unsafe fn $name(
+            rk: *const u32,
+            rounds: usize,
+            counter: *const u8,
+            data: *mut u8,
+        ) {
+            unsafe {
+                core::arch::asm!(
+                    "vmovdqa ymm10, [{bswap}]",
+                    "vbroadcasti128 ymm9, [{counter}]",
+                    "vpshufb ymm9, ymm9, ymm10",
+                    $(concat!(
+                        "vpaddd ", $r, ", ymm9, [{offs} + ", $off, "]"),)+
+                    $(concat!("vpshufb ", $r, ", ", $r, ", ymm10"),)+
+                    "vbroadcasti128 ymm8, [{rk}]",
+                    $(concat!("vpxor ", $r, ", ", $r, ", ymm8"),)+
+                    "lea {k}, [{rk} + 16]",
+                    "mov {n}, {nr}",
+                    "2:",
+                    "vbroadcasti128 ymm8, [{k}]",
+                    $(concat!("vaesenc ", $r, ", ", $r, ", ymm8"),)+
+                    "add {k}, 16",
+                    "dec {n}",
+                    "jnz 2b",
+                    "vbroadcasti128 ymm8, [{k}]",
+                    $(concat!("vaesenclast ", $r, ", ", $r, ", ymm8"),)+
+                    $(concat!(
+                        "vpxor ", $r, ", ", $r, ", [{data} + ", $off, "]"),)+
+                    $(concat!("vmovdqu [{data} + ", $off, "], ", $r),)+
+                    "vzeroupper",
+                    rk = in(reg) rk,
+                    nr = in(reg) rounds - 1,
+                    counter = in(reg) counter,
+                    data = in(reg) data,
+                    offs = in(reg) OFFSETS.0.as_ptr(),
+                    bswap = in(reg) BSWAP.0.as_ptr(),
+                    k = out(reg) _,
+                    n = out(reg) _,
+                    out("ymm0") _, out("ymm1") _, out("ymm2") _, out("ymm3") _,
+                    out("ymm4") _, out("ymm5") _, out("ymm6") _, out("ymm8") _,
+                    out("ymm9") _, out("ymm10") _,
+                    options(nostack),
+                );
+            }
+        }
+    };
+}
+
+counter_body!(counter1, [("ymm0", "0")]);
+counter_body!(counter2, [("ymm0", "0"), ("ymm1", "32")]);
+counter_body!(counter3, [("ymm0", "0"), ("ymm1", "32"), ("ymm2", "64")]);
+counter_body!(
+    counter4,
+    [
+        ("ymm0", "0"),
+        ("ymm1", "32"),
+        ("ymm2", "64"),
+        ("ymm3", "96")
+    ]
+);
+counter_body!(
+    counter5,
+    [
+        ("ymm0", "0"),
+        ("ymm1", "32"),
+        ("ymm2", "64"),
+        ("ymm3", "96"),
+        ("ymm4", "128")
+    ]
+);
+counter_body!(
+    counter6,
+    [
+        ("ymm0", "0"),
+        ("ymm1", "32"),
+        ("ymm2", "64"),
+        ("ymm3", "96"),
+        ("ymm4", "128"),
+        ("ymm5", "160")
+    ]
+);
+counter_body!(
+    counter7,
+    [
+        ("ymm0", "0"),
+        ("ymm1", "32"),
+        ("ymm2", "64"),
+        ("ymm3", "96"),
+        ("ymm4", "128"),
+        ("ymm5", "160"),
+        ("ymm6", "192")
+    ]
+);
+
+/// The bodies by pair count, so that a tail of `n` pairs is one call.
+static PAIRS: [unsafe fn(*const u32, usize, *const u8, *mut u8); 7] = [
+    counter1, counter2, counter3, counter4, counter5, counter6, counter7,
+];
 
 groups!(encrypt8, "vaesenc", "vaesenclast");
 groups!(decrypt8, "vaesdec", "vaesdeclast");

@@ -54,7 +54,7 @@
 
 use core::fmt;
 
-use super::{LANES, xor};
+use super::xor;
 use crate::cipher::BlockCipher;
 use crate::{ByteArray, Error};
 
@@ -128,31 +128,29 @@ pub(crate) fn increment<B: ByteArray>(counter: &mut B) {
     }
 }
 
-/// Fills `blocks` with successive counter values and leaves `counter`
-/// on the one after the last.
-///
-/// The counter stays in registers for the whole group. Written the
-/// obvious way, as a store to `counter` and a read of it back for the
-/// next block, the sixteen-byte read overlaps two eight-byte stores
-/// still in the store buffer, which the processor cannot forward and
-/// must wait out: about a dozen cycles for every block, which was
-/// most of what counter mode cost.
+/// The last four bytes of a block, as one big-endian number.
 #[inline]
-fn counters<B: ByteArray>(counter: &mut B, blocks: &mut [B]) {
-    let Ok(start) = <[u8; 16]>::try_from(counter.as_ref()) else {
-        // Some other block size, which no cipher here has.
-        for block in blocks.iter_mut() {
-            *block = *counter;
-            increment(counter);
+fn low32(block: &[u8]) -> u32 {
+    let n = block.len();
+    u32::from_be_bytes([block[n - 4], block[n - 3], block[n - 2], block[n - 1]])
+}
+
+/// Adds one to everything above the last four bytes.
+///
+/// The cipher's counter run wraps inside those four bytes and drops
+/// the carry, because that is what GCM wants; counting in the whole
+/// block, this puts it back.
+#[inline]
+fn carry_out_of_low32<B: ByteArray>(counter: &mut B) {
+    let bytes = counter.as_mut();
+    let high = bytes.len() - 4;
+    for byte in bytes[..high].iter_mut().rev() {
+        let (sum, carried) = byte.overflowing_add(1);
+        *byte = sum;
+        if !carried {
+            break;
         }
-        return;
-    };
-    let mut n = u128::from_be_bytes(start);
-    for block in blocks.iter_mut() {
-        block.as_mut().copy_from_slice(&n.to_be_bytes());
-        n = n.wrapping_add(1);
     }
-    counter.as_mut().copy_from_slice(&n.to_be_bytes());
 }
 
 /// Applies the keystream to one message, a piece at a time.
@@ -187,17 +185,25 @@ where
             data = rest;
         }
 
-        // Whole blocks, in groups: their counters are known in
-        // advance, so the cipher sees them all at once.
+        // Whole blocks, handed to the cipher in one run so that it
+        // can keep the counters in registers. It counts in the last
+        // four bytes only, so a run stops where they would carry
+        // into the rest of the block; that is once every 2^32
+        // blocks, or 64 gigabytes.
         let (whole, tail) = <C::Block as ByteArray>::split_mut(data);
-        let mut keystream = [C::zero_block(); LANES];
-        for group in whole.chunks_mut(LANES) {
-            let keystream = &mut keystream[..group.len()];
-            counters(&mut self.counter, keystream);
-            self.cipher.encrypt_blocks(keystream);
-            for (block, key) in group.iter_mut().zip(&*keystream) {
-                xor(block.as_mut(), key.as_ref());
+        let mut done = 0;
+        while done < whole.len() {
+            let room = (u32::MAX - low32(self.counter.as_ref())) as usize + 1;
+            let take = (whole.len() - done).min(room);
+            let run = &mut whole[done..done + take];
+            self.cipher.xor_counter_blocks(
+                &mut self.counter,
+                <C::Block as ByteArray>::flatten_mut(run),
+            );
+            if take == room {
+                carry_out_of_low32(&mut self.counter);
             }
+            done += take;
         }
 
         // A final piece of a block, whose remainder is kept.
@@ -245,6 +251,65 @@ mod tests {
 
     fn ctr<const K: usize>(key: &[u8; K]) -> Ctr<Aes<K>> {
         Ctr::new(Aes::try_new(key).unwrap())
+    }
+
+    /// Every length across the bulk group, the tail widths under it
+    /// and the odd block at the end.
+    ///
+    /// Round-tripping would not catch a wrong keystream, since the
+    /// same wrong keystream undoes itself, so this checks against one
+    /// built a block at a time.
+    #[test]
+    fn keystream_matches_a_block_at_a_time() {
+        // Two bulk groups, an odd number of pairs, and a part block.
+        const N: usize = 2 * 16 * 16 + 5 * 16 + 7;
+        let key = [0x5au8; 16];
+        let start = [0x77u8; 16];
+        let aes = Aes::<16>::try_new(&key).unwrap();
+
+        let mut want = [0u8; N];
+        let mut counter = start;
+        for chunk in want.chunks_mut(16) {
+            let mut block = counter;
+            aes.encrypt_block(&mut block);
+            chunk.copy_from_slice(&block[..chunk.len()]);
+            increment(&mut counter);
+        }
+
+        for n in 0..=N {
+            let mut got = [0u8; N];
+            ctr(&key).encrypt(&start, &mut got[..n]).unwrap();
+            assert_eq!(got[..n], want[..n], "{n} bytes");
+        }
+    }
+
+    /// The cipher counts in the last four bytes and drops the carry
+    /// there, so a run crossing that boundary is split in two and the
+    /// carry put back by hand. Starting two blocks short of the wrap
+    /// exercises both sides of the split, and the run after it is
+    /// long enough to reach the bulk path and leave a tail.
+    #[test]
+    fn crosses_the_four_byte_counter_boundary() {
+        const N: usize = 40;
+        let key = [0x2bu8; 16];
+        let mut start = [0xa5u8; 16];
+        start[12..].copy_from_slice(&0xffff_fffeu32.to_be_bytes());
+
+        // The keystream as counter mode defines it: a block at a
+        // time, counting in the whole block.
+        let aes = Aes::<16>::try_new(&key).unwrap();
+        let mut want = [0u8; N * 16];
+        let mut counter = start;
+        for chunk in want.chunks_mut(16) {
+            let mut block = counter;
+            aes.encrypt_block(&mut block);
+            chunk.copy_from_slice(&block);
+            increment(&mut counter);
+        }
+
+        let mut got = [0u8; N * 16];
+        ctr(&key).encrypt(&start, &mut got).unwrap();
+        assert_eq!(got, want);
     }
 
     /// NIST SP 800-38A F.5.1 and F.5.2, AES-128.

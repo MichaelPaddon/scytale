@@ -66,7 +66,7 @@
 use core::fmt;
 
 use super::ghash::{BLOCK, Ghash};
-use super::{LANES, xor};
+use super::xor;
 use crate::Error;
 use crate::cipher::BlockCipher;
 use crate::util;
@@ -193,29 +193,6 @@ fn counter_start(h: &[u8; BLOCK], nonce: &[u8]) -> Result<[u8; BLOCK], Error> {
     Ok(hash.finish())
 }
 
-/// Fills `blocks` with successive counter values and leaves `counter`
-/// on the one after the last.
-///
-/// The counter stays in registers for the whole group. Storing it and
-/// reading it back for the next block puts a sixteen-byte load across
-/// two narrower stores still in the store buffer, which cannot be
-/// forwarded and costs about a dozen cycles a block.
-///
-/// Read big-endian, the field the standard increments is the low
-/// thirty-two bits of the whole block, so masking it off leaves the
-/// rest untouched and the addition wraps where it should.
-#[inline]
-fn counters(counter: &mut [u8; BLOCK], blocks: &mut [[u8; BLOCK]]) {
-    let base = u128::from_be_bytes(*counter);
-    let rest = base & !(u32::MAX as u128);
-    let mut n = base as u32;
-    for block in blocks.iter_mut() {
-        *block = (rest | u128::from(n)).to_be_bytes();
-        n = n.wrapping_add(1);
-    }
-    *counter = (rest | u128::from(n)).to_be_bytes();
-}
-
 /// Adds one to the last four bytes of the counter, wrapping within
 /// them. GCM increments only that field, not the whole block.
 fn increment32(counter: &mut [u8; BLOCK]) {
@@ -323,17 +300,13 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
             data = rest;
         }
 
-        // Whole blocks, in groups: the counters are known in advance.
+        // Whole blocks, in one run: GCM counts in the last four
+        // bytes of the block and wraps inside them, which is exactly
+        // what the cipher's counter loop does, so there is no
+        // boundary to split at.
         let (whole, tail) = data.as_chunks_mut::<BLOCK>();
-        let mut keystream = [[0u8; BLOCK]; LANES];
-        for group in whole.chunks_mut(LANES) {
-            let keystream = &mut keystream[..group.len()];
-            counters(&mut self.counter, keystream);
-            self.cipher.encrypt_blocks(keystream);
-            for (block, key) in group.iter_mut().zip(&*keystream) {
-                xor(block, key);
-            }
-        }
+        self.cipher
+            .xor_counter_blocks(&mut self.counter, whole.as_flattened_mut());
 
         if !tail.is_empty() {
             self.keystream = self.counter;

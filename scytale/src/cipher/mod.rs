@@ -76,6 +76,53 @@ pub trait BlockCipher: BlockType + KeyType {
 
     /// Decrypts every block in place, independently (ECB).
     fn decrypt_blocks(&self, blocks: &mut [Self::Block]);
+
+    /// Encrypts the run of blocks made from `counter` by adding
+    /// 0, 1, 2 and so on to its last four bytes, read as one
+    /// big-endian number, and XORs each result into `data`. Leaves
+    /// `counter` on the block after the last.
+    ///
+    /// This is counter mode's inner loop, and it is here rather than
+    /// assembled from [`encrypt_blocks`](Self::encrypt_blocks) by the
+    /// caller so that an implementation can keep the counters in
+    /// registers. Built from the outside, every block is written to a
+    /// scratch buffer, read back to be encrypted, and read again to
+    /// be XORed: three trips through memory where one would do.
+    ///
+    /// `data` must be a whole number of blocks. The four-byte field
+    /// must not carry out of itself over the run; a caller counting
+    /// in the whole block splits its run at that boundary.
+    ///
+    /// The default does assemble it from `encrypt_blocks`.
+    fn xor_counter_blocks(&self, counter: &mut Self::Block, data: &mut [u8]) {
+        let size = counter.as_ref().len();
+        debug_assert_eq!(data.len() % size, 0);
+        // `*counter` rather than `zero_block`, which an object has
+        // no way to call; the values are overwritten below.
+        let mut keystream = [*counter; mode::LANES];
+        for group in data.chunks_mut(size * mode::LANES) {
+            let keystream = &mut keystream[..group.len() / size];
+            for block in keystream.iter_mut() {
+                *block = *counter;
+                add_low32(counter.as_mut(), 1);
+            }
+            self.encrypt_blocks(keystream);
+            for (chunk, key) in group.chunks_mut(size).zip(&*keystream) {
+                mode::xor(chunk, key.as_ref());
+            }
+        }
+    }
+}
+
+/// Adds `count` to the last four bytes of `block`, read as one
+/// big-endian number, wrapping inside them rather than carrying out.
+#[inline]
+pub(crate) fn add_low32(block: &mut [u8], count: u32) {
+    debug_assert!(block.len() >= 4);
+    let start = block.len() - 4;
+    let field = &mut block[start..];
+    let n = u32::from_be_bytes([field[0], field[1], field[2], field[3]]);
+    field.copy_from_slice(&n.wrapping_add(count).to_be_bytes());
 }
 
 #[cfg(test)]

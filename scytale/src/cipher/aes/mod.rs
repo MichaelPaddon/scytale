@@ -355,6 +355,13 @@ impl<const K: usize> BlockCipher for Aes<K> {
     fn decrypt_blocks(&self, blocks: &mut [Self::Block]) {
         Aes::decrypt_blocks(self, blocks)
     }
+
+    fn xor_counter_blocks(&self, counter: &mut Self::Block, data: &mut [u8]) {
+        dispatch!(
+            self,
+            aes => BlockCipher::xor_counter_blocks(aes, counter, data)
+        )
+    }
 }
 
 #[cfg(test)]
