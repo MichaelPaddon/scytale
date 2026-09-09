@@ -87,15 +87,15 @@ cargo add scytale
 
 ```rust
 use scytale::cipher::{aes::Aes256, mode::Gcm};
-use scytale::random::{Random, Rng, System};
+use scytale::random::{Rng, System};
+use scytale::{KeyType, Random};
 
 let mut rng = Rng::try_new(System::try_new()?)?;
-let mut key = [0u8; 32];
+let key = Aes256::random_key(&mut rng)?;
 let mut nonce = [0u8; 12];
-rng.fill(&mut key)?;
 rng.fill(&mut nonce)?;
 
-let gcm = Gcm::try_new(Aes256::try_new(&key)?)?;
+let gcm = Gcm::<Aes256>::new(&key);
 let header = b"to: alice";
 let mut message = *b"attack at dawn";
 let mut tag = [0u8; 16];
@@ -276,11 +276,18 @@ Keys and initialisation vectors need randomness, so `scytale::random`
 provides a generator you hold:
 
 ```rust
-use scytale::random::{Random, Rng, System};
+use scytale::cipher::aes::Aes256;
+use scytale::random::{Rng, System};
+use scytale::{KeyType, Random};
 
 let mut rng = Rng::try_new(System::try_new()?)?;
-let mut key = [0u8; 32];
-rng.fill(&mut key)?;
+
+// A key of the right width for the cipher, which wipes itself.
+let key = Aes256::random_key(&mut rng)?;
+
+// Or bytes for anything else.
+let mut nonce = [0u8; 12];
+rng.fill(&mut nonce)?;
 ```
 
 It is the CTR_DRBG of NIST SP 800-90A: AES-256 driven by a counter,
@@ -400,7 +407,7 @@ decryption checks it before the plaintext is worth anything:
 ```rust
 use scytale::cipher::{aes::Aes128, mode::Gcm};
 
-let gcm = Gcm::try_new(Aes128::try_new(&key)?)?;
+let gcm = Gcm::<Aes128>::new(&key);
 
 let mut tag = [0u8; 16];
 gcm.encrypt(&nonce, associated_data, &mut buffer, &mut tag)?;
@@ -427,48 +434,51 @@ mac.update(message);
 mac.verify(&tag)?;
 ```
 
-`Sha256` and the rest pick the best implementation the processor
-supports, as `Aes` does, and each implementation is reachable by name
-under `hash::sha2::portable`, `x86_64`, `aarch64` and `riscv64`.
+### One type per algorithm
 
-`Aes<K>` picks the best implementation the processor supports,
-probing once on first use; `K` is the key width in bytes, and
-`Aes128`, `Aes192` and `Aes256` name the three. Each implementation
-can also be named directly, with the same width parameter:
+`Aes128`, `Aes192` and `Aes256` are the ciphers; `Sha256`,
+`Sha3_256`, `Shake128` and the rest are the hashes. Each picks the
+best implementation this processor supports, probing once on first
+use, and then dispatches with a single predictable branch.
 
-| Type | Uses |
-| --- | --- |
-| `cipher::aes::Aes<K>` | the best of the below for this processor |
-| `aes::x86_64::vaes::Aes<K>` | VAES |
-| `aes::x86_64::aesni::Aes<K>` | AES-NI |
-| `aes::aarch64::armv8::Aes<K>` | ARMv8 cryptography extension |
-| `aes::riscv64::zvkned::Aes<K>` | RISC-V vector cryptography |
-| `aes::riscv64::zkn::Aes<K>` | RISC-V scalar cryptography |
-| `aes::portable::bitsliced::Aes<K>` | portable, constant time |
-| `aes::portable::ttable::Aes<K>` | portable, table driven; see below |
+Which implementation that is is not a choice a caller makes. The
+implementations are private: hardware instructions where the
+processor has them, otherwise constant-time portable code. There is a
+table-driven AES in the crate that is about twice the speed of the
+constant-time portable one, and it is never chosen, because it
+indexes tables with bytes derived from the key and so leaks the key
+to an attacker who can measure cache timing. A way for an application
+that runs nothing untrusted to ask for it by name is still to be
+designed.
 
-The architecture-specific types exist only on their architecture, and
-their `try_new` returns `Error::NotSupported` when the processor
-lacks the instructions. Every implementation wipes its expanded key
-when dropped.
+### Keys wipe themselves
 
-### Choosing an implementation
+A key is a `Key<[u8; 16]>`, not a `[u8; 16]`. It wipes itself when
+it goes out of scope, and it is not `Copy`, so a second copy of a
+key is something someone wrote rather than something that happened.
+The type carries the width, so the wrong one will not compile.
 
-Prefer `Aes` unless you have a reason not to.
+```rust
+use scytale::cipher::aes::Aes128;
+use scytale::{Key, KeyType};
 
-The two portable implementations are peers, and `Aes` never chooses
-`portable::ttable`, the table-driven one. That one is about twice the
-speed of `portable::bitsliced`, but its memory access pattern depends
-on the key, which leaks the key to an attacker who can measure the
-timing, typically by running code on the same processor. Use it only
-where nothing untrusted runs, and read the notes in its documentation
-first.
+let key = Aes128::random_key(&mut rng)?;   // drawn and protected
+let key = Key::from([0u8; 16]);            // from bytes you have
+let key = Key::take(&mut bytes);           // and wipe where they were
+```
+
+`Key::take` is the one worth reaching for when a key arrives in a
+buffer of your own: the buffer is the copy that nothing else would
+erase.
+
+The expanded key inside a cipher is wiped when the cipher is
+dropped, as it always was, and the generator wipes its state.
 
 ## Speed
 
 Measured on a 13th Gen Intel Core i7-1355U, one thread, on mains
 power. The benchmark ships with the library, so these are numbers you
-can reproduce: `cargo bench --bench speed`. Every figure below is a
+can reproduce: `scripts/bench`. Every figure below is a
 row it prints, and it prints rather more than are quoted here. On a
 laptop running on battery, expect about half of each of them.
 
@@ -633,7 +643,14 @@ no timings for the ARM and RISC-V implementations.
 cargo test              # unit tests and the one-shot vector suites
 cargo test-extended     # adds the Monte Carlo and large data suites
 scripts/test-all-arches # every architecture, foreign ones emulated
+scripts/bench           # measures rather than checks
 ```
+
+The suites live inside the crate, under `#[cfg(test)]`, rather than
+in `tests/`: an integration test is a separate crate and would see
+only the public types, and each implementation behind them is meant
+to be validated in its own right. The benchmark is there for the same
+reason, and runs as an ignored test that `scripts/bench` starts.
 
 The ACVP and Project Wycheproof vectors live in
 `scytale/tests/vectors` and are not shipped in the published crate,

@@ -17,7 +17,8 @@
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::kdf::hkdf;
 //! use scytale::kex::x25519;
-//! use scytale::random::{Random, Rng, System};
+//! use scytale::Random;
+//! use scytale::random::{Rng, System};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let mut rng = Rng::try_new(System::try_new()?)?;

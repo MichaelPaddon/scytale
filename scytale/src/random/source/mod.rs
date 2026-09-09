@@ -3,7 +3,7 @@
 //! Each of these is a source of raw material, not a source of random
 //! bytes: what they hand back is conditioned by the generator above
 //! them before any of it reaches a caller. That is why they implement
-//! [`Entropy`] and not [`Random`](crate::random::Random).
+//! [`Entropy`] and not [`Random`](crate::Random).
 //!
 //! | Source | What it asks |
 //! | --- | --- |
@@ -14,7 +14,8 @@
 //! # Example
 //!
 //! ```
-//! use scytale::random::{External, Random, Rng, System};
+//! use scytale::Random;
+//! use scytale::random::{External, Rng, System};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! // The usual case: let the system feed the generator.

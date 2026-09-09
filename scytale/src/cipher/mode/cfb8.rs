@@ -18,11 +18,12 @@
 //! # Example
 //!
 //! ```
-//! use scytale::cipher::aes::Aes;
+//! use scytale::Key;
+//! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Cfb8;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let cfb = Cfb8::new(Aes::try_new(&[0u8; 16])?);
+//! let cfb = Cfb8::<Aes128>::new(&Key::from([0u8; 16]));
 //! let iv = [0u8; 16];
 //!
 //! // Any length, down to a single byte.
@@ -38,18 +39,20 @@ use core::fmt;
 
 use super::shift_in_byte;
 use crate::Error;
-use crate::cipher::BlockCipher;
+use crate::cipher::{BlockCipher, OneBlock};
 
 /// CFB with 8-bit segments over a block cipher.
 #[derive(Clone)]
-pub struct Cfb8<C> {
+pub struct Cfb8<C: BlockCipher> {
     cipher: C,
 }
 
 impl<C: BlockCipher> Cfb8<C> {
-    /// Wraps `cipher`.
-    pub fn new(cipher: C) -> Self {
-        Cfb8 { cipher }
+    /// Takes the key the cipher runs under.
+    pub fn new(key: &C::Key) -> Self {
+        Cfb8 {
+            cipher: C::new(key),
+        }
     }
 
     /// Encrypts `data` in place under `iv`. Any length of message is
@@ -92,7 +95,7 @@ impl<C: BlockCipher> Encryptor<'_, C> {
     pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
         for byte in data.iter_mut() {
             let mut keystream = self.register;
-            self.cipher.encrypt_block(&mut keystream);
+            self.cipher.encrypt_one(&mut keystream);
             *byte ^= keystream.as_ref()[0];
             shift_in_byte(self.register.as_mut(), *byte);
         }
@@ -112,7 +115,7 @@ impl<C: BlockCipher> Decryptor<'_, C> {
     pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
         for byte in data.iter_mut() {
             let mut keystream = self.register;
-            self.cipher.encrypt_block(&mut keystream);
+            self.cipher.encrypt_one(&mut keystream);
             // The register takes the ciphertext, so save it before
             // the byte becomes plaintext.
             let ciphertext = *byte;
@@ -124,7 +127,7 @@ impl<C: BlockCipher> Decryptor<'_, C> {
 }
 
 // Debug output omits the state: it is all derived from the key.
-impl<C> fmt::Debug for Cfb8<C> {
+impl<C: BlockCipher> fmt::Debug for Cfb8<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Cfb8").finish_non_exhaustive()
     }
@@ -145,6 +148,7 @@ impl<C: BlockCipher> fmt::Debug for Decryptor<'_, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Key;
     use crate::cipher::aes::Aes;
 
     fn unhex<const N: usize>(s: &str) -> [u8; N] {
@@ -158,7 +162,7 @@ mod tests {
     }
 
     fn cfb<const K: usize>(key: &[u8; K]) -> Cfb8<Aes<K>> {
-        Cfb8::new(Aes::try_new(key).unwrap())
+        Cfb8::new(&Key::from(*key))
     }
 
     /// NIST SP 800-38A F.3.7 and F.3.8, AES-128.

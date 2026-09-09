@@ -35,12 +35,12 @@ use super::montgomery::Montgomery;
 use super::uint::Uint;
 use crate::BlockType;
 use crate::Error;
+use crate::Random;
 use crate::der::{self, Reader, Writer};
 use crate::hash::Hash;
 use crate::mac::Mac;
 use crate::mac::hmac::Hmac;
 use crate::pem;
-use crate::random::Random;
 
 /// A curve's constants, each as a big-endian hex string of the
 /// curve's width, and the OID that names it in a certificate.
@@ -1069,8 +1069,8 @@ macro_rules! key_types {
         der $der:literal, public der $public_der:literal
     ) => {
         use crate::Error;
+        use crate::Random;
         use crate::math::ec::{Engine, Public, Secret};
-        use crate::random::Random;
 
         /// The length of a private key.
         pub const KEY_SIZE: usize = 8 * $limbs;

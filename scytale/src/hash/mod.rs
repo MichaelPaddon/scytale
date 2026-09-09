@@ -240,8 +240,9 @@ mod tests {
         assert_eq!(feed(&mut sha512_256), Sha512_256::digest(b"abc").unwrap());
         assert_eq!(feed(&mut sha3_256), Sha3_256::digest(b"abc").unwrap());
 
-        type Reader = sha3::AutoReader<sha3::variant::Shake128>;
-        fn squeeze(xof: &mut dyn Xof<Reader = Reader>) -> [u8; 40] {
+        fn squeeze(
+            xof: &mut dyn Xof<Reader = sha3::Shake128Reader>,
+        ) -> [u8; 40] {
             xof.update(b"abc");
             let mut out = [0u8; 40];
             xof.finalize_xof().squeeze(&mut out);

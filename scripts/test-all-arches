@@ -1,6 +1,8 @@
 #!/bin/sh
 # Runs every test (including the long ones marked #[ignore]) for each
-# architecture. The host architecture runs natively; the others run
+# architecture. The benchmark is ignored too and is left out: it
+# measures rather than checks, and a sweep under qemu would take
+# hours. Use scripts/bench for that. The host architecture runs natively; the others run
 # with `cross`, which builds in a container holding the cross linker,
 # the target's libc and qemu. For development only; CI tests on real
 # hardware.
@@ -35,7 +37,8 @@ run_target() {
     target=$1
     echo "==> $target"
     if [ "$target" = "$host" ]; then
-        cargo test --workspace -- --include-ignored
+        cargo test --workspace -- --include-ignored \
+            --skip bench::speed
         return
     fi
     if ! command -v cross >/dev/null 2>&1; then
@@ -46,7 +49,8 @@ run_target() {
         echo "missing rust-std: rustup target add $target" >&2
         exit 1
     fi
-    cross test --workspace --target "$target" -- --include-ignored
+    cross test --workspace --target "$target" -- \
+        --include-ignored --skip bench::speed
 }
 
 if [ $# -gt 0 ]; then

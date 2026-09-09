@@ -37,13 +37,14 @@
 //! # Example
 //!
 //! ```
+//! use scytale::Key;
 //! use scytale::random::{Rng, System};
-//! use scytale::cipher::aes::Aes;
+//! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::{Gcm, Nonces};
 //! use scytale::cipher::BlockCipher;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let gcm = Gcm::try_new(Aes::try_new(&[0u8; 16])?)?;
+//! let gcm = Gcm::<Aes128>::new(&Key::from([0u8; 16]));
 //! let mut rng = Rng::try_new(System::try_new()?)?;
 //! let mut nonces = Nonces::random(&mut rng)?;
 //!
@@ -59,7 +60,7 @@
 //! ```
 
 use crate::Error;
-use crate::random::Random;
+use crate::Random;
 
 /// The nonce length this builds, in bytes.
 const NONCE: usize = 12;

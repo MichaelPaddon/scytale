@@ -27,20 +27,23 @@
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::hash::Hash;
 //! use scytale::kdf::hkdf;
-//! use scytale::mac::hmac::Hmac;
+//! use scytale::mac::hmac::{Hmac, HmacSha256};
+//! use scytale::KeyType;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::{Gcm, Nonces};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! // A session key, and a key for each job derived from it.
+//! // A session key, and a key for each job derived from it,
+//! // straight into keys that wipe themselves when they go out of
+//! // scope.
 //! let secret = [0x42u8; 32];
-//! let mut cipher_key = [0u8; 16];
-//! let mut mac_key = [0u8; 32];
-//! hkdf::derive::<Sha256>(b"salt", &secret, b"cipher", &mut cipher_key)?;
-//! hkdf::derive::<Sha256>(b"salt", &secret, b"mac", &mut mac_key)?;
+//! let mut cipher_key = Aes128::zero_key();
+//! let mut mac_key = HmacSha256::zero_key();
+//! hkdf::derive::<Sha256>(b"salt", &secret, b"cipher", cipher_key.as_mut())?;
+//! hkdf::derive::<Sha256>(b"salt", &secret, b"mac", mac_key.as_mut())?;
 //!
 //! // Authenticated encryption, with nonces that cannot repeat.
-//! let gcm = Gcm::try_new(Aes128::try_new(&cipher_key)?)?;
+//! let gcm = Gcm::<Aes128>::new(&cipher_key);
 //! let mut nonces = Nonces::new(7, 0);
 //! let nonce = nonces.take()?;
 //! let mut message = *b"attack at dawn";
@@ -51,7 +54,7 @@
 //!
 //! // A digest, and a tag over the same bytes.
 //! let digest = Sha256::digest(&message)?;
-//! let mac = Hmac::<Sha256>::mac(&mac_key, &message)?;
+//! let mac = Hmac::<Sha256>::mac(mac_key.as_ref(), &message)?;
 //! assert_ne!(digest, mac);
 //! # Ok(())
 //! # }
@@ -107,6 +110,18 @@
 #![warn(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+// The vector suites in `acvp` read files and parse JSON, so the
+// library's own test build has the standard library; nothing else
+// does.
+#[cfg(test)]
+extern crate std;
+
+#[cfg(test)]
+mod acvp;
+
+#[cfg(test)]
+mod bench;
+
 mod arch;
 pub mod cipher;
 mod der;
@@ -126,4 +141,4 @@ mod traits;
 mod util;
 
 pub use error::Error;
-pub use traits::{BlockType, ByteArray, KeyType};
+pub use traits::{BlockType, ByteArray, Key, KeyType, Random};

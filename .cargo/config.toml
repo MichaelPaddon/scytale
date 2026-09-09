@@ -1,3 +1,5 @@
 [alias]
-# Runs every test, including the long ones marked #[ignore].
-test-extended = "test --workspace -- --include-ignored"
+# Runs every test, including the long ones marked #[ignore]. The
+# benchmark is ignored too and is left out: it measures rather than
+# checks. Use scripts/bench for that.
+test-extended = "test --workspace -- --include-ignored --skip bench::speed"

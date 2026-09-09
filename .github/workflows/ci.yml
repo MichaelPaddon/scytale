@@ -63,8 +63,10 @@ jobs:
 
       - name: Implementations tested
         # The binary is built by now, so this costs a second and
-        # says which implementations this processor could run.
-        run: cargo test --test acvp inventory -- --nocapture
+        # says which implementations this processor could run. The
+        # suites live in the library's own test build, since an
+        # integration test cannot see the implementations.
+        run: cargo test --lib acvp::inventory -- --nocapture
 
       - name: Clippy
         # The same profile as the tests, so this analyses the code
@@ -107,8 +109,7 @@ jobs:
       - name: ASCII only
         run: |
           if grep -rnP '[^\x00-\x7F]' \
-              scytale/src scytale-cli/src scytale/tests/support \
-              scytale/tests/*.rs; then
+              scytale/src scytale-cli/src; then
               echo "non-ASCII characters found" >&2
               exit 1
           fi

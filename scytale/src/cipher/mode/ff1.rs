@@ -40,12 +40,13 @@
 //! # Example
 //!
 //! ```
-//! use scytale::cipher::aes::Aes;
+//! use scytale::Key;
+//! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Ff1;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! // Decimal digits.
-//! let ff1 = Ff1::try_new(Aes::try_new(&[0u8; 16])?, 10)?;
+//! let ff1 = Ff1::<Aes128>::try_new(&Key::from([0u8; 16]), 10)?;
 //!
 //! let mut account = [0u16, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 //! ff1.encrypt(b"record 42", &mut account)?;
@@ -62,7 +63,7 @@ use core::fmt;
 
 use super::ghash::BLOCK;
 use crate::Error;
-use crate::cipher::BlockCipher;
+use crate::cipher::{BlockCipher, OneBlock};
 use crate::math::natural::Natural;
 
 /// Rounds of the Feistel network, fixed by the standard.
@@ -86,12 +87,12 @@ const MAX_DRAWN: usize = 4 * MAX_NUMBER.div_ceil(4) + 4 + BLOCK;
 
 /// FF1 over a block cipher, for one radix.
 #[derive(Clone)]
-pub struct Ff1<C> {
+pub struct Ff1<C: BlockCipher<Block = [u8; BLOCK]>> {
     cipher: C,
     radix: u32,
 }
 
-impl<C> fmt::Debug for Ff1<C> {
+impl<C: BlockCipher<Block = [u8; BLOCK]>> fmt::Debug for Ff1<C> {
     /// Deliberately omits the cipher, which holds the key.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Ff1")
@@ -101,13 +102,16 @@ impl<C> fmt::Debug for Ff1<C> {
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Ff1<C> {
-    /// Wraps `cipher` for messages written in `radix` symbols, which
-    /// must be between 2 and 65536.
-    pub fn try_new(cipher: C, radix: u32) -> Result<Self, Error> {
+    /// Takes the key the cipher runs under, for messages written in
+    /// `radix` symbols, which must be between 2 and 65536.
+    pub fn try_new(key: &C::Key, radix: u32) -> Result<Self, Error> {
         if !(2..=65536).contains(&radix) {
             return Err(Error::InvalidRadix(radix));
         }
-        Ok(Ff1 { cipher, radix })
+        Ok(Ff1 {
+            cipher: C::new(key),
+            radix,
+        })
     }
 
     /// Encrypts `message` in place, leaving it the same length and in
@@ -285,7 +289,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ff1<C> {
             for (byte, mask) in block.iter_mut().zip(counter.to_be_bytes()) {
                 *byte ^= mask;
             }
-            self.cipher.encrypt_block(&mut block);
+            self.cipher.encrypt_one(&mut block);
             drawn_bytes[filled..filled + BLOCK].copy_from_slice(&block);
             filled += BLOCK;
             counter += 1;
@@ -361,7 +365,7 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Chain<'a, C> {
                 for (s, b) in self.state.iter_mut().zip(&self.block) {
                     *s ^= b;
                 }
-                self.cipher.encrypt_block(&mut self.state);
+                self.cipher.encrypt_one(&mut self.state);
                 self.used = 0;
             }
         }
@@ -377,7 +381,8 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Chain<'a, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cipher::aes::{Aes, Aes128};
+    use crate::Key;
+    use crate::cipher::aes::Aes128;
 
     fn unhex<const N: usize>(text: &str) -> [u8; N] {
         let mut out = [0u8; N];
@@ -391,7 +396,7 @@ mod tests {
 
     fn ff1(radix: u32) -> Ff1<Aes128> {
         let key: [u8; 16] = unhex("2b7e151628aed2a6abf7158809cf4f3c");
-        Ff1::try_new(Aes::try_new(&key).unwrap(), radix).unwrap()
+        Ff1::try_new(&Key::from(key), radix).unwrap()
     }
 
     /// NIST's published sample for FF1 with AES-128, decimal digits
@@ -477,7 +482,7 @@ mod tests {
         let key: [u8; 16] = unhex("2b7e151628aed2a6abf7158809cf4f3c");
         for radix in [0u32, 1, 65537, 100_000] {
             assert_eq!(
-                Ff1::try_new(Aes::try_new(&key).unwrap(), radix).unwrap_err(),
+                Ff1::<Aes128>::try_new(&Key::from(key), radix).unwrap_err(),
                 Error::InvalidRadix(radix)
             );
         }

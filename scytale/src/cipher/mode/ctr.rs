@@ -37,11 +37,12 @@
 //! # Example
 //!
 //! ```
-//! use scytale::cipher::aes::Aes;
+//! use scytale::Key;
+//! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Ctr;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let ctr = Ctr::new(Aes::try_new(&[0u8; 16])?);
+//! let ctr = Ctr::<Aes128>::new(&Key::from([0u8; 16]));
 //! let counter = [0u8; 16];
 //!
 //! let mut data = [0u8; 21];
@@ -55,22 +56,29 @@
 use core::fmt;
 
 use super::xor;
-use crate::cipher::{BlockCipher, ByteOrder};
+use crate::cipher::{BlockCipher, ByteOrder, CounterFn, OneBlock, counter_fn};
 use crate::{ByteArray, Error};
 
 /// Counter mode over a block cipher.
 #[derive(Clone)]
-pub struct Ctr<C> {
+pub struct Ctr<C: BlockCipher> {
     cipher: C,
+    /// The counter loop this cipher gets, settled when the mode is
+    /// built: a hand-written one where there is one for this cipher
+    /// on this processor, the generic construction otherwise.
+    counter: CounterFn<C>,
 }
 
 impl<C: BlockCipher> Ctr<C>
 where
     C::Block: ByteArray,
 {
-    /// Wraps `cipher`.
-    pub fn new(cipher: C) -> Self {
-        Ctr { cipher }
+    /// Takes the key the cipher runs under.
+    pub fn new(key: &C::Key) -> Self {
+        Ctr {
+            cipher: C::new(key),
+            counter: counter_fn::<C>(),
+        }
     }
 
     /// Encrypts `data` in place, starting from `counter`. Any length
@@ -100,6 +108,7 @@ where
     pub fn stream(&self, counter: &C::Block) -> Stream<'_, C> {
         Stream {
             cipher: &self.cipher,
+            blocks: self.counter,
             counter: *counter,
             keystream: C::zero_block(),
             used: size_of::<C::Block>(),
@@ -160,6 +169,8 @@ fn carry_out_of_low32<B: ByteArray>(counter: &mut B) {
 /// There is nothing to finish.
 pub struct Stream<'a, C: BlockCipher> {
     cipher: &'a C,
+    /// The counter loop chosen when the mode was built.
+    blocks: CounterFn<C>,
     counter: C::Block,
     /// The keystream block a previous piece ended inside.
     keystream: C::Block,
@@ -196,7 +207,8 @@ where
             let room = (u32::MAX - low32(self.counter.as_ref())) as usize + 1;
             let take = (whole.len() - done).min(room);
             let run = &mut whole[done..done + take];
-            self.cipher.xor_counter_blocks(
+            (self.blocks)(
+                self.cipher,
                 &mut self.counter,
                 ByteOrder::Big,
                 <C::Block as ByteArray>::flatten_mut(run),
@@ -211,7 +223,7 @@ where
         if !tail.is_empty() {
             self.keystream = self.counter;
             increment(&mut self.counter);
-            self.cipher.encrypt_block(&mut self.keystream);
+            self.cipher.encrypt_one(&mut self.keystream);
             xor(tail, self.keystream.as_ref());
             self.used = tail.len();
         }
@@ -220,7 +232,7 @@ where
 }
 
 // Debug output omits the state: it is all derived from the key.
-impl<C> fmt::Debug for Ctr<C> {
+impl<C: BlockCipher> fmt::Debug for Ctr<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Ctr").finish_non_exhaustive()
     }
@@ -235,6 +247,7 @@ impl<C: BlockCipher> fmt::Debug for Stream<'_, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Key;
     use crate::cipher::aes::Aes;
 
     /// Enough to cover several bulk groups and a partial tail.
@@ -251,7 +264,7 @@ mod tests {
     }
 
     fn ctr<const K: usize>(key: &[u8; K]) -> Ctr<Aes<K>> {
-        Ctr::new(Aes::try_new(key).unwrap())
+        Ctr::new(&Key::from(*key))
     }
 
     /// Every length across the bulk group, the tail widths under it
@@ -266,13 +279,13 @@ mod tests {
         const N: usize = 2 * 16 * 16 + 5 * 16 + 7;
         let key = [0x5au8; 16];
         let start = [0x77u8; 16];
-        let aes = Aes::<16>::try_new(&key).unwrap();
+        let aes = Aes::<16>::new(&key);
 
         let mut want = [0u8; N];
         let mut counter = start;
         for chunk in want.chunks_mut(16) {
             let mut block = counter;
-            aes.encrypt_block(&mut block);
+            aes.encrypt_one(&mut block);
             chunk.copy_from_slice(&block[..chunk.len()]);
             increment(&mut counter);
         }
@@ -298,12 +311,12 @@ mod tests {
 
         // The keystream as counter mode defines it: a block at a
         // time, counting in the whole block.
-        let aes = Aes::<16>::try_new(&key).unwrap();
+        let aes = Aes::<16>::new(&key);
         let mut want = [0u8; N * 16];
         let mut counter = start;
         for chunk in want.chunks_mut(16) {
             let mut block = counter;
-            aes.encrypt_block(&mut block);
+            aes.encrypt_one(&mut block);
             chunk.copy_from_slice(&block);
             increment(&mut counter);
         }

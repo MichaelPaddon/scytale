@@ -29,7 +29,7 @@ use core::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::Mac;
-use crate::{Error, KeyType};
+use crate::{Error, Key, KeyType};
 
 /// The key length in bytes: `r` then `s`.
 pub const KEY_SIZE: usize = 32;
@@ -181,10 +181,10 @@ impl Poly1305 {
 }
 
 impl KeyType for Poly1305 {
-    type Key = [u8; KEY_SIZE];
+    type Key = Key<[u8; KEY_SIZE]>;
 
     fn zero_key() -> Self::Key {
-        [0; KEY_SIZE]
+        Key::zeroed()
     }
 }
 
@@ -192,7 +192,7 @@ impl Mac for Poly1305 {
     type Tag = [u8; BLOCK];
 
     fn try_new(key: &Self::Key) -> Result<Self, Error> {
-        Ok(Poly1305::new(key))
+        Ok(Poly1305::new(key.array()))
     }
 
     fn reset(&mut self) {

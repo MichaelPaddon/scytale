@@ -9,7 +9,8 @@
 //! can be worked backwards from what comes next.
 //!
 //! ```
-//! use scytale::random::{Random, Rng, System};
+//! use scytale::Random;
+//! use scytale::random::{Rng, System};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let mut rng = Rng::try_new(System::try_new()?)?;
@@ -101,8 +102,9 @@ use core::fmt;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::Error;
+use crate::cipher::OneBlock;
 use crate::cipher::aes::{Aes256, BLOCK_SIZE};
+use crate::{Error, Key, Random};
 
 pub use source::{External, Processor, System};
 
@@ -163,17 +165,6 @@ pub trait Entropy {
     fn fill(&mut self, out: &mut [u8]) -> Result<(), Error>;
 }
 
-/// A source of random bytes fit to use.
-///
-/// [`Rng`] is the one that matters. The trait exists so that work
-/// which consumes randomness can be handed a fixed sequence instead
-/// and tested for an exact answer.
-pub trait Random {
-    /// Fills the whole of `out`, or fails without leaving anything
-    /// worth relying on.
-    fn fill(&mut self, out: &mut [u8]) -> Result<(), Error>;
-}
-
 /// A generator, seeded from `S`.
 ///
 /// See the [module documentation](self) for what holding one commits
@@ -191,7 +182,7 @@ pub struct Rng<S: Entropy = System> {
     source: S,
     /// The key and counter block that are the generator's whole
     /// secret.
-    key: [u8; KEY],
+    key: Key<[u8; KEY]>,
     v: [u8; BLOCK_SIZE],
     /// Requests made since the last seeding, counted from one as
     /// SP 800-90A counts it.
@@ -264,7 +255,7 @@ impl<S: Entropy> Rng<S> {
         let derived = derive(material, &mut seed);
         let mut rng = Rng {
             source,
-            key: [0u8; KEY],
+            key: Key::zeroed(),
             v: [0u8; BLOCK_SIZE],
             counter: 1,
         };
@@ -277,20 +268,20 @@ impl<S: Entropy> Rng<S> {
     /// replace both the key and the counter block, mixing `provided`
     /// in as it goes.
     fn update(&mut self, provided: &[u8; SEED]) -> Result<(), Error> {
-        let aes = Aes256::try_new(&self.key)?;
+        let aes = Aes256::new(&self.key);
         let mut temp = [0u8; SEED];
         for (chunk, extra) in
             temp.chunks_mut(BLOCK_SIZE).zip(provided.chunks(BLOCK_SIZE))
         {
             increment(&mut self.v);
             let mut block = self.v;
-            aes.encrypt_block(&mut block);
+            aes.encrypt_one(&mut block);
             for (out, (b, p)) in chunk.iter_mut().zip(block.iter().zip(extra)) {
                 *out = b ^ p;
             }
             block.zeroize();
         }
-        self.key.copy_from_slice(&temp[..KEY]);
+        self.key.as_mut().copy_from_slice(&temp[..KEY]);
         self.v.copy_from_slice(&temp[KEY..]);
         temp.zeroize();
         Ok(())
@@ -325,11 +316,11 @@ impl<S: Entropy> Random for Rng<S> {
         if self.counter > RESEED_INTERVAL {
             self.reseed()?;
         }
-        let aes = Aes256::try_new(&self.key)?;
+        let aes = Aes256::new(&self.key);
         for chunk in out.chunks_mut(BLOCK_SIZE) {
             increment(&mut self.v);
             let mut block = self.v;
-            aes.encrypt_block(&mut block);
+            aes.encrypt_one(&mut block);
             chunk.copy_from_slice(&block[..chunk.len()]);
             block.zeroize();
         }
@@ -378,11 +369,11 @@ fn derive(input: &[u8], out: &mut [u8; SEED]) -> Result<(), Error> {
     // The fixed key the standard names for this first pass: the bytes
     // 0x00 to 0x1f in order. It is written down in the standard, so
     // there is nothing here to keep.
-    let mut fixed = [0u8; KEY];
-    for (i, byte) in fixed.iter_mut().enumerate() {
+    let mut fixed = Key::<[u8; KEY]>::zeroed();
+    for (i, byte) in fixed.as_mut().iter_mut().enumerate() {
         *byte = i as u8;
     }
-    let aes = Aes256::try_new(&fixed)?;
+    let aes = Aes256::new(&fixed);
 
     // Each pass differs only in the counter its chain starts from,
     // which is what makes the three blocks differ.
@@ -403,15 +394,13 @@ fn derive(input: &[u8], out: &mut [u8; SEED]) -> Result<(), Error> {
     // The second pass runs the block cipher forward under a key made
     // from the first.
     let (key, counter) = temp.split_at(KEY);
-    let mut fixed = [0u8; KEY];
-    fixed.copy_from_slice(key);
-    let aes = Aes256::try_new(&fixed)?;
-    fixed.zeroize();
+    let key = Key::<[u8; KEY]>::try_from(key)?;
+    let aes = Aes256::new(&key);
     let mut block = [0u8; BLOCK_SIZE];
     block.copy_from_slice(counter);
     temp.zeroize();
     for chunk in out.chunks_mut(BLOCK_SIZE) {
-        aes.encrypt_block(&mut block);
+        aes.encrypt_one(&mut block);
         chunk.copy_from_slice(&block);
     }
     block.zeroize();
@@ -458,7 +447,7 @@ impl<'a> Chain<'a> {
         for (c, b) in self.chain.iter_mut().zip(&self.block) {
             *c ^= b;
         }
-        self.aes.encrypt_block(&mut self.chain);
+        self.aes.encrypt_one(&mut self.chain);
         self.used = 0;
     }
 

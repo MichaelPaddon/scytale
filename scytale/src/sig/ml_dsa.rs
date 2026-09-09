@@ -965,8 +965,8 @@ macro_rules! parameter_set {
         use zeroize::Zeroize;
 
         use crate::Error;
+        use crate::Random;
         use crate::der::SeedOrExpanded;
-        use crate::random::Random;
         use crate::sig::ml_dsa::{self, params};
 
         /// The length of a private key's seed, the form to store.

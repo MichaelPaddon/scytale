@@ -43,12 +43,15 @@
 //! whole number of bytes while the byte methods run as before.
 //!
 //! ```
+//! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Xts;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! // Two 128-bit keys: one for the data, one for the tweak.
-//! let xts: Xts<Aes128> = Xts::try_new(&[0u8; 16], &[1u8; 16])?;
+//! let data = Key::from([0u8; 16]);
+//! let tweak_key = Key::from([1u8; 16]);
+//! let xts: Xts<Aes128> = Xts::try_new(&data, &tweak_key)?;
 //!
 //! // Sector 7, as a little-endian integer.
 //! let mut tweak = [0u8; 16];
@@ -67,20 +70,20 @@ use core::fmt;
 use super::ghash::BLOCK;
 use super::{LANES, xor};
 use crate::Error;
-use crate::cipher::BlockCipher;
+use crate::cipher::{BlockCipher, OneBlock};
 use crate::util;
 
 /// XTS over a block cipher.
 ///
-/// Built from a key rather than a cipher because XTS needs two: one
-/// for the data and one for the tweak, expanded separately.
+/// Takes two keys, one for the data and one for the tweak, expanded
+/// separately.
 #[derive(Clone)]
-pub struct Xts<C> {
+pub struct Xts<C: BlockCipher<Block = [u8; BLOCK]>> {
     data: C,
     tweak: C,
 }
 
-impl<C> fmt::Debug for Xts<C> {
+impl<C: BlockCipher<Block = [u8; BLOCK]>> fmt::Debug for Xts<C> {
     /// Deliberately omits the ciphers, which hold the keys.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Xts").finish_non_exhaustive()
@@ -98,8 +101,8 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
             return Err(Error::InvalidKeyLength(2 * data.as_ref().len()));
         }
         Ok(Xts {
-            data: C::try_new(data)?,
-            tweak: C::try_new(tweak)?,
+            data: C::new(data),
+            tweak: C::new(tweak),
         })
     }
 
@@ -215,9 +218,9 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
 
         xor(last, &first);
         if encrypt {
-            self.data.encrypt_block(last);
+            self.data.encrypt_one(last);
         } else {
-            self.data.decrypt_block(last);
+            self.data.decrypt_one(last);
         }
         xor(last, &first);
 
@@ -233,9 +236,9 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
 
         xor(&mut carried, &second);
         if encrypt {
-            self.data.encrypt_block(&mut carried);
+            self.data.encrypt_one(&mut carried);
         } else {
-            self.data.decrypt_block(&mut carried);
+            self.data.decrypt_one(&mut carried);
         }
         xor(&mut carried, &second);
         last.copy_from_slice(&carried);
@@ -253,7 +256,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
             return Err(Error::InvalidLength(len));
         }
         let mut start = *tweak;
-        self.tweak.encrypt_block(&mut start);
+        self.tweak.encrypt_one(&mut start);
         Ok(start)
     }
 
@@ -295,9 +298,9 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
                 xor(block, tweak);
             }
             if encrypt {
-                self.data.encrypt_blocks(group);
+                self.data.encrypt(group);
             } else {
-                self.data.decrypt_blocks(group);
+                self.data.decrypt(group);
             }
             for (block, tweak) in group.iter_mut().zip(&*tweaks) {
                 xor(block, tweak);
@@ -325,6 +328,7 @@ fn alpha(tweak: u128) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Key;
     use crate::cipher::aes::Aes128;
 
     const MAX: usize = 80;
@@ -347,8 +351,11 @@ mod tests {
             &mut buffer,
         ));
         let (data, tweak) = key.split_at(16);
-        Xts::try_new(data.try_into().unwrap(), tweak.try_into().unwrap())
-            .unwrap()
+        Xts::try_new(
+            &Key::try_from(data).unwrap(),
+            &Key::try_from(tweak).unwrap(),
+        )
+        .unwrap()
     }
 
     /// A whole number of blocks: no stealing involved.
@@ -439,7 +446,11 @@ mod tests {
     fn rejects_bad_lengths() {
         // The two keys must differ.
         assert_eq!(
-            Xts::<Aes128>::try_new(&[0x11; 16], &[0x11; 16]).unwrap_err(),
+            Xts::<Aes128>::try_new(
+                &Key::from([0x11; 16]),
+                &Key::from([0x11; 16])
+            )
+            .unwrap_err(),
             Error::InvalidKeyLength(32)
         );
 

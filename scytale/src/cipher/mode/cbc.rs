@@ -21,11 +21,12 @@
 //! # Example
 //!
 //! ```
-//! use scytale::cipher::aes::Aes;
+//! use scytale::Key;
+//! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Cbc;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let cbc = Cbc::new(Aes::try_new(&[0u8; 16])?);
+//! let cbc = Cbc::<Aes128>::new(&Key::from([0u8; 16]));
 //! let iv = [0u8; 16];
 //!
 //! let mut data = [0u8; 32];
@@ -39,12 +40,12 @@
 use core::fmt;
 
 use super::{LANES, xor};
-use crate::cipher::BlockCipher;
+use crate::cipher::{BlockCipher, OneBlock};
 use crate::{ByteArray, Error};
 
 /// CBC over a block cipher.
 #[derive(Clone)]
-pub struct Cbc<C> {
+pub struct Cbc<C: BlockCipher> {
     cipher: C,
 }
 
@@ -52,9 +53,11 @@ impl<C: BlockCipher> Cbc<C>
 where
     C::Block: ByteArray,
 {
-    /// Wraps `cipher`.
-    pub fn new(cipher: C) -> Self {
-        Cbc { cipher }
+    /// Takes the key the cipher runs under.
+    pub fn new(key: &C::Key) -> Self {
+        Cbc {
+            cipher: C::new(key),
+        }
     }
 
     /// Encrypts `data` in place under `iv`.
@@ -113,7 +116,7 @@ where
         }
         for block in blocks {
             xor(block.as_mut(), self.chain.as_ref());
-            self.cipher.encrypt_block(block);
+            self.cipher.encrypt_one(block);
             self.chain = *block;
         }
         Ok(())
@@ -148,7 +151,7 @@ where
         for group in blocks.chunks_mut(LANES) {
             let seen = &mut seen[..group.len()];
             seen.copy_from_slice(group);
-            self.cipher.decrypt_blocks(group);
+            self.cipher.decrypt(group);
 
             let mut previous = &self.chain;
             for (block, ciphertext) in group.iter_mut().zip(&*seen) {
@@ -162,7 +165,7 @@ where
 }
 
 // Debug output omits the state: it is all derived from the key.
-impl<C> fmt::Debug for Cbc<C> {
+impl<C: BlockCipher> fmt::Debug for Cbc<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Cbc").finish_non_exhaustive()
     }
@@ -183,6 +186,7 @@ impl<C: BlockCipher> fmt::Debug for Decryptor<'_, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Key;
     use crate::cipher::aes::Aes;
 
     /// Largest buffer any test here uses.
@@ -198,7 +202,7 @@ mod tests {
     }
 
     fn cbc<const K: usize>(key: &[u8; K]) -> Cbc<Aes<K>> {
-        Cbc::new(Aes::try_new(key).unwrap())
+        Cbc::new(&Key::from(*key))
     }
 
     /// Fills `buf` with something that is not all one byte.

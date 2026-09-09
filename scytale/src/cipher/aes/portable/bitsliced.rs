@@ -17,26 +17,12 @@
 //! within each 16-bit row group and MixColumns a rotation of the word
 //! by multiples of 16.
 //!
-//! # Example
-//!
-//! ```
-//! use scytale::cipher::aes::portable::bitsliced::Aes;
-//!
-//! # fn main() -> Result<(), scytale::Error> {
-//! let aes = Aes::try_new(&[0u8; 16])?;
-//! let mut block = [0u8; 16];
-//! aes.encrypt_block(&mut block);
-//! aes.decrypt_block(&mut block);
-//! assert_eq!(block, [0u8; 16]);
-//! # Ok(())
-//! # }
-//! ```
 
 use core::fmt;
 
-use crate::cipher::BlockCipher;
 use crate::cipher::aes::{BLOCK_SIZE, KeySize, expand_words};
-use crate::{BlockType, Error, KeyType};
+use crate::cipher::{BlockCipher, ByteOrder, counter_blocks_via_ecb};
+use crate::{BlockType, Key, KeyType};
 use zeroize::ZeroizeOnDrop;
 
 /// Round keys for the largest key size (AES-256: 15 round keys).
@@ -54,7 +40,7 @@ type State = [u64; 8];
 /// A bitsliced AES cipher with an expanded key.
 ///
 /// Supports 128, 192 and 256 bit keys. Key expansion happens once in
-/// [`Aes::try_new`].
+/// [`Aes::new`].
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct Aes<const K: usize> {
     /// Each round key replicated into all four block lanes.
@@ -73,15 +59,23 @@ impl<const K: usize> fmt::Debug for Aes<K> {
 }
 
 impl<const K: usize> Aes<K> {
-    /// Expands `key`, which must be 16, 24 or 32 bytes long.
-    pub fn try_new(key: &[u8; K]) -> Result<Self, Error> {
+    /// Whether this processor can run this implementation: it is
+    /// plain Rust, so always. Named for the inventory the vector
+    /// suites print, which asks every implementation alike.
+    #[allow(dead_code)]
+    pub(crate) fn supported() -> bool {
+        true
+    }
+
+    /// Expands `key`.
+    pub(crate) fn new(key: &[u8; K]) -> Self {
         const {
             assert!(
                 K == 16 || K == 24 || K == 32,
                 "AES keys are 16, 24 or 32 bytes"
             )
         };
-        let size = KeySize::for_key(key)?;
+        let size = KeySize::for_key(key);
         // SubWord goes through the bitsliced S-box, so the schedule is
         // constant time too.
         let w = expand_words(key, size, sub_word);
@@ -97,30 +91,12 @@ impl<const K: usize> Aes<K> {
             *state = pack(&group);
         }
 
-        Ok(Aes { keys, size })
+        Aes { keys, size }
     }
 
     /// Number of rounds: 10, 12 or 14 depending on key size.
     pub fn rounds(&self) -> usize {
         self.size.rounds()
-    }
-
-    /// Encrypts one block in place.
-    pub fn encrypt_block(&self, block: &mut [u8; BLOCK_SIZE]) {
-        match self.size {
-            KeySize::Aes128 => encrypt_many::<10>(&self.keys, block),
-            KeySize::Aes192 => encrypt_many::<12>(&self.keys, block),
-            KeySize::Aes256 => encrypt_many::<14>(&self.keys, block),
-        }
-    }
-
-    /// Decrypts one block in place.
-    pub fn decrypt_block(&self, block: &mut [u8; BLOCK_SIZE]) {
-        match self.size {
-            KeySize::Aes128 => decrypt_many::<10>(&self.keys, block),
-            KeySize::Aes192 => decrypt_many::<12>(&self.keys, block),
-            KeySize::Aes256 => decrypt_many::<14>(&self.keys, block),
-        }
     }
 
     /// Encrypts every block in place, independently (ECB).
@@ -144,6 +120,19 @@ impl<const K: usize> Aes<K> {
     }
 }
 
+impl<const K: usize> Aes<K> {
+    /// Counter mode's inner loop, assembled from `encrypt_blocks`:
+    /// this implementation has no fused form of its own.
+    pub(crate) fn xor_counter_blocks(
+        &self,
+        counter: &mut [u8; BLOCK_SIZE],
+        order: ByteOrder,
+        data: &mut [u8],
+    ) {
+        counter_blocks_via_ecb(self, counter, order, data)
+    }
+}
+
 impl<const K: usize> BlockType for Aes<K> {
     type Block = [u8; BLOCK_SIZE];
 
@@ -153,31 +142,23 @@ impl<const K: usize> BlockType for Aes<K> {
 }
 
 impl<const K: usize> KeyType for Aes<K> {
-    type Key = [u8; K];
+    type Key = Key<[u8; K]>;
 
     fn zero_key() -> Self::Key {
-        [0; K]
+        Key::zeroed()
     }
 }
 
 impl<const K: usize> BlockCipher for Aes<K> {
-    fn try_new(key: &Self::Key) -> Result<Self, Error> {
-        Aes::try_new(key)
+    fn new(key: &Self::Key) -> Self {
+        Aes::new(key.array())
     }
 
-    fn encrypt_block(&self, block: &mut Self::Block) {
-        Aes::encrypt_block(self, block)
-    }
-
-    fn decrypt_block(&self, block: &mut Self::Block) {
-        Aes::decrypt_block(self, block)
-    }
-
-    fn encrypt_blocks(&self, blocks: &mut [Self::Block]) {
+    fn encrypt(&self, blocks: &mut [Self::Block]) {
         Aes::encrypt_blocks(self, blocks)
     }
 
-    fn decrypt_blocks(&self, blocks: &mut [Self::Block]) {
+    fn decrypt(&self, blocks: &mut [Self::Block]) {
         Aes::decrypt_blocks(self, blocks)
     }
 }
@@ -674,12 +655,12 @@ mod tests {
         let key: [u8; K] = unhex(key)[..K].try_into().unwrap();
         let plain: [u8; 16] = unhex(plain)[..16].try_into().unwrap();
         let cipher: [u8; 16] = unhex(cipher)[..16].try_into().unwrap();
-        let aes = Aes::try_new(&key).unwrap();
+        let aes = Aes::new(&key);
 
         let mut block = plain;
-        aes.encrypt_block(&mut block);
+        aes.encrypt_blocks(core::slice::from_mut(&mut block));
         assert_eq!(block, cipher, "encrypt");
-        aes.decrypt_block(&mut block);
+        aes.decrypt_blocks(core::slice::from_mut(&mut block));
         assert_eq!(block, plain, "decrypt");
     }
 
@@ -727,8 +708,8 @@ mod tests {
             for (i, k) in key.iter_mut().enumerate() {
                 *k = (i * 37 + klen) as u8;
             }
-            let bs = Aes::try_new(&key).unwrap();
-            let tt = portable::ttable::Aes::try_new(&key).unwrap();
+            let bs = Aes::new(&key);
+            let tt = portable::ttable::Aes::new(&key);
             // Lengths cover zero, partial and whole groups of four.
             for nblocks in 0..MAX {
                 let mut data = [[0u8; BLOCK_SIZE]; MAX];
@@ -753,8 +734,8 @@ mod tests {
 
     #[test]
     fn round_counts() {
-        assert_eq!(Aes::try_new(&[0; 16]).unwrap().rounds(), 10);
-        assert_eq!(Aes::try_new(&[0; 24]).unwrap().rounds(), 12);
-        assert_eq!(Aes::try_new(&[0; 32]).unwrap().rounds(), 14);
+        assert_eq!(Aes::new(&[0; 16]).rounds(), 10);
+        assert_eq!(Aes::new(&[0; 24]).rounds(), 12);
+        assert_eq!(Aes::new(&[0; 32]).rounds(), 14);
     }
 }

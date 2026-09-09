@@ -1,56 +1,47 @@
 //! AES (FIPS 197) block cipher.
 //!
-//! The key width is the type: [`Aes128`], [`Aes192`] and [`Aes256`]
-//! are [`Aes<16>`](Aes), `Aes<24>` and `Aes<32>`, and each takes a key
-//! of exactly its width. [`Aes`] runs the best implementation the
-//! processor supports: hardware instructions where present, otherwise
-//! the constant-time portable code. To use a particular one, name it:
-//! [`portable::bitsliced::Aes`], [`portable::ttable::Aes`],
-//! `x86_64::aesni::Aes`, `x86_64::vaes::Aes`, `aarch64::armv8::Aes`,
-//! `riscv64::zkn::Aes` or `riscv64::zvkned::Aes` (the hardware ones
-//! exist only on their architecture), with the same width parameter.
+//! The key width is the type: [`Aes128`], [`Aes192`] and [`Aes256`],
+//! each taking a key of exactly its width. Each runs the best
+//! implementation the processor supports, chosen when the key is
+//! expanded: hardware instructions where there are any, otherwise
+//! constant-time portable code. Which one that is is not a choice a
+//! caller makes, and the implementations are not names a caller can
+//! reach; security comes before speed, so the faster table-driven
+//! code, whose memory access pattern depends on the key, is never
+//! chosen.
 //!
-//! Every implementation wipes its expanded key when dropped.
+//! The expanded key is wiped on drop.
 //!
 //! ```
-//! use scytale::cipher::aes::{portable, Aes128};
+//! use scytale::Key;
+//! use scytale::cipher::aes::Aes128;
+//! use scytale::cipher::BlockCipher;
 //!
-//! # fn main() -> Result<(), scytale::Error> {
-//! let fastest = Aes128::try_new(&[0u8; 16])?;
-//! let bitsliced = portable::bitsliced::Aes::<16>::try_new(&[0u8; 16])?;
-//!
-//! let mut a = [0u8; 16];
-//! let mut b = a;
-//! fastest.encrypt_block(&mut a);
-//! bitsliced.encrypt_block(&mut b);
-//! assert_eq!(a, b);
-//! # Ok(())
-//! # }
+//! let aes = Aes128::new(&Key::from([0u8; 16]));
+//! let mut blocks = [[0u8; 16]; 4];
+//! aes.encrypt(&mut blocks);
+//! aes.decrypt(&mut blocks);
+//! assert_eq!(blocks, [[0u8; 16]; 4]);
 //! ```
 
 #[cfg(target_arch = "aarch64")]
-pub mod aarch64;
-pub mod portable;
+pub(crate) mod aarch64;
+pub(crate) mod portable;
 #[cfg(target_arch = "riscv64")]
-pub mod riscv64;
+pub(crate) mod riscv64;
 #[cfg(target_arch = "x86_64")]
-pub mod x86_64;
+pub(crate) mod x86_64;
 
 use core::fmt;
 use core::sync::atomic::{AtomicU8, Ordering};
 
-use crate::cipher::{BlockCipher, ByteOrder};
-use crate::{BlockType, Error, KeyType};
+use crate::cipher::{
+    BlockCipher, ByteOrder, CounterBlocks, CounterFn, counter_blocks_of, is,
+};
+use crate::{BlockType, Key, KeyType};
 
 /// AES block size in bytes.
 pub const BLOCK_SIZE: usize = 16;
-
-/// AES with a 128-bit key.
-pub type Aes128 = Aes<16>;
-/// AES with a 192-bit key.
-pub type Aes192 = Aes<24>;
-/// AES with a 256-bit key.
-pub type Aes256 = Aes<32>;
 
 /// Words in the longest key schedule (AES-256: 15 round keys).
 pub(crate) const MAX_WORDS: usize = 60;
@@ -64,14 +55,16 @@ pub(crate) enum KeySize {
 }
 
 impl KeySize {
-    /// The size of a `key`. A width the type system already fixed
-    /// to 16, 24 or 32 never reaches the error.
-    pub(crate) fn for_key(key: &[u8]) -> Result<Self, Error> {
+    /// The size of a `key`.
+    ///
+    /// Every caller has a key whose width the type system has
+    /// already fixed to 16, 24 or 32.
+    pub(crate) fn for_key(key: &[u8]) -> Self {
         match key.len() {
-            16 => Ok(KeySize::Aes128),
-            24 => Ok(KeySize::Aes192),
-            32 => Ok(KeySize::Aes256),
-            n => Err(Error::InvalidKeyLength(n)),
+            16 => KeySize::Aes128,
+            24 => KeySize::Aes192,
+            32 => KeySize::Aes256,
+            n => unreachable!("AES key of {n} bytes"),
         }
     }
 
@@ -184,20 +177,18 @@ fn supported(choice: Choice) -> bool {
     }
 }
 
-/// AES using the best implementation the processor supports: the
-/// fastest hardware instructions if there are any, otherwise the
-/// constant-time bitsliced code. Security comes before speed, so the
-/// faster [`portable::ttable::Aes`] is never chosen here; name it
-/// yourself if its trade-off suits you.
+/// AES over the best implementation the processor supports, at a key
+/// width of `K` bytes.
+///
+/// The public types are the three widths: [`Aes128`], [`Aes192`] and
+/// [`Aes256`]. This one is generic so that the crate's own code, and
+/// the tests, can be written once for all three.
 ///
 /// The processor is probed once, the first time a key is expanded;
-/// every later [`Aes::try_new`] reads the cached answer, and each
-/// call then dispatches with a single predictable branch.
-///
-/// `K` is the key width in bytes: 16, 24 or 32, and nothing else
-/// compiles. [`Aes128`], [`Aes192`] and [`Aes256`] name the three.
+/// every later [`Aes::new`] reads the cached answer, and each call
+/// then dispatches with a single predictable branch.
 #[derive(Clone)]
-pub struct Aes<const K: usize>(Inner<K>);
+pub(crate) struct Aes<const K: usize>(Inner<K>);
 
 // Each variant is that implementation's key schedule; the bitsliced
 // one is twice the size of the others and there is no heap to box it.
@@ -254,7 +245,7 @@ impl<const K: usize> Aes<K> {
     // The hardware constructors skip their own processor check because
     // the probe has already made it.
     #[allow(unsafe_code)]
-    pub fn try_new(key: &[u8; K]) -> Result<Self, Error> {
+    pub(crate) fn new(key: &[u8; K]) -> Self {
         const {
             assert!(
                 K == 16 || K == 24 || K == 32,
@@ -267,55 +258,54 @@ impl<const K: usize> Aes<K> {
             match probe() {
                 #[cfg(target_arch = "x86_64")]
                 Choice::Vaes => {
-                    Inner::Vaes(x86_64::vaes::Aes::new_unchecked(key)?)
+                    Inner::Vaes(x86_64::vaes::Aes::new_unchecked(key))
                 }
                 #[cfg(target_arch = "x86_64")]
                 Choice::AesNi => {
-                    Inner::AesNi(x86_64::aesni::Aes::new_unchecked(key)?)
+                    Inner::AesNi(x86_64::aesni::Aes::new_unchecked(key))
                 }
                 #[cfg(target_arch = "aarch64")]
                 Choice::Armv8 => {
-                    Inner::Armv8(aarch64::armv8::Aes::new_unchecked(key)?)
+                    Inner::Armv8(aarch64::armv8::Aes::new_unchecked(key))
                 }
                 #[cfg(target_arch = "riscv64")]
                 Choice::Zvkned => {
-                    Inner::Zvkned(riscv64::zvkned::Aes::new_unchecked(key)?)
+                    Inner::Zvkned(riscv64::zvkned::Aes::new_unchecked(key))
                 }
                 #[cfg(target_arch = "riscv64")]
                 Choice::Zkn => {
-                    Inner::Zkn(riscv64::zkn::Aes::new_unchecked(key)?)
+                    Inner::Zkn(riscv64::zkn::Aes::new_unchecked(key))
                 }
-                _ => Inner::Bitsliced(portable::bitsliced::Aes::try_new(key)?),
+                _ => Inner::Bitsliced(portable::bitsliced::Aes::new(key)),
             }
         };
-        Ok(Aes(inner))
+        Aes(inner)
     }
 
     /// Number of rounds: 10, 12 or 14 depending on key size.
-    pub fn rounds(&self) -> usize {
+    pub(crate) fn rounds(&self) -> usize {
         dispatch!(self, aes => aes.rounds())
     }
 
-    /// Encrypts one block in place.
-    #[inline]
-    pub fn encrypt_block(&self, block: &mut [u8; BLOCK_SIZE]) {
-        dispatch!(self, aes => aes.encrypt_block(block))
-    }
-
-    /// Decrypts one block in place.
-    #[inline]
-    pub fn decrypt_block(&self, block: &mut [u8; BLOCK_SIZE]) {
-        dispatch!(self, aes => aes.decrypt_block(block))
-    }
-
     /// Encrypts every block in place, independently (ECB).
-    pub fn encrypt_blocks(&self, blocks: &mut [[u8; BLOCK_SIZE]]) {
+    pub(crate) fn encrypt_blocks(&self, blocks: &mut [[u8; BLOCK_SIZE]]) {
         dispatch!(self, aes => aes.encrypt_blocks(blocks))
     }
 
     /// Decrypts every block in place, independently (ECB).
-    pub fn decrypt_blocks(&self, blocks: &mut [[u8; BLOCK_SIZE]]) {
+    pub(crate) fn decrypt_blocks(&self, blocks: &mut [[u8; BLOCK_SIZE]]) {
         dispatch!(self, aes => aes.decrypt_blocks(blocks))
+    }
+
+    /// Counter mode's inner loop, run by whichever implementation is
+    /// in use; see [`crate::cipher::CounterFn`].
+    pub(crate) fn xor_counter_blocks(
+        &self,
+        counter: &mut [u8; BLOCK_SIZE],
+        order: ByteOrder,
+        data: &mut [u8],
+    ) {
+        dispatch!(self, aes => aes.xor_counter_blocks(counter, order, data))
     }
 }
 
@@ -328,50 +318,128 @@ impl<const K: usize> BlockType for Aes<K> {
 }
 
 impl<const K: usize> KeyType for Aes<K> {
-    type Key = [u8; K];
+    type Key = Key<[u8; K]>;
 
     fn zero_key() -> Self::Key {
-        [0; K]
+        Key::zeroed()
     }
 }
 
 impl<const K: usize> BlockCipher for Aes<K> {
-    fn try_new(key: &Self::Key) -> Result<Self, Error> {
-        Aes::try_new(key)
+    fn new(key: &Self::Key) -> Self {
+        Aes::new(key.array())
     }
 
-    fn encrypt_block(&self, block: &mut Self::Block) {
-        Aes::encrypt_block(self, block)
-    }
-
-    fn decrypt_block(&self, block: &mut Self::Block) {
-        Aes::decrypt_block(self, block)
-    }
-
-    fn encrypt_blocks(&self, blocks: &mut [Self::Block]) {
+    fn encrypt(&self, blocks: &mut [Self::Block]) {
         Aes::encrypt_blocks(self, blocks)
     }
 
-    fn decrypt_blocks(&self, blocks: &mut [Self::Block]) {
+    fn decrypt(&self, blocks: &mut [Self::Block]) {
         Aes::decrypt_blocks(self, blocks)
     }
-
-    fn xor_counter_blocks(
-        &self,
-        counter: &mut Self::Block,
-        order: ByteOrder,
-        data: &mut [u8],
-    ) {
-        dispatch!(
-            self,
-            aes => BlockCipher::xor_counter_blocks(aes, counter, order, data)
-        )
-    }
 }
+
+/// Defines one of the three public widths over [`Aes`].
+macro_rules! width {
+    ($(#[$doc:meta])* $name:ident, $k:literal) => {
+        $(#[$doc])*
+        #[derive(Clone)]
+        pub struct $name(Aes<$k>);
+
+        impl $name {
+            /// Expands `key`.
+            pub fn new(key: &Key<[u8; $k]>) -> Self {
+                $name(Aes::new(key.array()))
+            }
+
+            /// Number of rounds the key width fixes.
+            pub fn rounds(&self) -> usize {
+                self.0.rounds()
+            }
+
+            /// Encrypts every block in place, independently (ECB).
+            pub fn encrypt(&self, blocks: &mut [[u8; BLOCK_SIZE]]) {
+                self.0.encrypt_blocks(blocks)
+            }
+
+            /// Decrypts every block in place, independently (ECB).
+            pub fn decrypt(&self, blocks: &mut [[u8; BLOCK_SIZE]]) {
+                self.0.decrypt_blocks(blocks)
+            }
+
+            /// Counter mode's inner loop; see
+            /// [`crate::cipher::CounterFn`].
+            pub(crate) fn xor_counter_blocks(
+                &self,
+                counter: &mut [u8; BLOCK_SIZE],
+                order: ByteOrder,
+                data: &mut [u8],
+            ) {
+                self.0.xor_counter_blocks(counter, order, data)
+            }
+        }
+
+        impl fmt::Debug for $name {
+            /// Deliberately omits the key material.
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_struct(stringify!($name))
+                    .field("rounds", &self.rounds())
+                    .finish()
+            }
+        }
+
+        impl BlockType for $name {
+            type Block = [u8; BLOCK_SIZE];
+
+            fn zero_block() -> Self::Block {
+                [0; BLOCK_SIZE]
+            }
+        }
+
+        impl KeyType for $name {
+            type Key = Key<[u8; $k]>;
+
+            fn zero_key() -> Self::Key {
+                Key::zeroed()
+            }
+        }
+
+        impl BlockCipher for $name {
+            fn new(key: &Self::Key) -> Self {
+                $name::new(key)
+            }
+
+            fn encrypt(&self, blocks: &mut [Self::Block]) {
+                $name::encrypt(self, blocks)
+            }
+
+            fn decrypt(&self, blocks: &mut [Self::Block]) {
+                $name::decrypt(self, blocks)
+            }
+        }
+    };
+}
+
+width!(
+    /// AES with a 128-bit key.
+    Aes128,
+    16
+);
+width!(
+    /// AES with a 192-bit key.
+    Aes192,
+    24
+);
+width!(
+    /// AES with a 256-bit key.
+    Aes256,
+    32
+);
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cipher::OneBlock;
     use zeroize::ZeroizeOnDrop;
 
     /// Compiles only if every implementation wipes its key on drop.
@@ -422,7 +490,7 @@ mod tests {
 
     #[test]
     fn picks_best_supported() {
-        let aes = Aes::try_new(&[0; 16]).unwrap();
+        let aes = Aes::<16>::new(&[0; 16]);
         let chosen = probe();
         assert_ne!(PROBED.load(Ordering::Relaxed), 0);
         assert_eq!(probe(), chosen);
@@ -455,28 +523,129 @@ mod tests {
 
     fn matches_ttable_for<const K: usize>() {
         let key = [0x5au8; K];
-        {
-            let aes = Aes::try_new(&key).unwrap();
-            let sw = portable::ttable::Aes::try_new(&key).unwrap();
-            assert_eq!(aes.rounds(), sw.rounds());
+        let aes = Aes::<K>::new(&key);
+        let sw = portable::ttable::Aes::<K>::new(&key);
+        assert_eq!(aes.rounds(), sw.rounds());
 
-            let mut data = [[0u8; BLOCK_SIZE]; 17];
-            for (i, x) in data.as_flattened_mut().iter_mut().enumerate() {
-                *x = i as u8;
-            }
-            let mut expected = data;
-            sw.encrypt_blocks(&mut expected);
-            aes.encrypt_blocks(&mut data);
-            assert_eq!(data, expected);
-            aes.decrypt_blocks(&mut data);
-
-            let mut block = [7u8; BLOCK_SIZE];
-            let mut block2 = block;
-            sw.encrypt_block(&mut block2);
-            aes.encrypt_block(&mut block);
-            assert_eq!(block, block2);
-            aes.decrypt_block(&mut block);
-            assert_eq!(block, [7u8; BLOCK_SIZE]);
+        let mut data = [[0u8; BLOCK_SIZE]; 17];
+        for (i, x) in data.as_flattened_mut().iter_mut().enumerate() {
+            *x = i as u8;
         }
+        let mut expected = data;
+        sw.encrypt_blocks(&mut expected);
+        aes.encrypt_blocks(&mut data);
+        assert_eq!(data, expected);
+        aes.decrypt_blocks(&mut data);
+
+        let mut block = [7u8; BLOCK_SIZE];
+        let mut block2 = block;
+        sw.encrypt_one(&mut block2);
+        aes.encrypt_one(&mut block);
+        assert_eq!(block, block2);
+        aes.decrypt_one(&mut block);
+        assert_eq!(block, [7u8; BLOCK_SIZE]);
     }
+
+    /// The three public widths are the same cipher as the generic
+    /// one they wrap.
+    #[test]
+    fn widths_match() {
+        let mut a = [[3u8; BLOCK_SIZE]];
+        let mut b = a;
+        Aes128::new(&Key::from([9u8; 16])).encrypt(&mut a);
+        Aes::<16>::new(&[9u8; 16]).encrypt_blocks(&mut b);
+        assert_eq!(a, b);
+        assert_eq!(Aes192::new(&Key::from([0u8; 24])).rounds(), 12);
+        assert_eq!(Aes256::new(&Key::from([0u8; 32])).rounds(), 14);
+    }
+}
+
+/// Implements [`CounterBlocks`] for a type whose inherent
+/// `xor_counter_blocks` is the loop.
+macro_rules! counter_blocks {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl CounterBlocks for $ty {
+                fn counter_blocks(
+                    &self,
+                    counter: &mut [u8; BLOCK_SIZE],
+                    order: ByteOrder,
+                    data: &mut [u8],
+                ) {
+                    self.xor_counter_blocks(counter, order, data)
+                }
+            }
+        )*
+    };
+}
+
+/// Expands `$body` once for every AES type in the crate, with `$ty`
+/// bound to each. The public widths, the generic type behind them,
+/// and each implementation at each width: a mode built on any of
+/// them gets the counter loop that one carries. The last two groups
+/// are named only by this crate's own tests and its benchmark, which
+/// measure an implementation rather than what the processor picks.
+macro_rules! every_aes {
+    ($mac:ident) => {
+        $mac!(
+            Aes128,
+            Aes192,
+            Aes256,
+            Aes<16>,
+            Aes<24>,
+            Aes<32>,
+            portable::bitsliced::Aes<16>,
+            portable::bitsliced::Aes<24>,
+            portable::bitsliced::Aes<32>,
+            portable::ttable::Aes<16>,
+            portable::ttable::Aes<24>,
+            portable::ttable::Aes<32>,
+        );
+        #[cfg(target_arch = "x86_64")]
+        $mac!(
+            x86_64::aesni::Aes<16>,
+            x86_64::aesni::Aes<24>,
+            x86_64::aesni::Aes<32>,
+            x86_64::vaes::Aes<16>,
+            x86_64::vaes::Aes<24>,
+            x86_64::vaes::Aes<32>,
+        );
+        #[cfg(target_arch = "aarch64")]
+        $mac!(
+            aarch64::armv8::Aes<16>,
+            aarch64::armv8::Aes<24>,
+            aarch64::armv8::Aes<32>,
+        );
+        #[cfg(target_arch = "riscv64")]
+        $mac!(
+            riscv64::zkn::Aes<16>,
+            riscv64::zkn::Aes<24>,
+            riscv64::zkn::Aes<32>,
+            riscv64::zvkned::Aes<16>,
+            riscv64::zvkned::Aes<24>,
+            riscv64::zvkned::Aes<32>,
+        );
+    };
+}
+
+every_aes!(counter_blocks);
+
+/// Answers [`crate::cipher::counter_fn`] for one group of types.
+macro_rules! counter_arms {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            if is::<$ty, C>() {
+                return Some(counter_blocks_of::<$ty, C>);
+            }
+        )*
+    };
+}
+
+/// The counter loop for `C` if `C` is one of ours, or `None`.
+///
+/// Asked once, when a mode is built. `C` is a type parameter, so
+/// every comparison is a constant and all but one fold away.
+pub(crate) fn counter_fn<C: BlockCipher>() -> Option<CounterFn<C>> {
+    every_aes!(counter_arms);
+    None
 }

@@ -13,42 +13,23 @@
 //!
 //! # Availability
 //!
-//! [`Aes::try_new`] checks at run time that the processor has AES-NI
-//! and returns [`Error::NotSupported`] if it does not.
+//! [`Aes::supported`] says whether this processor has AES-NI.
+//! [`Aes::new`] panics without it, so the dispatching cipher asks
+//! first; nothing outside this crate can name the type.
 //!
-//! # Example
-//!
-//! ```
-//! use scytale::cipher::aes::x86_64::aesni::Aes;
-//! use scytale::Error;
-//!
-//! # fn main() -> Result<(), Error> {
-//! match Aes::try_new(&[0u8; 16]) {
-//!     Ok(aes) => {
-//!         let mut block = [0u8; 16];
-//!         aes.encrypt_block(&mut block);
-//!         aes.decrypt_block(&mut block);
-//!         assert_eq!(block, [0u8; 16]);
-//!     }
-//!     Err(Error::NotSupported) => {} // no AES-NI on this machine
-//!     Err(e) => return Err(e),
-//! }
-//! # Ok(())
-//! # }
-//! ```
 
 use core::fmt;
 
 use super::{RoundKeys, expand, has_aesni};
 use crate::cipher::aes::BLOCK_SIZE;
 use crate::cipher::{BlockCipher, ByteOrder, add_counter};
-use crate::{BlockType, Error, KeyType};
+use crate::{BlockType, Key, KeyType};
 use zeroize::ZeroizeOnDrop;
 
 /// An AES cipher with an expanded key, using AES-NI.
 ///
 /// Supports 128, 192 and 256 bit keys. Key expansion happens once in
-/// [`Aes::try_new`]; the key is wiped on drop.
+/// [`Aes::new`]; the key is wiped on drop.
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct Aes<const K: usize> {
     keys: RoundKeys,
@@ -64,20 +45,26 @@ impl<const K: usize> fmt::Debug for Aes<K> {
 }
 
 impl<const K: usize> Aes<K> {
-    /// Expands `key`, which must be 16, 24 or 32 bytes long.
+    /// Whether this processor can run this implementation.
+    pub(crate) fn supported() -> bool {
+        has_aesni()
+    }
+
+    /// Expands `key`.
     ///
-    /// Returns [`Error::NotSupported`] if the processor lacks AES-NI.
-    pub fn try_new(key: &[u8; K]) -> Result<Self, Error> {
+    /// # Panics
+    /// If the processor lacks AES-NI. The type is private and
+    /// is named only after the probe has confirmed them, so the
+    /// panic is unreachable from outside this crate.
+    pub(crate) fn new(key: &[u8; K]) -> Self {
         const {
             assert!(
                 K == 16 || K == 24 || K == 32,
                 "AES keys are 16, 24 or 32 bytes"
             )
         };
-        if !has_aesni() {
-            return Err(Error::NotSupported);
-        }
-        // SAFETY: AES-NI was just confirmed present.
+        assert!(Self::supported(), "AES-NI not available");
+        // SAFETY: just confirmed present.
         unsafe { Self::new_unchecked(key) }
     }
 
@@ -85,31 +72,17 @@ impl<const K: usize> Aes<K> {
     ///
     /// # Safety
     /// The caller must have confirmed that AES-NI is available.
-    pub(crate) unsafe fn new_unchecked(key: &[u8; K]) -> Result<Self, Error> {
+    pub(crate) unsafe fn new_unchecked(key: &[u8; K]) -> Self {
         unsafe {
-            let size = super::KeySize::for_key(key)?;
+            let size = super::KeySize::for_key(key);
             let keys = expand(key, size);
-            Ok(Aes { keys })
+            Aes { keys }
         }
     }
 
     /// Number of rounds: 10, 12 or 14 depending on key size.
     pub fn rounds(&self) -> usize {
         self.keys.size.rounds()
-    }
-
-    /// Encrypts one block in place.
-    #[inline]
-    pub fn encrypt_block(&self, block: &mut [u8; BLOCK_SIZE]) {
-        // SAFETY: the struct only exists if try_new confirmed AES-NI.
-        unsafe { encrypt_blocks(&self.keys, block) }
-    }
-
-    /// Decrypts one block in place.
-    #[inline]
-    pub fn decrypt_block(&self, block: &mut [u8; BLOCK_SIZE]) {
-        // SAFETY: the struct only exists if try_new confirmed AES-NI.
-        unsafe { decrypt_blocks(&self.keys, block) }
     }
 
     /// Encrypts every block in place, independently (ECB).
@@ -134,10 +107,10 @@ impl<const K: usize> BlockType for Aes<K> {
 }
 
 impl<const K: usize> KeyType for Aes<K> {
-    type Key = [u8; K];
+    type Key = Key<[u8; K]>;
 
     fn zero_key() -> Self::Key {
-        [0; K]
+        Key::zeroed()
     }
 }
 
@@ -251,33 +224,16 @@ static OFFSETS: Words<{ 4 * GROUP }> = {
 static ADVANCE: Words<4> = Words([GROUP as u32, 0, 0, 0]);
 
 impl<const K: usize> BlockCipher for Aes<K> {
-    fn try_new(key: &Self::Key) -> Result<Self, Error> {
-        Aes::try_new(key)
+    fn new(key: &Self::Key) -> Self {
+        Aes::new(key.array())
     }
 
-    fn encrypt_block(&self, block: &mut Self::Block) {
-        Aes::encrypt_block(self, block)
-    }
-
-    fn decrypt_block(&self, block: &mut Self::Block) {
-        Aes::decrypt_block(self, block)
-    }
-
-    fn encrypt_blocks(&self, blocks: &mut [Self::Block]) {
+    fn encrypt(&self, blocks: &mut [Self::Block]) {
         Aes::encrypt_blocks(self, blocks)
     }
 
-    fn decrypt_blocks(&self, blocks: &mut [Self::Block]) {
+    fn decrypt(&self, blocks: &mut [Self::Block]) {
         Aes::decrypt_blocks(self, blocks)
-    }
-
-    fn xor_counter_blocks(
-        &self,
-        counter: &mut Self::Block,
-        order: ByteOrder,
-        data: &mut [u8],
-    ) {
-        Aes::xor_counter_blocks(self, counter, order, data)
     }
 }
 
@@ -872,11 +828,7 @@ mod tests {
 
     /// Returns the cipher, or `None` (skipping the test) without AES-NI.
     fn aes<const K: usize>(key: &[u8; K]) -> Option<Aes<K>> {
-        match Aes::try_new(key) {
-            Ok(a) => Some(a),
-            Err(Error::NotSupported) => None,
-            Err(e) => panic!("{e}"),
-        }
+        Aes::<K>::supported().then(|| Aes::new(key))
     }
 
     /// The counter loop against a block at a time, at every length
@@ -905,7 +857,7 @@ mod tests {
         let mut counter = start;
         for chunk in want.chunks_mut(BLOCK_SIZE) {
             let mut block = counter;
-            aes.encrypt_block(&mut block);
+            aes.encrypt_blocks(core::slice::from_mut(&mut block));
             chunk.copy_from_slice(&block);
             add_counter(&mut counter, order, 1);
         }
@@ -939,9 +891,9 @@ mod tests {
         let Some(aes) = aes(&key) else { return };
 
         let mut block = plain;
-        aes.encrypt_block(&mut block);
+        aes.encrypt_blocks(core::slice::from_mut(&mut block));
         assert_eq!(block, cipher, "encrypt");
-        aes.decrypt_block(&mut block);
+        aes.decrypt_blocks(core::slice::from_mut(&mut block));
         assert_eq!(block, plain, "decrypt");
     }
 
@@ -989,7 +941,7 @@ mod tests {
                 *k = (i * 37 + klen) as u8;
             }
             let Some(hw) = aes(&key) else { return };
-            let sw = portable::ttable::Aes::try_new(&key).unwrap();
+            let sw = portable::ttable::Aes::new(&key);
             // Every tail width, with and without full groups before it.
             for nblocks in 0..26 {
                 let mut data = [[0u8; BLOCK_SIZE]; 25];

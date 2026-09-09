@@ -33,35 +33,21 @@
 //! strangers, or whenever in doubt. Use
 //! [`bitsliced`](super::bitsliced) instead.
 //!
-//! # Example
-//!
-//! ```
-//! use scytale::cipher::aes::portable::ttable::Aes;
-//!
-//! # fn main() -> Result<(), scytale::Error> {
-//! let aes = Aes::<16>::try_new(&[0u8; 16])?;
-//! let mut block = [0u8; 16];
-//! aes.encrypt_block(&mut block);
-//! aes.decrypt_block(&mut block);
-//! assert_eq!(block, [0u8; 16]);
-//! # Ok(())
-//! # }
-//! ```
 
 pub(crate) mod tables;
 
 use core::fmt;
 
-use crate::cipher::BlockCipher;
 use crate::cipher::aes::{BLOCK_SIZE, KeySize, MAX_WORDS, expand_words};
-use crate::{BlockType, Error, KeyType};
+use crate::cipher::{BlockCipher, ByteOrder, counter_blocks_via_ecb};
+use crate::{BlockType, Key, KeyType};
 use tables::{INV_SBOX, SBOX, TD, TE};
 use zeroize::ZeroizeOnDrop;
 
 /// An AES cipher with an expanded key.
 ///
 /// Supports 128, 192 and 256 bit keys. Key expansion happens once in
-/// [`Aes::try_new`]; encryption and decryption then operate on single
+/// [`Aes::new`]; encryption and decryption then operate on single
 /// 16 byte blocks.
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct Aes<const K: usize> {
@@ -81,15 +67,21 @@ impl<const K: usize> fmt::Debug for Aes<K> {
 }
 
 impl<const K: usize> Aes<K> {
-    /// Expands `key`, which must be 16, 24 or 32 bytes long.
-    pub fn try_new(key: &[u8; K]) -> Result<Self, Error> {
+    /// Whether this processor can run this implementation: it is
+    /// plain Rust, so always.
+    pub(crate) fn supported() -> bool {
+        true
+    }
+
+    /// Expands `key`.
+    pub(crate) fn new(key: &[u8; K]) -> Self {
         const {
             assert!(
                 K == 16 || K == 24 || K == 32,
                 "AES keys are 16, 24 or 32 bytes"
             )
         };
-        let size = KeySize::for_key(key)?;
+        let size = KeySize::for_key(key);
         let rounds = size.rounds();
 
         // The shared schedule works on little-endian words; the tables
@@ -116,36 +108,12 @@ impl<const K: usize> Aes<K> {
             }
         }
 
-        Ok(Aes { enc, dec, size })
+        Aes { enc, dec, size }
     }
 
     /// Number of rounds: 10, 12 or 14 depending on key size.
     pub fn rounds(&self) -> usize {
         self.size.rounds()
-    }
-
-    /// Encrypts one block in place.
-    ///
-    /// Dispatching on the key size once per block lets each variant be
-    /// compiled with a constant round count, so the round loop unrolls
-    /// and the round key indexing needs no bounds checks.
-    #[inline]
-    pub fn encrypt_block(&self, block: &mut [u8; BLOCK_SIZE]) {
-        match self.size {
-            KeySize::Aes128 => encrypt::<10>(&self.enc, block),
-            KeySize::Aes192 => encrypt::<12>(&self.enc, block),
-            KeySize::Aes256 => encrypt::<14>(&self.enc, block),
-        }
-    }
-
-    /// Decrypts one block in place.
-    #[inline]
-    pub fn decrypt_block(&self, block: &mut [u8; BLOCK_SIZE]) {
-        match self.size {
-            KeySize::Aes128 => decrypt::<10>(&self.dec, block),
-            KeySize::Aes192 => decrypt::<12>(&self.dec, block),
-            KeySize::Aes256 => decrypt::<14>(&self.dec, block),
-        }
     }
 
     /// Encrypts every block in place, independently (ECB).
@@ -169,6 +137,19 @@ impl<const K: usize> Aes<K> {
     }
 }
 
+impl<const K: usize> Aes<K> {
+    /// Counter mode's inner loop, assembled from `encrypt_blocks`:
+    /// this implementation has no fused form of its own.
+    pub(crate) fn xor_counter_blocks(
+        &self,
+        counter: &mut [u8; BLOCK_SIZE],
+        order: ByteOrder,
+        data: &mut [u8],
+    ) {
+        counter_blocks_via_ecb(self, counter, order, data)
+    }
+}
+
 impl<const K: usize> BlockType for Aes<K> {
     type Block = [u8; BLOCK_SIZE];
 
@@ -178,31 +159,23 @@ impl<const K: usize> BlockType for Aes<K> {
 }
 
 impl<const K: usize> KeyType for Aes<K> {
-    type Key = [u8; K];
+    type Key = Key<[u8; K]>;
 
     fn zero_key() -> Self::Key {
-        [0; K]
+        Key::zeroed()
     }
 }
 
 impl<const K: usize> BlockCipher for Aes<K> {
-    fn try_new(key: &Self::Key) -> Result<Self, Error> {
-        Aes::try_new(key)
+    fn new(key: &Self::Key) -> Self {
+        Aes::new(key.array())
     }
 
-    fn encrypt_block(&self, block: &mut Self::Block) {
-        Aes::encrypt_block(self, block)
-    }
-
-    fn decrypt_block(&self, block: &mut Self::Block) {
-        Aes::decrypt_block(self, block)
-    }
-
-    fn encrypt_blocks(&self, blocks: &mut [Self::Block]) {
+    fn encrypt(&self, blocks: &mut [Self::Block]) {
         Aes::encrypt_blocks(self, blocks)
     }
 
-    fn decrypt_blocks(&self, blocks: &mut [Self::Block]) {
+    fn decrypt(&self, blocks: &mut [Self::Block]) {
         Aes::decrypt_blocks(self, blocks)
     }
 }
@@ -357,12 +330,12 @@ mod tests {
         let key: [u8; K] = unhex(key)[..K].try_into().unwrap();
         let plain: [u8; 16] = unhex(plain)[..16].try_into().unwrap();
         let cipher: [u8; 16] = unhex(cipher)[..16].try_into().unwrap();
-        let aes = Aes::try_new(&key).unwrap();
+        let aes = Aes::new(&key);
 
         let mut block = plain;
-        aes.encrypt_block(&mut block);
+        aes.encrypt_blocks(core::slice::from_mut(&mut block));
         assert_eq!(block, cipher, "encrypt");
-        aes.decrypt_block(&mut block);
+        aes.decrypt_blocks(core::slice::from_mut(&mut block));
         assert_eq!(block, plain, "decrypt");
     }
 
@@ -437,7 +410,7 @@ mod tests {
     fn blocks_match_for<const K: usize>() {
         let klen = K;
         {
-            let aes = Aes::try_new(&[0x5a; K]).unwrap();
+            let aes = Aes::new(&[0x5a; K]);
             // Lengths cover zero, one lane group, leftovers and more.
             for nblocks in 0..9 {
                 let mut data = [[0u8; BLOCK_SIZE]; 8];
@@ -449,7 +422,7 @@ mod tests {
                 let expected = &mut expected[..data.len()];
                 expected.copy_from_slice(data);
                 for block in expected.iter_mut() {
-                    aes.encrypt_block(block);
+                    aes.encrypt_blocks(core::slice::from_mut(block));
                 }
                 let mut orig = [[0u8; BLOCK_SIZE]; 8];
                 orig[..data.len()].copy_from_slice(data);
@@ -464,34 +437,34 @@ mod tests {
 
     #[test]
     fn trait_construction() {
-        let a = <Aes<24> as BlockCipher>::try_new(&[1; 24]).unwrap();
+        let a = <Aes<24> as BlockCipher>::new(&Key::from([1; 24]));
         assert_eq!(a.rounds(), 12);
         let mut data = [[7u8; BLOCK_SIZE]; 3];
-        BlockCipher::encrypt_blocks(&a, &mut data);
+        BlockCipher::encrypt(&a, &mut data);
         assert_ne!(data, [[7u8; BLOCK_SIZE]; 3]);
-        BlockCipher::decrypt_blocks(&a, &mut data);
+        BlockCipher::decrypt(&a, &mut data);
         assert_eq!(data, [[7u8; BLOCK_SIZE]; 3]);
     }
 
     #[test]
     fn round_counts() {
-        assert_eq!(Aes::try_new(&[0; 16]).unwrap().rounds(), 10);
-        assert_eq!(Aes::try_new(&[0; 24]).unwrap().rounds(), 12);
-        assert_eq!(Aes::try_new(&[0; 32]).unwrap().rounds(), 14);
+        assert_eq!(Aes::new(&[0; 16]).rounds(), 10);
+        assert_eq!(Aes::new(&[0; 24]).rounds(), 12);
+        assert_eq!(Aes::new(&[0; 32]).rounds(), 14);
     }
 
     #[test]
     fn round_trip_many_blocks() {
-        let aes = Aes::try_new(b"0123456789abcdef").unwrap();
+        let aes = Aes::new(b"0123456789abcdef");
         let mut block = [0u8; 16];
         let mut seen = [0u8; 16];
         for i in 0..1000u32 {
             block[..4].copy_from_slice(&i.to_le_bytes());
             let orig = block;
-            aes.encrypt_block(&mut block);
+            aes.encrypt_blocks(core::slice::from_mut(&mut block));
             assert_ne!(block, orig);
             seen = block;
-            aes.decrypt_block(&mut block);
+            aes.decrypt_blocks(core::slice::from_mut(&mut block));
             assert_eq!(block, orig);
         }
         assert_ne!(seen, [0u8; 16]);
@@ -499,7 +472,7 @@ mod tests {
 
     #[test]
     fn debug_hides_key() {
-        let aes = Aes::try_new(&[0x42; 16]).unwrap();
+        let aes = Aes::new(&[0x42; 16]);
         let mut buf = [0u8; 64];
         let mut w = Writer(&mut buf, 0);
         core::fmt::write(&mut w, format_args!("{aes:?}")).unwrap();

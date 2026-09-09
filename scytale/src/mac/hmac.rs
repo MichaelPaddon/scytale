@@ -41,7 +41,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use super::Mac;
 use crate::hash::Hash;
 use crate::hash::sha2;
-use crate::{BlockType, Error, KeyType};
+use crate::{BlockType, Error, Key, KeyType};
 
 /// HMAC-SHA-224.
 pub type HmacSha224 = Hmac<sha2::Sha224>;
@@ -58,8 +58,8 @@ pub type HmacSha512_256 = Hmac<sha2::Sha512_256>;
 
 /// HMAC over the hash `H`.
 ///
-/// The key of the construction is one block of the hash, `H::Block`,
-/// and that is the [`KeyType`] here. Any byte string is a valid HMAC
+/// The key of the construction is one block of the hash, so the
+/// [`KeyType`] here is [`Key<H::Block>`](Key). Any byte string is a valid HMAC
 /// key all the same, through [`Hmac::try_new`]: RFC 2104 pads a
 /// shorter key with zeros and hashes a longer one down first, and
 /// both give a block that keys the MAC identically, so nothing is
@@ -130,10 +130,10 @@ impl<H: Hash + Clone + BlockType> Hmac<H> {
 }
 
 impl<H: Hash + Clone + BlockType> KeyType for Hmac<H> {
-    type Key = H::Block;
+    type Key = Key<H::Block>;
 
     fn zero_key() -> Self::Key {
-        H::zero_block()
+        Key::zeroed()
     }
 }
 
@@ -141,7 +141,7 @@ impl<H: Hash + Clone + BlockType> Mac for Hmac<H> {
     type Tag = H::Output;
 
     fn try_new(key: &Self::Key) -> Result<Self, Error> {
-        Hmac::from_block(key)
+        Hmac::from_block(key.array())
     }
 
     fn reset(&mut self) {
@@ -198,9 +198,9 @@ mod tests {
             let mut block = HmacSha256::zero_key();
             if len > 64 {
                 let digest = Sha256::digest(key).unwrap();
-                block[..32].copy_from_slice(&digest);
+                block.as_mut()[..32].copy_from_slice(&digest);
             } else {
-                block[..len].copy_from_slice(key);
+                block.as_mut()[..len].copy_from_slice(key);
             }
             let mut mac = <HmacSha256 as Mac>::try_new(&block).unwrap();
             mac.update(b"message");

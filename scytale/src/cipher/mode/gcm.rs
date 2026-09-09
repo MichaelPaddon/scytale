@@ -45,11 +45,12 @@
 //! # Example
 //!
 //! ```
-//! use scytale::cipher::aes::Aes;
+//! use scytale::Key;
+//! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Gcm;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let gcm = Gcm::try_new(Aes::try_new(&[0u8; 16])?)?;
+//! let gcm = Gcm::<Aes128>::new(&Key::from([0u8; 16]));
 //! let nonce = [0u8; 12];
 //! let header = b"to: alice";
 //!
@@ -68,7 +69,7 @@ use core::fmt;
 use super::ghash::{BLOCK, Ghash};
 use super::xor;
 use crate::Error;
-use crate::cipher::{BlockCipher, ByteOrder};
+use crate::cipher::{BlockCipher, ByteOrder, CounterFn, OneBlock, counter_fn};
 use crate::util;
 
 /// The most message bytes GCM may protect under one key and nonce:
@@ -87,13 +88,16 @@ pub(crate) const TAG: usize = BLOCK;
 
 /// GCM over a block cipher.
 #[derive(Clone)]
-pub struct Gcm<C> {
+pub struct Gcm<C: BlockCipher<Block = [u8; BLOCK]>> {
     cipher: C,
     /// The hash subkey, the cipher applied to a block of zeros.
     h: [u8; BLOCK],
+    /// The counter loop this cipher gets, settled when the mode is
+    /// built.
+    counter: CounterFn<C>,
 }
 
-impl<C> fmt::Debug for Gcm<C> {
+impl<C: BlockCipher<Block = [u8; BLOCK]>> fmt::Debug for Gcm<C> {
     /// Deliberately omits the hash subkey, which is enough to forge
     /// tags, and the cipher.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -102,11 +106,16 @@ impl<C> fmt::Debug for Gcm<C> {
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
-    /// Wraps `cipher`.
-    pub fn try_new(cipher: C) -> Result<Self, Error> {
+    /// Takes the key the cipher runs under.
+    pub fn new(key: &C::Key) -> Self {
+        let cipher = C::new(key);
         let mut h = [0u8; BLOCK];
-        cipher.encrypt_block(&mut h);
-        Ok(Gcm { cipher, h })
+        cipher.encrypt_one(&mut h);
+        Gcm {
+            cipher,
+            h,
+            counter: counter_fn::<C>(),
+        }
     }
 
     /// Encrypts `data` in place and writes its tag.
@@ -153,14 +162,14 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
     /// Starts encrypting a message that arrives in pieces.
     pub fn encryptor(&self, nonce: &[u8]) -> Result<Encryptor<'_, C>, Error> {
         Ok(Encryptor {
-            core: Core::new(&self.cipher, &self.h, nonce)?,
+            core: Core::new(&self.cipher, &self.h, self.counter, nonce)?,
         })
     }
 
     /// Starts decrypting a message that arrives in pieces.
     pub fn decryptor(&self, nonce: &[u8]) -> Result<Decryptor<'_, C>, Error> {
         Ok(Decryptor {
-            core: Core::new(&self.cipher, &self.h, nonce)?,
+            core: Core::new(&self.cipher, &self.h, self.counter, nonce)?,
         })
     }
 }
@@ -207,8 +216,10 @@ fn increment32(counter: &mut [u8; BLOCK]) {
 
 /// What both directions share: the counter, the hash, and the lengths
 /// that go into the tag.
-struct Core<'a, C> {
+struct Core<'a, C: BlockCipher<Block = [u8; BLOCK]>> {
     cipher: &'a C,
+    /// The counter loop chosen when the mode was built.
+    blocks: CounterFn<C>,
     hash: Ghash,
     counter: [u8; BLOCK],
     /// The keystream block a previous piece ended inside.
@@ -224,7 +235,7 @@ struct Core<'a, C> {
     started: bool,
 }
 
-impl<C> Core<'_, C> {
+impl<C: BlockCipher<Block = [u8; BLOCK]>> Core<'_, C> {
     /// Debug for whichever direction owns this core: the counts, and
     /// nothing derived from the key.
     fn fmt(&self, f: &mut fmt::Formatter<'_>, name: &str) -> fmt::Result {
@@ -239,15 +250,17 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
     fn new(
         cipher: &'a C,
         h: &[u8; BLOCK],
+        blocks: CounterFn<C>,
         nonce: &[u8],
     ) -> Result<Self, Error> {
         let start = counter_start(h, nonce)?;
         let mut mask = start;
-        cipher.encrypt_block(&mut mask);
+        cipher.encrypt_one(&mut mask);
         let mut counter = start;
         increment32(&mut counter);
         Ok(Core {
             cipher,
+            blocks,
             hash: Ghash::new(h),
             counter,
             keystream: [0; BLOCK],
@@ -305,7 +318,8 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
         // what the cipher's counter loop does, so there is no
         // boundary to split at.
         let (whole, tail) = data.as_chunks_mut::<BLOCK>();
-        self.cipher.xor_counter_blocks(
+        (self.blocks)(
+            self.cipher,
             &mut self.counter,
             ByteOrder::Big,
             whole.as_flattened_mut(),
@@ -314,7 +328,7 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
         if !tail.is_empty() {
             self.keystream = self.counter;
             increment32(&mut self.counter);
-            self.cipher.encrypt_block(&mut self.keystream);
+            self.cipher.encrypt_one(&mut self.keystream);
             xor(tail, &self.keystream);
             self.used = tail.len();
         }
@@ -347,11 +361,11 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
 /// Encrypts one message, a piece at a time.
 ///
 /// All additional data must be given before any of the message.
-pub struct Encryptor<'a, C> {
+pub struct Encryptor<'a, C: BlockCipher<Block = [u8; BLOCK]>> {
     core: Core<'a, C>,
 }
 
-impl<C> fmt::Debug for Encryptor<'_, C> {
+impl<C: BlockCipher<Block = [u8; BLOCK]>> fmt::Debug for Encryptor<'_, C> {
     /// Says how far along it is and nothing else.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.core.fmt(f, "Encryptor")
@@ -390,11 +404,11 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Encryptor<'_, C> {
 /// has checked the tag, so a caller must not act on the plaintext, or
 /// let anyone else see it, before that succeeds. Where the whole
 /// message fits in memory, use [`Gcm::decrypt`], which checks first.
-pub struct Decryptor<'a, C> {
+pub struct Decryptor<'a, C: BlockCipher<Block = [u8; BLOCK]>> {
     core: Core<'a, C>,
 }
 
-impl<C> fmt::Debug for Decryptor<'_, C> {
+impl<C: BlockCipher<Block = [u8; BLOCK]>> fmt::Debug for Decryptor<'_, C> {
     /// Says how far along it is and nothing else.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.core.fmt(f, "Decryptor")
@@ -455,6 +469,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Decryptor<'_, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Key;
     use crate::cipher::aes::{Aes, Aes128};
 
     /// Buffers big enough for every case below.
@@ -582,7 +597,7 @@ mod tests {
         tag: &[u8; 16],
     ) {
         let key: &[u8; K] = key.try_into().unwrap();
-        let gcm = Gcm::try_new(Aes::try_new(key).unwrap()).unwrap();
+        let gcm = Gcm::<Aes<K>>::new(&Key::from(*key));
         let mut data = [0u8; MAX];
         let data = &mut data[..plain.len()];
         data.copy_from_slice(plain);
@@ -597,7 +612,7 @@ mod tests {
     }
 
     fn gcm() -> Gcm<Aes128> {
-        Gcm::try_new(Aes::try_new(&[0x42; 16]).unwrap()).unwrap()
+        Gcm::new(&Key::from([0x42u8; 16]))
     }
 
     /// Anything altered must be rejected, and the buffer wiped rather

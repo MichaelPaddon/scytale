@@ -107,9 +107,9 @@
 //! the padding checks on both sides, handle only public values.
 
 use crate::Error;
+use crate::Random;
 use crate::hash::Hash;
 use crate::math::rsa::{Private, Public, mgf1_xor};
-use crate::random::Random;
 
 /// A hash that PKCS#1 v1.5 can name: one with a DER `DigestInfo`
 /// prefix. All the SHA-2 and SHA-3 digests have one, under the one
@@ -1096,7 +1096,7 @@ mod tests {
     #[test]
     fn generation_fails_without_entropy() {
         struct Zeros;
-        impl crate::random::Random for Zeros {
+        impl crate::Random for Zeros {
             fn fill(&mut self, out: &mut [u8]) -> Result<(), Error> {
                 out.fill(0);
                 Ok(())

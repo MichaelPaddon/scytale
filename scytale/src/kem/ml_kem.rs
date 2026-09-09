@@ -646,7 +646,7 @@ macro_rules! parameter_set {
 
         use crate::der::SeedOrExpanded;
         use crate::kem::ml_kem::{self, params};
-        use crate::random::Random;
+        use crate::Random;
         use crate::Error;
 
         /// The length of a private key's seed, `d || z`, the form to

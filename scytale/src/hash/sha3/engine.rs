@@ -26,7 +26,7 @@ use core::marker::PhantomData;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::hash::{BitHash, BitXof, Hash, Xof, XofReader};
-use crate::{BlockType, Error};
+use crate::{BlockType, ByteArray, Error};
 
 /// Keeps the traits here to this crate's own implementations.
 mod sealed {
@@ -57,7 +57,7 @@ pub trait Permutation: Sealed {
 /// its messages. Sealed.
 pub trait Variant: Clone + Sealed {
     /// A block of the rate: the bytes absorbed between permutations.
-    type Block: Copy + AsRef<[u8]> + AsMut<[u8]>;
+    type Block: ByteArray;
     /// A block of zeros.
     fn zero_block() -> Self::Block;
     /// The domain separation bits, with the first padding one after

@@ -20,11 +20,12 @@
 //! # Example
 //!
 //! ```
-//! use scytale::cipher::aes::Aes;
+//! use scytale::Key;
+//! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Cfb128;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let cfb = Cfb128::new(Aes::try_new(&[0u8; 16])?);
+//! let cfb = Cfb128::<Aes128>::new(&Key::from([0u8; 16]));
 //! let iv = [0u8; 16];
 //!
 //! let mut data = [0u8; 32];
@@ -38,12 +39,12 @@
 use core::fmt;
 
 use super::{LANES, xor};
-use crate::cipher::BlockCipher;
+use crate::cipher::{BlockCipher, OneBlock};
 use crate::{ByteArray, Error};
 
 /// CFB with 128-bit segments over a block cipher.
 #[derive(Clone)]
-pub struct Cfb128<C> {
+pub struct Cfb128<C: BlockCipher> {
     cipher: C,
 }
 
@@ -51,9 +52,11 @@ impl<C: BlockCipher> Cfb128<C>
 where
     C::Block: ByteArray,
 {
-    /// Wraps `cipher`.
-    pub fn new(cipher: C) -> Self {
-        Cfb128 { cipher }
+    /// Takes the key the cipher runs under.
+    pub fn new(key: &C::Key) -> Self {
+        Cfb128 {
+            cipher: C::new(key),
+        }
     }
 
     /// Encrypts `data` in place under `iv`.
@@ -111,7 +114,7 @@ where
         }
         for block in blocks {
             let mut keystream = self.register;
-            self.cipher.encrypt_block(&mut keystream);
+            self.cipher.encrypt_one(&mut keystream);
             xor(block.as_mut(), keystream.as_ref());
             self.register = *block;
         }
@@ -153,7 +156,7 @@ where
             let keystream = &mut keystream[..n];
             keystream[0] = self.register;
             keystream[1..].copy_from_slice(&seen[..n - 1]);
-            self.cipher.encrypt_blocks(keystream);
+            self.cipher.encrypt(keystream);
 
             for (block, key) in group.iter_mut().zip(&*keystream) {
                 xor(block.as_mut(), key.as_ref());
@@ -165,7 +168,7 @@ where
 }
 
 // Debug output omits the state: it is all derived from the key.
-impl<C> fmt::Debug for Cfb128<C> {
+impl<C: BlockCipher> fmt::Debug for Cfb128<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Cfb128").finish_non_exhaustive()
     }
@@ -186,6 +189,7 @@ impl<C: BlockCipher> fmt::Debug for Decryptor<'_, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Key;
     use crate::cipher::aes::Aes;
 
     const MAX: usize = 24 * 16;
@@ -201,7 +205,7 @@ mod tests {
     }
 
     fn cfb<const K: usize>(key: &[u8; K]) -> Cfb128<Aes<K>> {
-        Cfb128::new(Aes::try_new(key).unwrap())
+        Cfb128::new(&Key::from(*key))
     }
 
     /// NIST SP 800-38A F.3.13 and F.3.14, AES-128.

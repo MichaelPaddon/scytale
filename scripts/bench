@@ -1,0 +1,26 @@
+#!/bin/sh
+# Measures throughput and operation costs, the way `openssl speed`
+# does. The measuring code lives inside the crate, where it can see
+# the implementations behind the public types, so it runs as an
+# ignored test rather than as a `cargo bench` target.
+#
+# Usage: scripts/bench [word ...] [--seconds N] [--self-test]
+#   Words filter the rows: a row runs when every word appears in its
+#   section or its name, and a word may offer alternatives separated
+#   by commas. With no arguments, everything runs.
+#
+# Examples:
+#   scripts/bench                    # everything
+#   scripts/bench gcm aesni          # rows matching both
+#   scripts/bench --seconds 0.25     # a quicker sweep
+#   scripts/bench --self-test        # check the harness
+
+set -eu
+
+cd "$(dirname "$0")/.."
+
+SCYTALE_BENCH="$*"
+export SCYTALE_BENCH
+
+exec cargo test --release --lib -- \
+    --ignored --nocapture --exact bench::speed

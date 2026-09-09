@@ -54,7 +54,7 @@ mod tests {
 
     #[test]
     fn probes_agree_with_constructors() {
-        assert_eq!(zkn::Aes::try_new(&[0; 16]).is_ok(), has_zkn());
-        assert_eq!(zvkned::Aes::try_new(&[0; 16]).is_ok(), has_zvkned());
+        assert_eq!(zkn::Aes::<16>::supported(), has_zkn());
+        assert_eq!(zvkned::Aes::<16>::supported(), has_zvkned());
     }
 }

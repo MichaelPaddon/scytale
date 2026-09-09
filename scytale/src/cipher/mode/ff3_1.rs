@@ -35,11 +35,12 @@
 //! # Example
 //!
 //! ```
+//! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Ff3_1;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let ff3: Ff3_1<Aes128> = Ff3_1::try_new(&[0u8; 16], 10)?;
+//! let ff3: Ff3_1<Aes128> = Ff3_1::try_new(&Key::from([0u8; 16]), 10)?;
 //! let tweak = [0u8; 7];
 //!
 //! let mut account = [0u16, 1, 2, 3, 4, 5, 6, 7, 8, 9];
@@ -56,9 +57,8 @@ use core::fmt;
 
 use super::ghash::BLOCK;
 use crate::Error;
-use crate::cipher::BlockCipher;
+use crate::cipher::{BlockCipher, OneBlock};
 use crate::math::natural::Natural;
-use zeroize::Zeroize;
 
 /// Rounds of the Feistel network, fixed by the standard.
 const ROUNDS: usize = 8;
@@ -82,7 +82,7 @@ pub const MAX_SYMBOLS: usize = 2 * HALF_BITS as usize;
 /// the cipher under the key reversed, which only the constructor can
 /// arrange.
 #[derive(Clone)]
-pub struct Ff3_1<C> {
+pub struct Ff3_1<C: BlockCipher<Block = [u8; BLOCK]>> {
     cipher: C,
     radix: u32,
     /// The longest message this radix allows, from the 96-bit cap on
@@ -90,7 +90,7 @@ pub struct Ff3_1<C> {
     max_symbols: usize,
 }
 
-impl<C> fmt::Debug for Ff3_1<C> {
+impl<C: BlockCipher<Block = [u8; BLOCK]>> fmt::Debug for Ff3_1<C> {
     /// Deliberately omits the cipher, which holds the key.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Ff3_1")
@@ -120,13 +120,14 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ff3_1<C> {
             half += 1;
         }
 
-        let mut reversed = *key;
+        // The reversed key is a key, so it wipes itself when this
+        // returns; only the cipher built from it outlives it.
+        let mut reversed = key.clone();
         reversed.as_mut().reverse();
-        let cipher = C::try_new(&reversed);
-        reversed.as_mut().zeroize();
+        let cipher = C::new(&reversed);
 
         Ok(Ff3_1 {
-            cipher: cipher?,
+            cipher,
             radix,
             max_symbols: 2 * half,
         })
@@ -253,7 +254,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ff3_1<C> {
         // The standard runs the cipher over the block reversed, under
         // a reversed key, and reverses the answer.
         block.reverse();
-        self.cipher.encrypt_block(&mut block);
+        self.cipher.encrypt_one(&mut block);
         block.reverse();
 
         let mut value = Natural::from_bytes(&block);
@@ -290,6 +291,7 @@ fn subtract_from(half: &mut [u16], step: &[u16; MAX_SYMBOLS], radix: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Key;
     use crate::cipher::aes::Aes128;
 
     fn unhex<const N: usize>(text: &str) -> [u8; N] {
@@ -313,7 +315,7 @@ mod tests {
 
     fn ff3(radix: u32) -> Ff3_1<Aes128> {
         let key: [u8; 16] = unhex("44d737102ccc9aec882045c31c08252a");
-        Ff3_1::try_new(&key, radix).unwrap()
+        Ff3_1::try_new(&Key::from(key), radix).unwrap()
     }
 
     #[test]
@@ -392,7 +394,7 @@ mod tests {
         let key: [u8; 16] = unhex("44d737102ccc9aec882045c31c08252a");
         for radix in [0u32, 1, 65537] {
             assert_eq!(
-                Ff3_1::<Aes128>::try_new(&key, radix).unwrap_err(),
+                Ff3_1::<Aes128>::try_new(&Key::from(key), radix).unwrap_err(),
                 Error::InvalidRadix(radix)
             );
         }

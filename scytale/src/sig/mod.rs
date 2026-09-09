@@ -9,7 +9,8 @@
 //! on hashes alone at the price of signatures ten times larger.
 //!
 //! ```
-//! use scytale::random::{Random, Rng, System};
+//! use scytale::Random;
+//! use scytale::random::{Rng, System};
 //! use scytale::sig::ed25519;
 //!
 //! # fn main() -> Result<(), scytale::Error> {

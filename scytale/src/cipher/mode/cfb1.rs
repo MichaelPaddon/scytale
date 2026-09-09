@@ -21,11 +21,12 @@
 //! # Example
 //!
 //! ```
-//! use scytale::cipher::aes::Aes;
+//! use scytale::Key;
+//! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Cfb1;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let cfb = Cfb1::new(Aes::try_new(&[0u8; 16])?);
+//! let cfb = Cfb1::<Aes128>::new(&Key::from([0u8; 16]));
 //! let iv = [0u8; 16];
 //!
 //! // Five bits, held in the top of one byte.
@@ -41,18 +42,20 @@ use core::fmt;
 
 use super::{bit, set_bit, shift_in_bit};
 use crate::Error;
-use crate::cipher::BlockCipher;
+use crate::cipher::{BlockCipher, OneBlock};
 
 /// CFB with 1-bit segments over a block cipher.
 #[derive(Clone)]
-pub struct Cfb1<C> {
+pub struct Cfb1<C: BlockCipher> {
     cipher: C,
 }
 
 impl<C: BlockCipher> Cfb1<C> {
-    /// Wraps `cipher`.
-    pub fn new(cipher: C) -> Self {
-        Cfb1 { cipher }
+    /// Takes the key the cipher runs under.
+    pub fn new(key: &C::Key) -> Self {
+        Cfb1 {
+            cipher: C::new(key),
+        }
     }
 
     /// Encrypts the first `bits` bits of `data` in place under `iv`.
@@ -123,7 +126,7 @@ impl<C: BlockCipher> Encryptor<'_, C> {
         check(data, bits)?;
         for i in 0..bits {
             let mut keystream = self.register;
-            self.cipher.encrypt_block(&mut keystream);
+            self.cipher.encrypt_one(&mut keystream);
             let out = bit(data, i) ^ (keystream.as_ref()[0] >> 7);
             set_bit(data, i, out);
             shift_in_bit(self.register.as_mut(), out);
@@ -148,7 +151,7 @@ impl<C: BlockCipher> Decryptor<'_, C> {
         check(data, bits)?;
         for i in 0..bits {
             let mut keystream = self.register;
-            self.cipher.encrypt_block(&mut keystream);
+            self.cipher.encrypt_one(&mut keystream);
             // The register takes the ciphertext bit, so read it
             // before the bit becomes plaintext.
             let ciphertext = bit(data, i);
@@ -160,7 +163,7 @@ impl<C: BlockCipher> Decryptor<'_, C> {
 }
 
 // Debug output omits the state: it is all derived from the key.
-impl<C> fmt::Debug for Cfb1<C> {
+impl<C: BlockCipher> fmt::Debug for Cfb1<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Cfb1").finish_non_exhaustive()
     }
@@ -181,6 +184,7 @@ impl<C: BlockCipher> fmt::Debug for Decryptor<'_, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Key;
     use crate::cipher::aes::Aes;
 
     fn unhex<const N: usize>(s: &str) -> [u8; N] {
@@ -194,7 +198,7 @@ mod tests {
     }
 
     fn cfb<const K: usize>(key: &[u8; K]) -> Cfb1<Aes<K>> {
-        Cfb1::new(Aes::try_new(key).unwrap())
+        Cfb1::new(&Key::from(*key))
     }
 
     /// NIST SP 800-38A F.3.1 and F.3.2, AES-128: the first sixteen

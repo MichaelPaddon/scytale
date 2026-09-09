@@ -1104,7 +1104,7 @@ macro_rules! parameter_set {
         use zeroize::Zeroize;
 
         use crate::Error;
-        use crate::random::Random;
+        use crate::Random;
         use crate::sig::slh_dsa::{self, Params};
 
         const P: &Params = &$params;

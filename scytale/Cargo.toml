@@ -44,12 +44,6 @@ serde_json = "1"
 # on this crate ever builds it.
 cpu-time = "1"
 
-# The measuring loop is its own harness rather than libtest's, which
-# only knows how to time a fixed number of iterations.
-[[bench]]
-name = "speed"
-harness = false
-
 # Only where there is something to ask. A bare metal target has
 # nobody, and takes the processor's own generator instead; the same
 # condition selects `System`'s body in src/random/source/mod.rs, and

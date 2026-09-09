@@ -32,11 +32,12 @@
 //! # Example
 //!
 //! ```
+//! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::GcmSiv;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let siv: GcmSiv<Aes128> = GcmSiv::try_new(&[0u8; 16])?;
+//! let siv = GcmSiv::<Aes128>::new(&Key::from([0u8; 16]));
 //! let nonce = [0u8; 12];
 //!
 //! let mut message = *b"hello";
@@ -54,9 +55,9 @@ use core::fmt;
 use super::ghash::BLOCK;
 use super::polyval::Polyval;
 use super::xor;
-use crate::Error;
-use crate::cipher::{BlockCipher, ByteOrder};
+use crate::cipher::{BlockCipher, ByteOrder, CounterFn, OneBlock, counter_fn};
 use crate::util;
+use crate::{Error, Key};
 use zeroize::Zeroize;
 
 /// The nonce length, fixed by the standard.
@@ -68,36 +69,79 @@ const TAG: usize = BLOCK;
 /// The most bytes of message or additional data allowed: 2^36.
 const MAX_FIELD: u64 = 1 << 36;
 
-/// AES-GCM-SIV over a block cipher.
+/// A key width GCM-SIV's key derivation is defined for: 16 or 32
+/// bytes. Sealed.
 ///
-/// Unlike most modes this is built from a key rather than a cipher:
-/// every nonce gets its own pair of keys derived from it, so a
-/// single expanded cipher would be no use.
-#[derive(Clone)]
-pub struct GcmSiv<C> {
-    cipher: C,
-    key_len: usize,
+/// RFC 8452 derives a 16-byte hashing key and an encrypting key of
+/// the cipher's own width from successive counter blocks, and it
+/// spells that out for those two widths only. A 24-byte key has no
+/// derivation to follow, so AES-192 is not a GCM-SIV cipher and
+/// `GcmSiv<Aes192>` does not compile.
+/// ```
+/// use scytale::Key;
+/// use scytale::cipher::aes::{Aes128, Aes256};
+/// use scytale::cipher::mode::GcmSiv;
+/// let _ = GcmSiv::<Aes128>::new(&Key::from([0u8; 16]));
+/// let _ = GcmSiv::<Aes256>::new(&Key::from([0u8; 32]));
+/// ```
+///
+/// ```compile_fail
+/// use scytale::Key;
+/// use scytale::cipher::aes::Aes192;
+/// use scytale::cipher::mode::GcmSiv;
+/// // AES-192 is a cipher, but not one GCM-SIV is defined over.
+/// let _ = GcmSiv::<Aes192>::new(&Key::from([0u8; 24]));
+/// ```
+pub trait SivKey: sealed::Sealed {}
+
+impl SivKey for Key<[u8; 16]> {}
+impl SivKey for Key<[u8; 32]> {}
+
+mod sealed {
+    use crate::Key;
+
+    pub trait Sealed {}
+    impl Sealed for Key<[u8; 16]> {}
+    impl Sealed for Key<[u8; 32]> {}
 }
 
-impl<C> fmt::Debug for GcmSiv<C> {
+/// GCM-SIV over a block cipher.
+///
+/// RFC 8452 defines the construction over AES-128 and AES-256, which
+/// is what [`Aes128`](crate::cipher::aes::Aes128) and
+/// [`Aes256`](crate::cipher::aes::Aes256) give. Any other 128-bit
+/// block cipher taking a key of one of those widths satisfies the
+/// construction and is allowed here, but it is outside the standard
+/// and there are no vectors for it; that choice is the caller's.
+///
+/// Every nonce gets its own pair of keys derived from the key here,
+/// so the cipher this holds encrypts nothing but those derivations.
+#[derive(Clone)]
+pub struct GcmSiv<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> {
+    cipher: C,
+    key_len: usize,
+    /// The counter loop this cipher gets, settled when the mode is
+    /// built.
+    counter: CounterFn<C>,
+}
+
+impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> fmt::Debug
+    for GcmSiv<C>
+{
     /// Deliberately omits the cipher, which holds the key.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GcmSiv").finish_non_exhaustive()
     }
 }
 
-impl<C: BlockCipher<Block = [u8; BLOCK]>> GcmSiv<C> {
-    /// Takes the key that all others are derived from. The standard
-    /// defines the construction for 16- and 32-byte keys only.
-    pub fn try_new(key: &C::Key) -> Result<Self, Error> {
-        let key_len = key.as_ref().len();
-        if key_len != 16 && key_len != 32 {
-            return Err(Error::InvalidKeyLength(key_len));
+impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
+    /// Takes the key that all others are derived from.
+    pub fn new(key: &C::Key) -> Self {
+        GcmSiv {
+            cipher: C::new(key),
+            key_len: key.as_ref().len(),
+            counter: counter_fn::<C>(),
         }
-        Ok(GcmSiv {
-            cipher: C::try_new(key)?,
-            key_len,
-        })
     }
 
     /// Encrypts `data` in place and writes its 16-byte tag.
@@ -109,13 +153,13 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> GcmSiv<C> {
         tag: &mut [u8; TAG],
     ) -> Result<(), Error> {
         check(aad, data.len())?;
-        let (hash_key, cipher) = self.derive(nonce)?;
+        let (hash_key, cipher) = self.derive(nonce);
 
         // The tag covers the plaintext, so it is computed first.
         let full = authenticate(&hash_key, &cipher, nonce, aad, data)?;
         let mut counter = full;
         counter[BLOCK - 1] |= 0x80;
-        apply(&cipher, &mut counter, data);
+        apply(&cipher, self.counter, &mut counter, data);
 
         tag.copy_from_slice(&full);
         Ok(())
@@ -133,14 +177,14 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> GcmSiv<C> {
         tag: &[u8; TAG],
     ) -> Result<(), Error> {
         check(aad, data.len())?;
-        let (hash_key, cipher) = self.derive(nonce)?;
+        let (hash_key, cipher) = self.derive(nonce);
 
         // The counter comes from the tag, so the message can be
         // decrypted before the tag is known to be right; then the tag
         // is recomputed over the plaintext and compared.
         let mut counter = *tag;
         counter[BLOCK - 1] |= 0x80;
-        apply(&cipher, &mut counter, data);
+        apply(&cipher, self.counter, &mut counter, data);
 
         let full = authenticate(&hash_key, &cipher, nonce, aad, data)?;
         if util::equal(&full, tag) {
@@ -154,14 +198,14 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> GcmSiv<C> {
     /// Derives the hashing key and the encrypting cipher for one
     /// nonce, as RFC 8452 section 4 does: successive counters with
     /// the nonce, keeping the first half of each result.
-    fn derive(&self, nonce: &[u8; NONCE]) -> Result<([u8; BLOCK], C), Error> {
+    fn derive(&self, nonce: &[u8; NONCE]) -> ([u8; BLOCK], C) {
         let mut material = [0u8; 48];
         let blocks = 2 + self.key_len / 8;
         for i in 0..blocks {
             let mut block = [0u8; BLOCK];
             block[..4].copy_from_slice(&(i as u32).to_le_bytes());
             block[4..BLOCK].copy_from_slice(nonce);
-            self.cipher.encrypt_block(&mut block);
+            self.cipher.encrypt_one(&mut block);
             material[i * 8..(i + 1) * 8].copy_from_slice(&block[..8]);
         }
         let mut hash_key = [0u8; BLOCK];
@@ -169,10 +213,10 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> GcmSiv<C> {
         let mut key = C::zero_key();
         key.as_mut()
             .copy_from_slice(&material[BLOCK..BLOCK + self.key_len]);
-        let cipher = C::try_new(&key);
+        let cipher = C::new(&key);
         key.as_mut().zeroize();
         material.zeroize();
-        Ok((hash_key, cipher?))
+        (hash_key, cipher)
     }
 }
 
@@ -211,7 +255,7 @@ fn authenticate<C: BlockCipher<Block = [u8; BLOCK]>>(
     // The top bit is cleared here and set again in the counter, which
     // keeps the tag out of the counter's own range.
     tag[BLOCK - 1] &= 0x7f;
-    cipher.encrypt_block(&mut tag);
+    cipher.encrypt_one(&mut tag);
     Ok(tag)
 }
 
@@ -219,6 +263,7 @@ fn authenticate<C: BlockCipher<Block = [u8; BLOCK]>>(
 /// bytes, read the little-endian way round.
 fn apply<C: BlockCipher<Block = [u8; BLOCK]>>(
     cipher: &C,
+    blocks: CounterFn<C>,
     counter: &mut [u8; BLOCK],
     data: &mut [u8],
 ) {
@@ -226,15 +271,11 @@ fn apply<C: BlockCipher<Block = [u8; BLOCK]>>(
     // wrap inside themselves, which is what the cipher's counter loop
     // does, so there is no boundary to split at.
     let (whole, tail) = data.as_chunks_mut::<BLOCK>();
-    cipher.xor_counter_blocks(
-        counter,
-        ByteOrder::Little,
-        whole.as_flattened_mut(),
-    );
+    blocks(cipher, counter, ByteOrder::Little, whole.as_flattened_mut());
     if !tail.is_empty() {
         let mut keystream = *counter;
         increment(counter);
-        cipher.encrypt_block(&mut keystream);
+        cipher.encrypt_one(&mut keystream);
         xor(tail, &keystream);
     }
 }
@@ -253,7 +294,7 @@ fn increment(counter: &mut [u8; BLOCK]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cipher::aes::{Aes, Aes128, Aes192, Aes256};
+    use crate::cipher::aes::{Aes, Aes128, Aes256};
 
     /// Buffers big enough for every case below.
     const MAX: usize = 32;
@@ -352,9 +393,11 @@ mod tests {
         plain: &[u8],
         cipher: &[u8],
         want: &[u8; 16],
-    ) {
+    ) where
+        Key<[u8; K]>: SivKey,
+    {
         let key: &[u8; K] = key.try_into().unwrap();
-        let siv = GcmSiv::<Aes<K>>::try_new(key).unwrap();
+        let siv = GcmSiv::<Aes<K>>::new(&Key::from(*key));
         let mut data = [0u8; MAX];
         let data = &mut data[..plain.len()];
         data.copy_from_slice(plain);
@@ -369,7 +412,7 @@ mod tests {
     }
 
     fn siv() -> GcmSiv<Aes128> {
-        GcmSiv::<Aes128>::try_new(&[0x42; 16]).unwrap()
+        GcmSiv::<Aes128>::new(&Key::from([0x42; 16]))
     }
 
     /// The point of the mode: a repeated nonce must not be a
@@ -431,21 +474,9 @@ mod tests {
         );
     }
 
-    /// RFC 8452 defines no 192-bit variant, so one must be refused
-    /// rather than quietly treated as something else. Nonce and tag
-    /// lengths are fixed by their types.
-    #[test]
-    fn rejects_bad_lengths() {
-        // AES-192 is a valid cipher but not a GCM-SIV key size.
-        assert_eq!(
-            GcmSiv::<Aes192>::try_new(&[0u8; 24]).unwrap_err(),
-            Error::InvalidKeyLength(24)
-        );
-    }
-
     #[test]
     fn round_trips_at_many_lengths() {
-        let siv = GcmSiv::<Aes256>::try_new(&[0x5a; 32]).unwrap();
+        let siv = GcmSiv::<Aes256>::new(&Key::from([0x5a; 32]));
         let nonce = [0x77u8; 12];
         let mut plain = [0u8; 70];
         for (i, b) in plain.iter_mut().enumerate() {
@@ -478,10 +509,7 @@ mod tests {
         let mut buffer = Buffer([0; 256], 0);
         core::fmt::write(
             &mut buffer,
-            format_args!(
-                "{:?}",
-                GcmSiv::<Aes256>::try_new(&[0x5a; 32]).unwrap()
-            ),
+            format_args!("{:?}", GcmSiv::<Aes256>::new(&Key::from([0x5a; 32]))),
         )
         .unwrap();
         let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();

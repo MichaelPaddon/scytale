@@ -32,11 +32,12 @@
 //! # Example
 //!
 //! ```
-//! use scytale::cipher::aes::Aes;
+//! use scytale::Key;
+//! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Xpn;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let xpn = Xpn::try_new(Aes::try_new(&[0u8; 16])?)?;
+//! let xpn = Xpn::<Aes128>::new(&Key::from([0u8; 16]));
 //! let salt = [0x5a; 12];
 //!
 //! // Channel 1, packet 7.
@@ -66,11 +67,11 @@ const HALF: usize = SHORT_NONCE;
 
 /// GCM with extended packet numbering, over a block cipher.
 #[derive(Clone)]
-pub struct Xpn<C> {
+pub struct Xpn<C: BlockCipher<Block = [u8; BLOCK]>> {
     gcm: Gcm<C>,
 }
 
-impl<C> fmt::Debug for Xpn<C> {
+impl<C: BlockCipher<Block = [u8; BLOCK]>> fmt::Debug for Xpn<C> {
     /// Deliberately omits everything: it is all derived from the key.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Xpn").finish_non_exhaustive()
@@ -78,11 +79,9 @@ impl<C> fmt::Debug for Xpn<C> {
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Xpn<C> {
-    /// Wraps `cipher`.
-    pub fn try_new(cipher: C) -> Result<Self, Error> {
-        Ok(Xpn {
-            gcm: Gcm::try_new(cipher)?,
-        })
+    /// Takes the key the cipher runs under.
+    pub fn new(key: &C::Key) -> Self {
+        Xpn { gcm: Gcm::new(key) }
     }
 
     /// Encrypts `data` in place and writes its tag.
@@ -158,11 +157,12 @@ fn nonce(salt: &[u8; HALF], frame: &[u8; HALF]) -> [u8; HALF] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cipher::aes::{Aes, Aes128};
+    use crate::Key;
+    use crate::cipher::aes::Aes128;
     use crate::cipher::mode::Gcm;
 
     fn xpn() -> Xpn<Aes128> {
-        Xpn::try_new(Aes::try_new(&[0x42; 16]).unwrap()).unwrap()
+        Xpn::new(&Key::from([0x42u8; 16]))
     }
 
     /// It must agree with plain GCM under the combined nonce, which
@@ -183,7 +183,7 @@ mod tests {
             .encrypt(&salt, &frame, b"head", &mut by_xpn, &mut xpn_tag)
             .unwrap();
 
-        let gcm = Gcm::try_new(Aes::try_new(&[0x42; 16]).unwrap()).unwrap();
+        let gcm = Gcm::<Aes128>::new(&Key::from([0x42; 16]));
         let mut by_gcm = plain;
         let mut gcm_tag = [0u8; 16];
         gcm.encrypt(&combined, b"head", &mut by_gcm, &mut gcm_tag)

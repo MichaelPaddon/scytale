@@ -41,12 +41,13 @@
 //! # Example
 //!
 //! ```
-//! use scytale::cipher::aes::Aes;
+//! use scytale::Key;
+//! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Kw;
 //! use scytale::cipher::BlockCipher;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let kw = Kw::new(Aes::try_new(&[0u8; 16])?);
+//! let kw = Kw::<Aes128>::new(&Key::from([0u8; 16]));
 //!
 //! let key = [7u8; 32];
 //! let mut wrapped = [0u8; 40];
@@ -61,7 +62,8 @@
 
 use core::fmt;
 
-use crate::cipher::{BlockCipher, Error};
+use crate::Error;
+use crate::cipher::{BlockCipher, OneBlock};
 
 /// The cipher block this is defined for.
 const BLOCK: usize = 16;
@@ -74,13 +76,13 @@ const ICV1: [u8; SEMIBLOCK] = [0xa6; SEMIBLOCK];
 
 /// Key wrapping over a block cipher.
 #[derive(Clone)]
-pub struct Kw<C> {
+pub struct Kw<C: BlockCipher<Block = [u8; BLOCK]>> {
     cipher: C,
     /// Whether wrapping uses the cipher's forward direction.
     forward: bool,
 }
 
-impl<C> fmt::Debug for Kw<C> {
+impl<C: BlockCipher<Block = [u8; BLOCK]>> fmt::Debug for Kw<C> {
     /// Deliberately omits the cipher, which holds the key.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Kw")
@@ -92,14 +94,14 @@ impl<C> fmt::Debug for Kw<C> {
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Kw<C> {
     /// Wraps with the cipher's forward direction, as RFC 3394
     /// describes.
-    pub fn new(cipher: C) -> Self {
-        Kw::with_direction(cipher, true)
+    pub fn new(key: &C::Key) -> Self {
+        Kw::with_direction(C::new(key), true)
     }
 
     /// Wraps with the cipher's inverse direction, the other choice
     /// the standard allows.
-    pub fn new_inverse(cipher: C) -> Self {
-        Kw::with_direction(cipher, false)
+    pub fn new_inverse(key: &C::Key) -> Self {
+        Kw::with_direction(C::new(key), false)
     }
 
     pub(super) fn with_direction(cipher: C, forward: bool) -> Self {
@@ -228,16 +230,17 @@ pub(super) fn apply<C: BlockCipher<Block = [u8; BLOCK]>>(
     block: &mut [u8; BLOCK],
 ) {
     if forward {
-        cipher.encrypt_block(block)
+        cipher.encrypt_one(block)
     } else {
-        cipher.decrypt_block(block)
+        cipher.decrypt_one(block)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cipher::aes::Aes;
+    use crate::Key;
+    use crate::cipher::aes::{Aes, Aes128};
 
     fn unhex<const N: usize>(s: &str) -> [u8; N] {
         let mut out = [0u8; N];
@@ -258,7 +261,7 @@ mod tests {
             plain: &str,
             cipher: &str,
         ) {
-            let kw = Kw::new(Aes::try_new(&unhex::<K>(key)).unwrap());
+            let kw = Kw::<Aes<K>>::new(&Key::from(unhex::<K>(key)));
             let plain: [u8; P] = unhex(plain);
             let want: [u8; C] = unhex(cipher);
 
@@ -292,7 +295,7 @@ mod tests {
     /// accepts within a reasonable span.
     #[test]
     fn round_trips_at_many_lengths() {
-        let kw = Kw::new(Aes::try_new(&[3u8; 16]).unwrap());
+        let kw = Kw::<Aes128>::new(&Key::from([3u8; 16]));
         let plain: [u8; 128] = core::array::from_fn(|i| (i * 5) as u8);
         let mut wrapped = [0u8; 136];
         let mut back = [0u8; 128];
@@ -309,7 +312,7 @@ mod tests {
     /// rather than holding something that failed its check.
     #[test]
     fn rejects_and_wipes() {
-        let kw = Kw::new(Aes::try_new(&[3u8; 16]).unwrap());
+        let kw = Kw::<Aes128>::new(&Key::from([3u8; 16]));
         let plain = [9u8; 32];
         let mut wrapped = [0u8; 40];
         kw.wrap(&plain, &mut wrapped).unwrap();
@@ -332,8 +335,8 @@ mod tests {
     #[test]
     fn the_directions_are_not_interchangeable() {
         let key = [5u8; 16];
-        let forward = Kw::new(Aes::try_new(&key).unwrap());
-        let inverse = Kw::new_inverse(Aes::try_new(&key).unwrap());
+        let forward = Kw::<Aes128>::new(&Key::from(key));
+        let inverse = Kw::<Aes128>::new_inverse(&Key::from(key));
         let plain = [1u8; 16];
 
         let mut one = [0u8; 24];
@@ -355,7 +358,7 @@ mod tests {
     /// not fit, are refused rather than truncated.
     #[test]
     fn rejects_bad_lengths() {
-        let kw = Kw::new(Aes::try_new(&[3u8; 16]).unwrap());
+        let kw = Kw::<Aes128>::new(&Key::from([3u8; 16]));
         let mut out = [0u8; 64];
         // Not a whole number of units, and too short.
         for len in [0usize, 4, 8, 12, 20] {
@@ -406,7 +409,7 @@ mod tests {
         let mut buffer = Buffer([0; 256], 0);
         core::fmt::write(
             &mut buffer,
-            format_args!("{:?}", Kw::new(Aes::try_new(&[3u8; 16]).unwrap())),
+            format_args!("{:?}", Kw::<Aes128>::new(&Key::from([3u8; 16]))),
         )
         .unwrap();
         let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();

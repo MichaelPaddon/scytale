@@ -6,9 +6,9 @@
 //! state the message goes into at a time, the rate, and in the bits
 //! that end the message. The digests give a fixed output; the SHAKE
 //! functions give as much as is asked for, through [`Xof`]. The types
-//! here pick the best implementation the processor has, and each is
-//! also reachable by name under [`portable`] and the architecture
-//! module beside it.
+//! here pick the best implementation the processor has; which one
+//! that is is not a choice a caller makes, and the implementations
+//! are not names a caller can reach.
 //!
 //! ```
 //! use scytale::hash::sha3::{Sha3_256, Shake128};
@@ -52,16 +52,23 @@
 //! The permutation is the whole cost, and a message advances the
 //! state one permutation per rate of bytes. AArch64 processors with
 //! the SHA3 extension have instructions for the permutation's steps,
-//! used in the `aarch64` module, and are two to three times the
-//! portable speed. Nothing else has such instructions; x86-64 and
-//! RISC-V run the portable code, which on a 64-bit processor is a
-//! little slower than SHA-256 with no hardware and much slower than
-//! SHA-256 with it.
+//! and are two to three times the portable speed. Nothing else has
+//! such instructions; x86-64 and RISC-V run the portable code, which
+//! on a 64-bit processor is a little slower than SHA-256 with no
+//! hardware and much slower than SHA-256 with it.
 
+// The engines are named here for the vector suites and the
+// benchmark, which drive each one in turn; a build that runs
+// neither reaches them only through the dispatching types.
+#[allow(dead_code)]
 #[cfg(target_arch = "aarch64")]
-pub mod aarch64;
-pub mod engine;
-pub mod portable;
+pub(crate) mod aarch64;
+pub(crate) mod engine;
+// The engines are named here for the vector suites and the
+// benchmark, which drive each one in turn; a build that runs
+// neither reaches them only through the dispatching types.
+#[allow(dead_code)]
+pub(crate) mod portable;
 
 use core::fmt;
 use core::sync::atomic::{AtomicU8, Ordering};
@@ -72,7 +79,7 @@ use crate::hash::{BitHash, BitXof, Hash, Xof, XofReader};
 use crate::{BlockType, Error};
 
 /// The six functions, as markers the sponge is generic over.
-pub mod variant {
+pub(crate) mod variant {
     use super::engine::{DigestVariant, Sealed, Variant, XofVariant};
 
     /// Defines a marker with its rate and suffix.
@@ -133,19 +140,6 @@ pub mod variant {
     impl XofVariant for Shake128 {}
     impl XofVariant for Shake256 {}
 }
-
-/// SHA3-224 using the best implementation the processor supports.
-pub type Sha3_224 = Auto<variant::Sha3_224>;
-/// SHA3-256 using the best implementation the processor supports.
-pub type Sha3_256 = Auto<variant::Sha3_256>;
-/// SHA3-384 using the best implementation the processor supports.
-pub type Sha3_384 = Auto<variant::Sha3_384>;
-/// SHA3-512 using the best implementation the processor supports.
-pub type Sha3_512 = Auto<variant::Sha3_512>;
-/// SHAKE128 using the best implementation the processor supports.
-pub type Shake128 = Auto<variant::Shake128>;
-/// SHAKE256 using the best implementation the processor supports.
-pub type Shake256 = Auto<variant::Shake256>;
 
 /// The implementation the processor gets, chosen once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,7 +204,7 @@ macro_rules! dispatch {
 /// The processor is probed the first time; every later call reads
 /// the cached answer.
 #[derive(Clone)]
-pub struct Auto<V: engine::Variant>(Inner<V>);
+pub(crate) struct Auto<V: engine::Variant>(Inner<V>);
 
 #[derive(Clone)]
 enum Inner<V: engine::Variant> {
@@ -292,7 +286,7 @@ impl<V: DigestVariant> BitHash for Auto<V> {
 
 /// The output of a SHAKE function from [`Auto`].
 #[derive(Clone, Debug)]
-pub struct AutoReader<V: XofVariant>(InnerReader<V>);
+pub(crate) struct AutoReader<V: XofVariant>(InnerReader<V>);
 
 #[derive(Clone, Debug)]
 enum InnerReader<V: XofVariant> {
@@ -635,3 +629,188 @@ pub(crate) mod tests {
         assert!(text.contains("used: 6"));
     }
 }
+
+/// Defines one of the four public digests over the sponge.
+macro_rules! digest {
+    ($(#[$doc:meta])* $name:ident, $variant:ident, $rate:literal,
+     $out:literal) => {
+        $(#[$doc])*
+        #[derive(Clone, Default)]
+        pub struct $name(Auto<variant::$variant>);
+
+        impl $name {
+            /// Starts a hash with the best implementation the
+            /// processor supports.
+            ///
+            /// The processor is probed the first time; every later
+            /// call reads the cached answer.
+            pub fn new() -> Self {
+                $name(Auto::new())
+            }
+        }
+
+        impl fmt::Debug for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+
+        impl BlockType for $name {
+            type Block = [u8; $rate];
+
+            fn zero_block() -> Self::Block {
+                [0; $rate]
+            }
+        }
+
+        impl Hash for $name {
+            type Output = [u8; $out];
+
+            fn try_new() -> Result<Self, Error> {
+                Ok(Self::new())
+            }
+
+            fn reset(&mut self) {
+                Hash::reset(&mut self.0)
+            }
+
+            #[inline]
+            fn update(&mut self, data: &[u8]) {
+                Hash::update(&mut self.0, data)
+            }
+
+            fn finalize(&mut self) -> Self::Output {
+                self.0.finalize()
+            }
+        }
+
+        impl BitHash for $name {
+            fn finalize_bits(
+                &mut self,
+                last: u8,
+                bits: u32,
+            ) -> Result<Self::Output, Error> {
+                self.0.finalize_bits(last, bits)
+            }
+        }
+    };
+}
+
+/// Defines one of the two public SHAKE functions and its reader.
+macro_rules! shake {
+    ($(#[$doc:meta])* $name:ident, $reader:ident, $variant:ident,
+     $rate:literal) => {
+        $(#[$doc])*
+        #[derive(Clone, Default)]
+        pub struct $name(Auto<variant::$variant>);
+
+        #[doc = concat!("The output stream of [`", stringify!($name), "`].")]
+        #[derive(Clone, Debug)]
+        pub struct $reader(AutoReader<variant::$variant>);
+
+        impl $name {
+            /// Starts a function with the best implementation the
+            /// processor supports.
+            ///
+            /// The processor is probed the first time; every later
+            /// call reads the cached answer.
+            pub fn new() -> Self {
+                $name(Auto::new())
+            }
+        }
+
+        impl fmt::Debug for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+
+        impl BlockType for $name {
+            type Block = [u8; $rate];
+
+            fn zero_block() -> Self::Block {
+                [0; $rate]
+            }
+        }
+
+        impl XofReader for $reader {
+            fn squeeze(&mut self, out: &mut [u8]) {
+                self.0.squeeze(out)
+            }
+        }
+
+        impl Xof for $name {
+            type Reader = $reader;
+
+            fn try_new() -> Result<Self, Error> {
+                Ok(Self::new())
+            }
+
+            fn reset(&mut self) {
+                Xof::reset(&mut self.0)
+            }
+
+            #[inline]
+            fn update(&mut self, data: &[u8]) {
+                Xof::update(&mut self.0, data)
+            }
+
+            fn finalize_xof(&mut self) -> Self::Reader {
+                $reader(self.0.finalize_xof())
+            }
+        }
+
+        impl BitXof for $name {
+            fn finalize_bits_xof(
+                &mut self,
+                last: u8,
+                bits: u32,
+            ) -> Result<Self::Reader, Error> {
+                Ok($reader(self.0.finalize_bits_xof(last, bits)?))
+            }
+        }
+    };
+}
+
+digest!(
+    /// SHA3-224.
+    Sha3_224,
+    Sha3_224,
+    144,
+    28
+);
+digest!(
+    /// SHA3-256.
+    Sha3_256,
+    Sha3_256,
+    136,
+    32
+);
+digest!(
+    /// SHA3-384.
+    Sha3_384,
+    Sha3_384,
+    104,
+    48
+);
+digest!(
+    /// SHA3-512.
+    Sha3_512,
+    Sha3_512,
+    72,
+    64
+);
+shake!(
+    /// SHAKE128, output of any length at the 128-bit security level.
+    Shake128,
+    Shake128Reader,
+    Shake128,
+    168
+);
+shake!(
+    /// SHAKE256, output of any length at the 256-bit security level.
+    Shake256,
+    Shake256Reader,
+    Shake256,
+    136
+);

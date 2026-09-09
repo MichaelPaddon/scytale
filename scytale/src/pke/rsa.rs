@@ -79,10 +79,10 @@
 use zeroize::Zeroize;
 
 use crate::Error;
+use crate::Random;
 use crate::hash::Hash;
 use crate::math::rsa::{Private, Public, mgf1_xor};
 use crate::math::uint::Uint;
-use crate::random::Random;
 
 /// An RSA encryption key of `LIMBS` 64-bit words; `BYTES` is the
 /// same width in bytes, 8 times `LIMBS`, and is the length of every

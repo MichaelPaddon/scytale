@@ -8,6 +8,14 @@
 //! that were designed to be used together, with no block cipher
 //! underneath.
 //!
+//! A mode is built from the key its cipher runs under, and names
+//! that cipher as its type parameter: `Gcm::<Aes128>::new(&key)`.
+//! Handing it a key rather than a built cipher is what lets it
+//! decide, once, how to do the work: for a cipher and a processor it
+//! has a hand-written implementation of the pair for, that; for
+//! anything else, the construction over the cipher's own
+//! `encrypt`.
+//!
 //! # Which mode
 //!
 //! | Need | Mode |
@@ -73,7 +81,7 @@ pub use ctr::Ctr;
 pub use ff1::Ff1;
 pub use ff3_1::Ff3_1;
 pub use gcm::Gcm;
-pub use gcm_siv::GcmSiv;
+pub use gcm_siv::{GcmSiv, SivKey};
 pub use kw::Kw;
 pub use kwp::Kwp;
 pub use nonce::Nonces;
