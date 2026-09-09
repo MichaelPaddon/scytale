@@ -98,6 +98,13 @@ impl<const K: usize> Aes<K> {
     }
 }
 
+impl<const K: usize> super::Keyed for Aes<K> {
+    /// Always: this implementation exists only where they do.
+    fn schedule(&self) -> Option<super::Schedule<'_>> {
+        Some(super::Schedule::new(&self.keys))
+    }
+}
+
 impl<const K: usize> BlockType for Aes<K> {
     type Block = [u8; BLOCK_SIZE];
 
@@ -132,53 +139,72 @@ impl<const K: usize> Aes<K> {
         order: ByteOrder,
         data: &mut [u8],
     ) {
-        debug_assert_eq!(data.len() % BLOCK_SIZE, 0);
-        let shuffle = shuffle_for(order);
-        let rk = self.keys.enc.as_ptr();
-        let rounds = self.keys.size.rounds();
-        let mut data = data;
+        xor_counter_blocks_of(
+            super::Schedule::new(&self.keys),
+            counter,
+            order,
+            data,
+        )
+    }
+}
 
-        let groups = data.len() / (GROUP * BLOCK_SIZE);
-        if groups > 0 {
-            let (whole, rest) = data.split_at_mut(groups * GROUP * BLOCK_SIZE);
-            // SAFETY: the struct only exists if try_new confirmed
-            // AES-NI; `whole` is `groups` whole groups, at least one.
-            // The loop leaves `counter` on the block after the last.
-            unsafe {
-                counter_groups(
-                    rk,
-                    rounds,
-                    counter.as_mut_ptr(),
-                    whole.as_mut_ptr(),
-                    groups,
-                    shuffle,
-                );
-            }
-            data = rest;
-        }
+/// Counter mode's inner loop given only the expanded key.
+///
+/// The same work as [`Aes::xor_counter_blocks`], for code that holds
+/// a key schedule rather than a cipher: the mode that runs this and
+/// GHASH together has one of those and no cipher to ask.
+pub(crate) fn xor_counter_blocks_of(
+    schedule: super::Schedule<'_>,
+    counter: &mut [u8; BLOCK_SIZE],
+    order: ByteOrder,
+    data: &mut [u8],
+) {
+    debug_assert_eq!(data.len() % BLOCK_SIZE, 0);
+    let shuffle = shuffle_for(order);
+    let rk = schedule.keys();
+    let rounds = schedule.rounds();
+    let mut data = data;
 
-        // At most seven blocks are left, each width with a body of
-        // its own so that a short message costs one pass, not a group.
-        if !data.is_empty() {
-            let blocks = data.len() / BLOCK_SIZE;
-            // SAFETY: as above, and `blocks` is 1 to 7, which indexes
-            // the table, with `data` exactly that many blocks.
-            unsafe {
-                TAILS[blocks - 1](
-                    rk,
-                    rounds,
-                    counter.as_ptr(),
-                    data.as_mut_ptr(),
-                    shuffle,
-                );
-            }
-            add_counter(counter, order, blocks as u32);
+    let groups = data.len() / (GROUP * BLOCK_SIZE);
+    if groups > 0 {
+        let (whole, rest) = data.split_at_mut(groups * GROUP * BLOCK_SIZE);
+        // SAFETY: a schedule exists only where AES-NI does; `whole`
+        // is `groups` whole groups, at least one. The loop leaves
+        // `counter` on the block after the last.
+        unsafe {
+            counter_groups(
+                rk,
+                rounds,
+                counter.as_mut_ptr(),
+                whole.as_mut_ptr(),
+                groups,
+                shuffle,
+            );
         }
+        data = rest;
+    }
+
+    // At most seven blocks are left, each width with a body of
+    // its own so that a short message costs one pass, not a group.
+    if !data.is_empty() {
+        let blocks = data.len() / BLOCK_SIZE;
+        // SAFETY: as above, and `blocks` is 1 to 7, which indexes
+        // the table, with `data` exactly that many blocks.
+        unsafe {
+            TAILS[blocks - 1](
+                rk,
+                rounds,
+                counter.as_ptr(),
+                data.as_mut_ptr(),
+                shuffle,
+            );
+        }
+        add_counter(counter, order, blocks as u32);
     }
 }
 
 /// Blocks the counter loop puts through the cipher at once.
-const GROUP: usize = 8;
+pub(super) const GROUP: usize = 8;
 
 /// Constants the counter loop reads, at the width it loads them.
 #[repr(align(16))]
@@ -209,19 +235,18 @@ fn shuffle_for(order: ByteOrder) -> *const u8 {
     }
 }
 
-/// What each register adds to the base counter to make its block.
-static OFFSETS: Words<{ 4 * GROUP }> = {
-    let mut w = [0u32; 4 * GROUP];
+/// What each register adds to the base counter to make its block,
+/// and after those, in the ninth place, what the base itself moves on
+/// by once a group is made: one group's worth.
+static OFFSETS: Words<{ 4 * (GROUP + 1) }> = {
+    let mut w = [0u32; 4 * (GROUP + 1)];
     let mut i = 0;
-    while i < GROUP {
+    while i <= GROUP {
         w[4 * i] = i as u32;
         i += 1;
     }
     Words(w)
 };
-
-/// One group's worth, added to the base after each pass.
-static ADVANCE: Words<4> = Words([GROUP as u32, 0, 0, 0]);
 
 impl<const K: usize> BlockCipher for Aes<K> {
     fn new(key: &Self::Key) -> Self {
@@ -456,7 +481,6 @@ unsafe fn counter_groups(
     unsafe {
         core::arch::asm!(
             "movdqa xmm10, [{shuffle}]",
-            "movdqa xmm11, [{advance}]",
             // The base counter, byte-reversed so the field adds.
             "movdqu xmm9, [{counter}]",
             "pshufb xmm9, xmm10",
@@ -479,7 +503,7 @@ unsafe fn counter_groups(
             "paddd xmm5, [{offs} + 80]",
             "paddd xmm6, [{offs} + 96]",
             "paddd xmm7, [{offs} + 112]",
-            "paddd xmm9, xmm11",
+            "paddd xmm9, [{offs} + 128]",
             "pshufb xmm0, xmm10",
             "pshufb xmm1, xmm10",
             "pshufb xmm2, xmm10",
@@ -562,13 +586,11 @@ unsafe fn counter_groups(
             groups = inout(reg) groups => _,
             offs = in(reg) OFFSETS.0.as_ptr(),
             shuffle = in(reg) shuffle,
-            advance = in(reg) ADVANCE.0.as_ptr(),
             k = out(reg) _,
             n = out(reg) _,
             out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
             out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
-            out("xmm8") _, out("xmm9") _, out("xmm10") _, out("xmm11") _,
-            out("xmm12") _,
+            out("xmm8") _, out("xmm9") _, out("xmm10") _, out("xmm12") _,
             options(nostack),
         );
     }

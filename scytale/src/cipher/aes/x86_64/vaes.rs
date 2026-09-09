@@ -184,6 +184,13 @@ impl<const K: usize> Aes<K> {
 /// 256-bit registers, two blocks in each.
 const GROUP: usize = 16;
 
+impl<const K: usize> super::Keyed for Aes<K> {
+    /// Always: this implementation exists only where they do.
+    fn schedule(&self) -> Option<super::Schedule<'_>> {
+        Some(super::Schedule::new(&self.keys))
+    }
+}
+
 impl<const K: usize> BlockType for Aes<K> {
     type Block = [u8; BLOCK_SIZE];
 

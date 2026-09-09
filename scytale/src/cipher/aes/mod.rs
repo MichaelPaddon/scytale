@@ -309,6 +309,21 @@ impl<const K: usize> Aes<K> {
     }
 }
 
+/// The expanded key as the AES instructions want it, where the
+/// implementation the processor chose is one of theirs, and `None`
+/// for the portable ones, whose key schedules are nothing those
+/// instructions could read.
+#[cfg(target_arch = "x86_64")]
+impl<const K: usize> x86_64::Keyed for Aes<K> {
+    fn schedule(&self) -> Option<x86_64::Schedule<'_>> {
+        match &self.0 {
+            Inner::Vaes(aes) => aes.schedule(),
+            Inner::AesNi(aes) => aes.schedule(),
+            _ => None,
+        }
+    }
+}
+
 impl<const K: usize> BlockType for Aes<K> {
     type Block = [u8; BLOCK_SIZE];
 
@@ -385,6 +400,14 @@ macro_rules! width {
                 f.debug_struct(stringify!($name))
                     .field("rounds", &self.rounds())
                     .finish()
+            }
+        }
+
+        /// The expanded key; see the implementation over [`Aes`].
+        #[cfg(target_arch = "x86_64")]
+        impl x86_64::Keyed for $name {
+            fn schedule(&self) -> Option<x86_64::Schedule<'_>> {
+                x86_64::Keyed::schedule(&self.0)
             }
         }
 

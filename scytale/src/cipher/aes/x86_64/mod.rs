@@ -22,7 +22,7 @@ use super::{KeySize, MAX_WORDS, expand_words};
 /// they are asked for together. A machine with one and not the other
 /// takes the portable path, rather than every call carrying a branch
 /// for hardware that does not exist.
-pub(super) fn has_aesni() -> bool {
+pub(crate) fn has_aesni() -> bool {
     let features = __cpuid(1).ecx;
     features & (1 << 25) != 0 && features & (1 << 9) != 0
 }
@@ -43,6 +43,49 @@ pub(super) fn has_vaes256() -> bool {
     // SAFETY: OSXSAVE was just confirmed, so XGETBV is available.
     let xcr0 = unsafe { _xgetbv(0) };
     avx2 && vaes && xcr0 & 0b110 == 0b110
+}
+
+/// A cipher whose expanded key the AES instructions can read.
+///
+/// Implemented by the implementations that run on them and by the
+/// dispatching types over those, which answer `None` when the
+/// processor sent them to portable code instead. A mode with a loop
+/// of its own over the cipher and something else asks this when it is
+/// built.
+pub(crate) trait Keyed {
+    fn schedule(&self) -> Option<Schedule<'_>>;
+}
+
+/// A borrowed view of an expanded encryption key.
+///
+/// What a loop written straight against the AES instructions needs,
+/// and nothing else: where the round keys are and how many rounds
+/// there are. The lifetime is the cipher's, so such a loop cannot
+/// outlive the key it runs under, and the key itself never leaves the
+/// crate.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Schedule<'a> {
+    keys: &'a [u32; MAX_WORDS],
+    rounds: usize,
+}
+
+impl<'a> Schedule<'a> {
+    fn new(keys: &'a RoundKeys) -> Self {
+        Schedule {
+            keys: &keys.enc,
+            rounds: keys.size.rounds(),
+        }
+    }
+
+    /// The first round key; the rest follow it, sixteen bytes apart.
+    pub(crate) fn keys(&self) -> *const u32 {
+        self.keys.as_ptr()
+    }
+
+    /// Rounds, so `rounds + 1` round keys.
+    pub(crate) fn rounds(&self) -> usize {
+        self.rounds
+    }
 }
 
 /// Expanded encryption and decryption round keys, as words in memory

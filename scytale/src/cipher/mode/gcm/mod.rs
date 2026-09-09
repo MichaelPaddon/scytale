@@ -10,12 +10,22 @@
 //! # Speed
 //!
 //! GHASH, not the cipher, is what makes GCM slower than counter mode
-//! alone. Where the processor has a carry-less multiply instruction
-//! the hash uses it, and hashes whole groups of blocks at once where
-//! it can, which together bring GCM to within a fifth of the speed of
-//! the counter mode underneath it. Without such an instruction the
-//! hash walks 128 bits per block, which leaks nothing but is slow
-//! enough to dominate everything else here.
+//! alone, so what matters is how much of it can be got for nothing.
+//!
+//! Where the processor has both the AES instructions and the
+//! carry-less multiply, this mode is one loop rather than two: the
+//! counter blocks go through the rounds while the multiplications for
+//! the message blocks are issued between them, on a port the cipher
+//! is not using. Which of these the processor has is settled once,
+//! when the mode is built, so no call pays to find out.
+//!
+//! Failing that, the counter loop and the hash run in turn, the hash
+//! still taking whole groups of blocks at once where the architecture
+//! offers a way. Failing even a carry-less multiply, it walks 128
+//! bits per block, which leaks nothing but is slow enough to dominate
+//! everything else here; on such a processor
+//! [`ChaCha20Poly1305`](super::ChaCha20Poly1305) is the faster
+//! choice.
 //!
 //! # Using it safely
 //!
@@ -64,6 +74,9 @@
 //! # }
 //! ```
 
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
+
 use core::fmt;
 
 use super::ghash::{BLOCK, Ghash};
@@ -86,15 +99,164 @@ pub(crate) const SHORT_NONCE: usize = 12;
 /// The tag length, in bytes.
 pub(crate) const TAG: usize = BLOCK;
 
+/// Which way round the hash and the keystream go.
+///
+/// GHASH covers the ciphertext either way; the two directions differ
+/// only in whether that is what arrived or what is about to be
+/// produced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Direction {
+    /// Hash what the keystream produces.
+    Encrypt,
+    /// Hash what arrived, then apply the keystream to it.
+    Decrypt,
+}
+
+/// What the mode keeps for the key: how the bulk work will be done,
+/// and whatever that way of doing it works out once.
+///
+/// Which arm this is is settled when the mode is built, because it is
+/// the processor that decides and the processor does not change. On
+/// one that has the AES instructions and the carry-less multiply,
+/// [`x86_64::Engine`] is a single loop running the cipher and the
+/// hash at once. On any other, the counter loop and the hash are
+/// called in turn, each still as fast as that processor allows on its
+/// own.
+// The first arm is much the larger, since it carries the powers of
+// the subkey for both of the widths it works in; there is no heap to
+// put them on.
+#[allow(clippy::large_enum_variant)]
+enum Engine<C: BlockCipher<Block = [u8; BLOCK]>> {
+    #[cfg(target_arch = "x86_64")]
+    Native(x86_64::Engine<C>),
+    Generic(CounterFn<C>),
+}
+
+/// By hand rather than derived: an engine holds no cipher, only a
+/// pointer to the loop written for one, so it clones whatever `C` is.
+impl<C: BlockCipher<Block = [u8; BLOCK]>> Clone for Engine<C> {
+    fn clone(&self) -> Self {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            Engine::Native(engine) => Engine::Native(engine.clone()),
+            Engine::Generic(blocks) => Engine::Generic(*blocks),
+        }
+    }
+}
+
+impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
+    /// The best engine for this cipher on this processor, under hash
+    /// subkey `h`.
+    fn new(h: &[u8; BLOCK]) -> Self {
+        #[cfg(target_arch = "x86_64")]
+        if let Some(native) = x86_64::Engine::new(h) {
+            return Engine::Native(native);
+        }
+        let _ = h;
+        Engine::Generic(counter_fn::<C>())
+    }
+}
+
+/// What one message keeps: the running hash, and whatever else
+/// changes as the message goes by.
+///
+/// Everything settled by the key it borrows from the engine, so
+/// starting a message copies nothing that the key already worked out.
+enum Hash<'a, C: BlockCipher<Block = [u8; BLOCK]>> {
+    #[cfg(target_arch = "x86_64")]
+    Native(x86_64::Hasher<'a, C>),
+    Generic {
+        blocks: CounterFn<C>,
+        hash: Ghash,
+        /// What the other arm borrows from the engine. On an
+        /// architecture with no such arm nothing is borrowed, and the
+        /// lifetime would otherwise go unused.
+        engine: core::marker::PhantomData<&'a C>,
+    },
+}
+
+impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Hash<'a, C> {
+    /// A hash at the start of a message.
+    fn new(gcm: &'a Gcm<C>) -> Self {
+        match &gcm.engine {
+            #[cfg(target_arch = "x86_64")]
+            Engine::Native(engine) => Hash::Native(x86_64::Hasher::new(engine)),
+            Engine::Generic(blocks) => Hash::Generic {
+                blocks: *blocks,
+                hash: Ghash::new(&gcm.h),
+                engine: core::marker::PhantomData,
+            },
+        }
+    }
+
+    /// Adds more of the current field to the hash.
+    fn hash(&mut self, data: &[u8]) {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            Hash::Native(hasher) => hasher.hash(data),
+            Hash::Generic { hash, .. } => hash.update(data),
+        }
+    }
+
+    /// Ends the current field, padding it with zeros to a block.
+    fn pad(&mut self) {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            Hash::Native(hasher) => hasher.pad(),
+            Hash::Generic { hash, .. } => hash.pad(),
+        }
+    }
+
+    /// The hash so far. Every field must have been padded first.
+    fn finish(&self) -> [u8; BLOCK] {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            Hash::Native(hasher) => hasher.finish(),
+            Hash::Generic { hash, .. } => hash.finish(),
+        }
+    }
+
+    /// The counter over `data`, which is a whole number of blocks,
+    /// and the hash of it.
+    fn bulk(
+        &mut self,
+        cipher: &C,
+        counter: &mut [u8; BLOCK],
+        direction: Direction,
+        data: &mut [u8],
+    ) {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            Hash::Native(hasher) => {
+                hasher.bulk(cipher, counter, direction, data)
+            }
+            Hash::Generic { blocks, hash, .. } => {
+                if direction == Direction::Decrypt {
+                    hash.update(data);
+                }
+                // GCM counts in the last four bytes of the block and
+                // wraps inside them, which is exactly what the
+                // cipher's counter loop does, so there is no boundary
+                // to split the run at.
+                blocks(cipher, counter, ByteOrder::Big, data);
+                if direction == Direction::Encrypt {
+                    hash.update(data);
+                }
+            }
+        }
+    }
+}
+
 /// GCM over a block cipher.
 #[derive(Clone)]
 pub struct Gcm<C: BlockCipher<Block = [u8; BLOCK]>> {
     cipher: C,
     /// The hash subkey, the cipher applied to a block of zeros.
     h: [u8; BLOCK],
-    /// The counter loop this cipher gets, settled when the mode is
-    /// built.
-    counter: CounterFn<C>,
+    /// How the bulk work will be done, settled when the mode is
+    /// built, along with whatever that way of doing it works out once
+    /// for the key.
+    engine: Engine<C>,
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> fmt::Debug for Gcm<C> {
@@ -112,9 +274,9 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
         let mut h = [0u8; BLOCK];
         cipher.encrypt_one(&mut h);
         Gcm {
+            engine: Engine::<C>::new(&h),
             cipher,
             h,
-            counter: counter_fn::<C>(),
         }
     }
 
@@ -162,14 +324,14 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
     /// Starts encrypting a message that arrives in pieces.
     pub fn encryptor(&self, nonce: &[u8]) -> Result<Encryptor<'_, C>, Error> {
         Ok(Encryptor {
-            core: Core::new(&self.cipher, &self.h, self.counter, nonce)?,
+            core: Core::new(self, nonce)?,
         })
     }
 
     /// Starts decrypting a message that arrives in pieces.
     pub fn decryptor(&self, nonce: &[u8]) -> Result<Decryptor<'_, C>, Error> {
         Ok(Decryptor {
-            core: Core::new(&self.cipher, &self.h, self.counter, nonce)?,
+            core: Core::new(self, nonce)?,
         })
     }
 }
@@ -180,7 +342,10 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
 /// counter field. Any other length is hashed down to a block, which
 /// is why that case costs more. An empty nonce is refused: the
 /// standard allows it, and it makes every message share a counter.
-fn counter_start(h: &[u8; BLOCK], nonce: &[u8]) -> Result<[u8; BLOCK], Error> {
+fn counter_start<C: BlockCipher<Block = [u8; BLOCK]>>(
+    gcm: &Gcm<C>,
+    nonce: &[u8],
+) -> Result<[u8; BLOCK], Error> {
     if nonce.is_empty() {
         return Err(Error::InvalidNonceLength(0));
     }
@@ -190,15 +355,15 @@ fn counter_start(h: &[u8; BLOCK], nonce: &[u8]) -> Result<[u8; BLOCK], Error> {
         start[BLOCK - 1] = 1;
         return Ok(start);
     }
-    let mut hash = Ghash::new(h);
-    hash.update(nonce);
+    let mut hash = Hash::new(gcm);
+    hash.hash(nonce);
     hash.pad();
     let bits = (nonce.len() as u64)
         .checked_mul(8)
         .ok_or(Error::MessageTooLong)?;
     let mut lengths = [0u8; BLOCK];
     lengths[8..].copy_from_slice(&bits.to_be_bytes());
-    hash.update(&lengths);
+    hash.hash(&lengths);
     Ok(hash.finish())
 }
 
@@ -218,9 +383,8 @@ fn increment32(counter: &mut [u8; BLOCK]) {
 /// that go into the tag.
 struct Core<'a, C: BlockCipher<Block = [u8; BLOCK]>> {
     cipher: &'a C,
-    /// The counter loop chosen when the mode was built.
-    blocks: CounterFn<C>,
-    hash: Ghash,
+    /// The hash and the bulk loop, for this message.
+    engine: Hash<'a, C>,
     counter: [u8; BLOCK],
     /// The keystream block a previous piece ended inside.
     keystream: [u8; BLOCK],
@@ -247,21 +411,16 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Core<'_, C> {
 }
 
 impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
-    fn new(
-        cipher: &'a C,
-        h: &[u8; BLOCK],
-        blocks: CounterFn<C>,
-        nonce: &[u8],
-    ) -> Result<Self, Error> {
-        let start = counter_start(h, nonce)?;
+    fn new(gcm: &'a Gcm<C>, nonce: &[u8]) -> Result<Self, Error> {
+        let cipher = &gcm.cipher;
+        let start = counter_start(gcm, nonce)?;
         let mut mask = start;
         cipher.encrypt_one(&mut mask);
         let mut counter = start;
         increment32(&mut counter);
         Ok(Core {
             cipher,
-            blocks,
-            hash: Ghash::new(h),
+            engine: Hash::new(gcm),
             counter,
             keystream: [0; BLOCK],
             used: BLOCK,
@@ -282,14 +441,14 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
             .and_then(|b| self.aad_bits.checked_add(b))
             .ok_or(Error::MessageTooLong)?;
         self.aad_bits = bits;
-        self.hash.update(data);
+        self.engine.hash(data);
         Ok(())
     }
 
     /// Ends the additional data and counts the message.
     fn begin(&mut self, len: usize) -> Result<(), Error> {
         if !self.started {
-            self.hash.pad();
+            self.engine.pad();
             self.started = true;
         }
         let total = (len as u64)
@@ -302,26 +461,38 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
         Ok(())
     }
 
-    /// Applies the counter-mode keystream to `data`.
-    fn apply(&mut self, mut data: &mut [u8]) -> Result<(), Error> {
-        // Finish the block a previous piece stopped inside.
+    /// Applies the counter-mode keystream to `data` and hashes the
+    /// ciphertext.
+    ///
+    /// Both are done here rather than by the caller because on a
+    /// processor that has an engine for the pair they are one loop
+    /// and not two; see [`Engine`].
+    fn apply(
+        &mut self,
+        mut data: &mut [u8],
+        direction: Direction,
+    ) -> Result<(), Error> {
+        // Finish the block a previous piece stopped inside. The bulk
+        // loop starts on a block boundary, so this comes first.
         if self.used < BLOCK {
             let take = data.len().min(BLOCK - self.used);
             let (now, rest) = data.split_at_mut(take);
+            if direction == Direction::Decrypt {
+                self.engine.hash(now);
+            }
             xor(now, &self.keystream[self.used..self.used + take]);
+            if direction == Direction::Encrypt {
+                self.engine.hash(now);
+            }
             self.used += take;
             data = rest;
         }
 
-        // Whole blocks, in one run: GCM counts in the last four
-        // bytes of the block and wraps inside them, which is exactly
-        // what the cipher's counter loop does, so there is no
-        // boundary to split at.
         let (whole, tail) = data.as_chunks_mut::<BLOCK>();
-        (self.blocks)(
+        self.engine.bulk(
             self.cipher,
             &mut self.counter,
-            ByteOrder::Big,
+            direction,
             whole.as_flattened_mut(),
         );
 
@@ -329,7 +500,13 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
             self.keystream = self.counter;
             increment32(&mut self.counter);
             self.cipher.encrypt_one(&mut self.keystream);
+            if direction == Direction::Decrypt {
+                self.engine.hash(tail);
+            }
             xor(tail, &self.keystream);
+            if direction == Direction::Encrypt {
+                self.engine.hash(tail);
+            }
             self.used = tail.len();
         }
         Ok(())
@@ -338,10 +515,10 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
     /// The full-length tag.
     fn tag(&mut self) -> Result<[u8; BLOCK], Error> {
         if !self.started {
-            self.hash.pad();
+            self.engine.pad();
             self.started = true;
         }
-        self.hash.pad();
+        self.engine.pad();
 
         let mut lengths = [0u8; BLOCK];
         lengths[..8].copy_from_slice(&self.aad_bits.to_be_bytes());
@@ -350,9 +527,9 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
             .checked_mul(8)
             .ok_or(Error::MessageTooLong)?;
         lengths[8..].copy_from_slice(&message_bits.to_be_bytes());
-        self.hash.update(&lengths);
+        self.engine.hash(&lengths);
 
-        let mut tag = self.hash.finish();
+        let mut tag = self.engine.finish();
         xor(&mut tag, &self.mask);
         Ok(tag)
     }
@@ -384,9 +561,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Encryptor<'_, C> {
     /// Encrypts the next piece of the message in place.
     pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
         self.core.begin(data.len())?;
-        self.core.apply(data)?;
-        self.core.hash.update(data);
-        Ok(())
+        self.core.apply(data, Direction::Encrypt)
     }
 
     /// Finishes, returning the tag. A protocol that carries a shorter
@@ -428,9 +603,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Decryptor<'_, C> {
     /// plaintext that is not yet authenticated.
     pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
         self.core.begin(data.len())?;
-        // Hash the ciphertext before it is overwritten.
-        self.core.hash.update(data);
-        self.core.apply(data)
+        self.core.apply(data, Direction::Decrypt)
     }
 
     /// Checks `tag`, in time that depends on nothing secret.
@@ -468,9 +641,11 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Decryptor<'_, C> {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
     use crate::Key;
-    use crate::cipher::aes::{Aes, Aes128};
+    use crate::cipher::aes::{Aes, Aes128, portable};
 
     /// Buffers big enough for every case below.
     const MAX: usize = 64;
@@ -778,6 +953,118 @@ mod tests {
         }
         assert_eq!(e.finalize().unwrap(), tag, "encrypt tag, byte at a time");
         assert_eq!(pieces, whole, "encrypt, byte at a time");
+    }
+
+    /// The engine that runs the cipher and the hash together must
+    /// agree with the two run in turn, at every length around the
+    /// group boundaries it works in and with the pieces landing
+    /// anywhere.
+    ///
+    /// The other side of the comparison is GCM over the portable
+    /// cipher, whose key schedule the AES instructions cannot read,
+    /// so it always gets the generic engine. AES is AES, so the two
+    /// must produce the same ciphertext and the same tag.
+    #[test]
+    fn the_engines_agree() {
+        const MAX: usize = 9 * 16 * BLOCK + 3;
+        let key = [0x9du8; 16];
+        let native = Gcm::<Aes128>::new(&Key::from(key));
+        let generic = Gcm::<portable::bitsliced::Aes<16>>::new(&Key::from(key));
+        let nonce = [0x33u8; 12];
+        let aad = [0x77u8; 21];
+
+        let mut message = [0u8; MAX];
+        for (i, b) in message.iter_mut().enumerate() {
+            *b = (i * 5 + 1) as u8;
+        }
+
+        // Every length either side of the first few group boundaries,
+        // then a spread of longer ones.
+        // Either side of both group widths, and well past both.
+        let edges = [
+            255, 256, 257, 383, 384, 385, 511, 512, 513, 639, 640, 641, 767,
+            768, 1024, 1279, 1280, 2047, MAX,
+        ];
+        for len in (0..300).chain(edges) {
+            let (mut a, mut b) = ([0u8; MAX], [0u8; MAX]);
+            a[..len].copy_from_slice(&message[..len]);
+            b[..len].copy_from_slice(&message[..len]);
+            let (mut ta, mut tb) = ([0u8; TAG], [0u8; TAG]);
+            native
+                .encrypt(&nonce, &aad, &mut a[..len], &mut ta)
+                .unwrap();
+            generic
+                .encrypt(&nonce, &aad, &mut b[..len], &mut tb)
+                .unwrap();
+            assert_eq!(a[..len], b[..len], "ciphertext, {len} bytes");
+            assert_eq!(ta, tb, "tag, {len} bytes");
+
+            native.decrypt(&nonce, &aad, &mut a[..len], &ta).unwrap();
+            assert_eq!(a[..len], message[..len], "plaintext, {len} bytes");
+
+            // The same message in pieces, which leaves the hash and
+            // the keystream part way through a block, where the bulk
+            // loop cannot start and has to give way.
+            for piece in [1, 17, 128, 129] {
+                let mut c = [0u8; MAX];
+                c[..len].copy_from_slice(&message[..len]);
+                let mut e = native.encryptor(&nonce).unwrap();
+                e.aad(&aad).unwrap();
+                for part in c[..len].chunks_mut(piece) {
+                    e.update(part).unwrap();
+                }
+                assert_eq!(e.finalize().unwrap(), tb, "tag, {len} in {piece}");
+                assert_eq!(c[..len], b[..len], "{len} bytes in {piece}");
+
+                let mut d = native.decryptor(&nonce).unwrap();
+                d.aad(&aad).unwrap();
+                for part in c[..len].chunks_mut(piece) {
+                    d.update(part).unwrap();
+                }
+                d.verify(&tb).unwrap();
+                assert_eq!(c[..len], message[..len], "{len} in {piece}");
+            }
+        }
+    }
+
+    /// A nonce that is not ninety-six bits is hashed down to a
+    /// counter block, which the engine does with its own hash. Both
+    /// engines must reach the same block.
+    #[test]
+    fn the_engines_agree_on_a_long_nonce() {
+        let key = [0x11u8; 16];
+        let native = Gcm::<Aes128>::new(&Key::from(key));
+        let generic = Gcm::<portable::bitsliced::Aes<16>>::new(&Key::from(key));
+        for len in [1, 8, 15, 16, 17, 128, 129] {
+            let nonce = std::vec![0xa5u8; len];
+            let mut a = [7u8; 40];
+            let mut b = a;
+            let (mut ta, mut tb) = ([0u8; TAG], [0u8; TAG]);
+            native.encrypt(&nonce, b"x", &mut a, &mut ta).unwrap();
+            generic.encrypt(&nonce, b"x", &mut b, &mut tb).unwrap();
+            assert_eq!(a, b, "{len}-byte nonce");
+            assert_eq!(ta, tb, "{len}-byte nonce tag");
+        }
+    }
+
+    /// The engine written for the pair is not merely present but
+    /// chosen: on a processor that has one, our own AES must get it.
+    #[test]
+    fn the_native_engine_is_chosen_where_there_is_one() {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if !x86_64::supported() {
+                // Nothing to check on a processor without them.
+                return;
+            }
+            let gcm = Gcm::<Aes128>::new(&Key::from([0u8; 16]));
+            assert!(matches!(gcm.engine, Engine::Native(_)));
+            // And the portable cipher, whose schedule those
+            // instructions cannot read, does not.
+            let other =
+                Gcm::<portable::bitsliced::Aes<16>>::new(&Key::from([0u8; 16]));
+            assert!(matches!(other.engine, Engine::Generic { .. }));
+        }
     }
 
     #[test]
