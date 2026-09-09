@@ -2,8 +2,10 @@
 //!
 //! Each of these is a source of raw material, not a source of random
 //! bytes: what they hand back is conditioned by the generator above
-//! them before any of it reaches a caller. That is why they implement
-//! [`Entropy`] and not [`Random`](crate::Random).
+//! them before any of it reaches a caller. That is why they
+//! implement [`Entropy`] and not
+//! [`Random`](crate::Random), and why they are named from here
+//! rather than from the module above.
 //!
 //! | Source | What it asks |
 //! | --- | --- |
@@ -11,23 +13,31 @@
 //! | [`Processor`] | the processor's own generator, health tested |
 //! | [`External`] | nothing at all; the caller supplies everything |
 //!
+//! A board with a generator of its own implements
+//! [`Entropy`] over it and is served as well
+//! as a machine with an instruction for it.
+//!
 //! # Example
 //!
 //! ```
 //! use scytale::Random;
-//! use scytale::random::{External, Rng, System};
+//! use scytale::random::{CtrDrbg, entropy};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! // The usual case: let the system feed the generator.
-//! let mut rng = Rng::try_new(System::try_new()?)?;
+//! let mut rng = CtrDrbg::from_system()?;
 //! let mut key = [0u8; 32];
 //! rng.fill(&mut key)?;
+//!
+//! // The processor's own generator, asked for by name.
+//! let mut own = CtrDrbg::try_new(entropy::Processor::try_new()?)?;
+//! own.fill(&mut key)?;
 //!
 //! // Material gathered some other way, for a bare board or a test.
 //! // It must be full entropy over its whole length, and at least
 //! // `MIN_SEED` bytes of it.
 //! let seed = [0x5au8; scytale::random::MIN_SEED];
-//! let mut fixed = Rng::<External>::from_seed(&seed)?;
+//! let mut fixed = CtrDrbg::<entropy::External>::from_seed(&seed)?;
 //! fixed.fill(&mut key)?;
 //! # Ok(())
 //! # }
@@ -182,7 +192,7 @@ type Inner = Processor;
 /// never quietly carries on, and it never invents anything.
 ///
 /// This is what a generator seeded by
-/// [`Rng::from_seed`](crate::random::Rng::from_seed) holds.
+/// [`CtrDrbg::from_seed`](crate::random::CtrDrbg::from_seed) holds.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct External;
 

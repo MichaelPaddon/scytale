@@ -88,7 +88,7 @@ pub trait KeyType {
 
 /// A source of random bytes fit to use.
 ///
-/// [`Rng`](crate::random::Rng) is the one that matters. The trait
+/// [`CtrDrbg`](crate::random::CtrDrbg) is the one that matters. The trait
 /// exists so that work which consumes randomness can be handed a
 /// fixed sequence instead and tested for an exact answer, and so
 /// that a caller with a generator of their own can bring it.

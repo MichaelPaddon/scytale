@@ -18,10 +18,10 @@
 //! use scytale::kdf::hkdf;
 //! use scytale::kex::x25519;
 //! use scytale::Random;
-//! use scytale::random::{Rng, System};
+//! use scytale::random::CtrDrbg;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = Rng::try_new(System::try_new()?)?;
+//! let mut rng = CtrDrbg::from_system()?;
 //!
 //! // Each party publishes one value and keeps one.
 //! let mut alice = [0u8; x25519::KEY_SIZE];

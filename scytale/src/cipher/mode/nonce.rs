@@ -38,14 +38,14 @@
 //!
 //! ```
 //! use scytale::Key;
-//! use scytale::random::{Rng, System};
+//! use scytale::random::CtrDrbg;
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::{Gcm, Nonces};
 //! use scytale::cipher::BlockCipher;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let gcm = Gcm::<Aes128>::new(&Key::from([0u8; 16]));
-//! let mut rng = Rng::try_new(System::try_new()?)?;
+//! let mut rng = CtrDrbg::from_system()?;
 //! let mut nonces = Nonces::random(&mut rng)?;
 //!
 //! let mut message = *b"hello";
@@ -132,7 +132,7 @@ impl Nonces {
 mod tests {
     use super::*;
 
-    use crate::random::{MIN_SEED, Rng};
+    use crate::random::{CtrDrbg, MIN_SEED};
 
     /// The layout the standard describes: the prefix unchanged in
     /// every nonce, the counter advancing by one, most significant
@@ -188,7 +188,7 @@ mod tests {
     /// overlap, which rests entirely on the prefix differing.
     #[test]
     fn separate_runs_get_separate_prefixes() {
-        let mut rng = Rng::from_seed(&[0x5au8; MIN_SEED]).expect("seed");
+        let mut rng = CtrDrbg::from_seed(&[0x5au8; MIN_SEED]).expect("seed");
         let one = Nonces::random(&mut rng).expect("random");
         let two = Nonces::random(&mut rng).expect("random");
         assert_ne!(one.prefix, two.prefix);

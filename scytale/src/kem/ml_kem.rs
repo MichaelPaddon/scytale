@@ -27,10 +27,10 @@
 //!
 //! ```
 //! use scytale::kem::ml_kem::ml_kem_768::{PrivateKey, PublicKey};
-//! use scytale::random::{Rng, System};
+//! use scytale::random::CtrDrbg;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = Rng::try_new(System::try_new()?)?;
+//! let mut rng = CtrDrbg::from_system()?;
 //! let key = PrivateKey::generate(&mut rng)?;
 //!
 //! // The sender has only the public key, and makes a ciphertext
@@ -1039,10 +1039,7 @@ mod tests {
         macro_rules! check {
             ($module:ident) => {{
                 use $module::*;
-                let mut rng = crate::random::Rng::try_new(
-                    crate::random::System::try_new().unwrap(),
-                )
-                .unwrap();
+                let mut rng = crate::random::CtrDrbg::from_system().unwrap();
                 let key = PrivateKey::generate(&mut rng).unwrap();
                 let (c, k) = key.public_key().encapsulate(&mut rng).unwrap();
                 assert_eq!(key.decapsulate(&c), k);
@@ -1109,10 +1106,7 @@ mod tests {
     /// A key of one set is not a key of another, in either format.
     #[test]
     fn sets_do_not_mix() {
-        let mut rng = crate::random::Rng::try_new(
-            crate::random::System::try_new().unwrap(),
-        )
-        .unwrap();
+        let mut rng = crate::random::CtrDrbg::from_system().unwrap();
         let key = ml_kem_512::PrivateKey::generate(&mut rng).unwrap();
         let mut out = [0u8; 2048];
         let n = key.der_bytes(&mut out).unwrap();

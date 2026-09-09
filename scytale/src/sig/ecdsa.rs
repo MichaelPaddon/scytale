@@ -32,11 +32,11 @@
 //!
 //! ```
 //! use scytale::hash::sha2::Sha256;
-//! use scytale::random::{Rng, System};
+//! use scytale::random::CtrDrbg;
 //! use scytale::sig::ecdsa::p256::{PrivateKey, PublicKey};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = Rng::try_new(System::try_new()?)?;
+//! let mut rng = CtrDrbg::from_system()?;
 //! let key = PrivateKey::generate(&mut rng)?;
 //! let signature = key.sign::<Sha256>(b"the message")?;
 //!
@@ -304,10 +304,7 @@ mod tests {
     /// deterministically.
     #[test]
     fn round_trips() {
-        let mut rng = crate::random::Rng::try_new(
-            crate::random::System::try_new().unwrap(),
-        )
-        .unwrap();
+        let mut rng = crate::random::CtrDrbg::from_system().unwrap();
         let key = p384::PrivateKey::generate(&mut rng).unwrap();
         let again = p384::PrivateKey::try_new(&key.secret_bytes()).unwrap();
         assert_eq!(

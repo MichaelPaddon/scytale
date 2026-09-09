@@ -1,4 +1,4 @@
-//! ctrDRBG 1.0, run through [`Rng`].
+//! ctrDRBG 1.0, run through [`CtrDrbg`].
 //!
 //! The generator is not generic over a block cipher the way the modes
 //! are: it is AES-256 and nothing else, so there is one run of this
@@ -16,7 +16,7 @@
 //!   so that entropy of any length and any density can be accepted.
 //! - **Generating with additional input.** There is no way to pass
 //!   additional input to a request: fresh material goes in through
-//!   [`Rng::reseed_from`], which is the stronger of the two.
+//!   [`CtrDrbg::reseed_from`], which is the stronger of the two.
 //! - **With prediction resistance.** This is the one that runs. Every
 //!   request is preceded by a reseeding from fresh entropy and the
 //!   additional input, which is exactly `reseed_from` followed by
@@ -32,7 +32,7 @@ use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
 use super::{hex, load};
 use crate::Random;
-use crate::random::Rng;
+use crate::random::CtrDrbg;
 use serde_json::Value;
 
 const FILE: &str = "ctrDRBG-1.0/internalProjection.json";
@@ -86,7 +86,7 @@ fn aft(group: &Value) -> usize {
         let mut material = hex(&t["entropyInput"]);
         material.extend(hex(&t["nonce"]));
         material.extend(hex(&t["persoString"]));
-        let mut rng = Rng::from_seed(&material).expect("instantiate");
+        let mut rng = CtrDrbg::from_seed(&material).expect("instantiate");
 
         let mut out = vec![0u8; bits as usize / 8];
         for other in t["otherInput"].as_array().expect("otherInput") {

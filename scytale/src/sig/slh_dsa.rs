@@ -28,11 +28,11 @@
 //! offered.
 //!
 //! ```
-//! use scytale::random::{Rng, System};
+//! use scytale::random::CtrDrbg;
 //! use scytale::sig::slh_dsa::shake_128f::{PrivateKey, PublicKey};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = Rng::try_new(System::try_new()?)?;
+//! let mut rng = CtrDrbg::from_system()?;
 //! let key = PrivateKey::generate(&mut rng)?;
 //! let signature = key.sign(&mut rng, b"", b"release v1.2")?;
 //!
@@ -1455,10 +1455,7 @@ mod tests {
         macro_rules! check {
             ($module:ident) => {{
                 use $module::*;
-                let mut rng = crate::random::Rng::try_new(
-                    crate::random::System::try_new().unwrap(),
-                )
-                .unwrap();
+                let mut rng = crate::random::CtrDrbg::from_system().unwrap();
                 let key = PrivateKey::generate(&mut rng).unwrap();
                 let public = key.public_key();
                 let sig = key.sign(&mut rng, b"ctx", b"message").unwrap();
@@ -1499,10 +1496,7 @@ mod tests {
 
     #[test]
     fn sets_do_not_mix() {
-        let mut rng = crate::random::Rng::try_new(
-            crate::random::System::try_new().unwrap(),
-        )
-        .unwrap();
+        let mut rng = crate::random::CtrDrbg::from_system().unwrap();
         let key = shake_128f::PrivateKey::generate(&mut rng).unwrap();
         let mut out = [0u8; 1024];
         let n = key.der_bytes(&mut out).unwrap();

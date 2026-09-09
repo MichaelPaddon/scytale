@@ -2,24 +2,34 @@
 //!
 //! # What this is
 //!
-//! An [`Rng`] is seeded once from a source of entropy and then
-//! produces random bytes from that seeding, in the shape SP 800-90A
-//! calls CTR_DRBG: AES-256 driven by a counter, its key and counter
-//! replaced after every request so that nothing already handed out
-//! can be worked backwards from what comes next.
+//! [`CtrDrbg`] is the generator to reach for. It is seeded once from
+//! a source of entropy and then produces random bytes from that
+//! seeding, in the shape SP 800-90A calls CTR_DRBG: AES-256 driven
+//! by a counter, its key and counter replaced after every request so
+//! that nothing already handed out can be worked backwards from what
+//! comes next. It is named for the construction rather than for its
+//! category, so that the next generator can sit beside it under its
+//! own name; what code takes is the [`Random`] trait, not either of
+//! them.
 //!
 //! ```
 //! use scytale::Random;
-//! use scytale::random::{Rng, System};
+//! use scytale::random::CtrDrbg;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = Rng::try_new(System::try_new()?)?;
+//! let mut rng = CtrDrbg::from_system()?;
 //!
 //! let mut key = [0u8; 32];
 //! rng.fill(&mut key)?;
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! [`from_system`](CtrDrbg::from_system) asks this machine for the
+//! seed. To choose the source yourself, name it:
+//! [`CtrDrbg::try_new(entropy::Processor::try_new()?)`](CtrDrbg::try_new),
+//! or [`CtrDrbg::<entropy::External>::from_seed`](CtrDrbg::from_seed)
+//! for entropy you gathered.
 //!
 //! # Why you hold it, and what that costs you
 //!
@@ -39,7 +49,7 @@
 //!
 //! - **After `fork`, the child must not keep using the parent's
 //!   generator.** Drop it and build another, or call
-//!   [`reseed`](Rng::reseed).
+//!   [`reseed`](CtrDrbg::reseed).
 //! - **After a virtual machine is restored from a snapshot, the same
 //!   applies.** Nothing here can see that it happened.
 //! - **The state is wiped when the object is dropped**, so the window
@@ -52,11 +62,16 @@
 //!
 //! # Where the seed comes from
 //!
+//! The sources live in [`entropy`], and are sources of raw material
+//! rather than of random bytes: what they hand back is conditioned
+//! by the generator before any of it reaches a caller. That is why
+//! they implement [`Entropy`] and not [`Random`].
+//!
 //! | Source | What it asks |
 //! | --- | --- |
-//! | [`System`] | the operating system, or the processor if there is none |
-//! | [`Processor`] | the processor's own generator, health tested |
-//! | [`External`] | nothing; you supply the entropy yourself |
+//! | [`entropy::System`] | the system, or the processor if there is none |
+//! | [`entropy::Processor`] | the processor's own, health tested |
+//! | [`entropy::External`] | nothing; you supply the entropy |
 //!
 //! A board with a generator of its own on a bus, or a ring
 //! oscillator, or a chip on I2C, implements [`Entropy`] over it and
@@ -81,7 +96,7 @@
 //!   and you never see it. Where it does not, because you seeded it
 //!   yourself, [`fill`](Random::fill) fails with
 //!   [`Error::ReseedRequired`] until you supply fresh entropy through
-//!   [`reseed_from`](Rng::reseed_from).
+//!   [`reseed_from`](CtrDrbg::reseed_from).
 //!
 //! You may reseed at any time, and doing so mixes the new material
 //! into what is already there rather than replacing it, so fresh
@@ -95,8 +110,8 @@
 //! tested there is the health testing, against sample streams with
 //! known faults in them.
 
+pub mod entropy;
 pub(crate) mod health;
-mod source;
 
 use core::fmt;
 
@@ -105,8 +120,6 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::cipher::OneBlock;
 use crate::cipher::aes::{Aes256, BLOCK_SIZE};
 use crate::{Error, Key, Random};
-
-pub use source::{External, Processor, System};
 
 /// AES-256: the key length the generator uses, in bytes.
 const KEY: usize = 32;
@@ -158,7 +171,7 @@ pub const RESEED_INTERVAL: u64 = 1 << 48;
 /// a generator, and keeping the two traits apart is what stops raw
 /// entropy reaching a caller by mistake.
 ///
-/// Implement this to seed an [`Rng`] from hardware of your own.
+/// Implement this to seed an [`CtrDrbg`] from hardware of your own.
 pub trait Entropy {
     /// Fills the whole of `out` with raw entropy, or fails without
     /// leaving anything worth relying on.
@@ -175,9 +188,10 @@ pub trait Entropy {
 /// the one thing this type is careful about. Two generators are made
 /// by seeding two.
 #[derive(ZeroizeOnDrop)]
-pub struct Rng<S: Entropy = System> {
-    /// Where a reseeding gets its material. [`External`] means there
-    /// is nowhere, and the caller must bring it.
+pub struct CtrDrbg<S: Entropy = entropy::System> {
+    /// Where a reseeding gets its material.
+    /// [`External`](entropy::External) means there is nowhere, and
+    /// the caller must bring it.
     #[zeroize(skip)]
     source: S,
     /// The key and counter block that are the generator's whole
@@ -190,7 +204,7 @@ pub struct Rng<S: Entropy = System> {
     counter: u64,
 }
 
-impl<S: Entropy> Rng<S> {
+impl<S: Entropy> CtrDrbg<S> {
     /// A generator seeded from `source`.
     ///
     /// # Errors
@@ -253,7 +267,7 @@ impl<S: Entropy> Rng<S> {
     fn instantiate(material: &[u8], source: S) -> Result<Self, Error> {
         let mut seed = [0u8; SEED];
         let derived = derive(material, &mut seed);
-        let mut rng = Rng {
+        let mut rng = CtrDrbg {
             source,
             key: Key::zeroed(),
             v: [0u8; BLOCK_SIZE],
@@ -288,7 +302,29 @@ impl<S: Entropy> Rng<S> {
     }
 }
 
-impl Rng<External> {
+impl CtrDrbg<entropy::System> {
+    /// A generator seeded from this machine's own source: the
+    /// operating system where there is one, the processor's
+    /// generator where there is not.
+    ///
+    /// This is the one to reach for. The others exist for a
+    /// processor source chosen deliberately, or for entropy the
+    /// caller gathers.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`entropy::System`] refuses to be built with, and
+    /// whatever it then refuses to hand over. On a target with an
+    /// operating system that is the system's own error; on one
+    /// without, [`Error::NotSupported`] where the processor has no
+    /// generator and [`Error::EntropyUnavailable`] where the one it
+    /// has does not pass its startup test.
+    pub fn from_system() -> Result<Self, Error> {
+        Self::try_new(entropy::System::try_new()?)
+    }
+}
+
+impl CtrDrbg<entropy::External> {
     /// A generator seeded from entropy you supply, with no source of
     /// its own to go back to.
     ///
@@ -304,11 +340,11 @@ impl Rng<External> {
         if seed.len() < MIN_SEED {
             return Err(Error::InvalidSeedLength(seed.len()));
         }
-        Self::instantiate(seed, External)
+        Self::instantiate(seed, entropy::External)
     }
 }
 
-impl<S: Entropy> Random for Rng<S> {
+impl<S: Entropy> Random for CtrDrbg<S> {
     fn fill(&mut self, out: &mut [u8]) -> Result<(), Error> {
         if out.len() > MAX_REQUEST {
             return Err(Error::RequestTooLarge(out.len()));
@@ -332,10 +368,10 @@ impl<S: Entropy> Random for Rng<S> {
     }
 }
 
-impl<S: Entropy> fmt::Debug for Rng<S> {
+impl<S: Entropy> fmt::Debug for CtrDrbg<S> {
     /// Deliberately omits the state, which is key material.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Rng")
+        f.debug_struct("CtrDrbg")
             .field("requests_since_seeding", &(self.counter - 1))
             .finish()
     }
@@ -480,8 +516,8 @@ mod tests {
     /// could not check anything.
     #[test]
     fn one_seed_gives_one_stream() {
-        let mut first = Rng::from_seed(&seed()).expect("seed");
-        let mut second = Rng::from_seed(&seed()).expect("seed");
+        let mut first = CtrDrbg::from_seed(&seed()).expect("seed");
+        let mut second = CtrDrbg::from_seed(&seed()).expect("seed");
         let mut a = [0u8; 64];
         let mut b = [0u8; 64];
         first.fill(&mut a).expect("fill");
@@ -493,7 +529,7 @@ mod tests {
     /// moved on after every one.
     #[test]
     fn successive_requests_differ() {
-        let mut rng = Rng::from_seed(&seed()).expect("seed");
+        let mut rng = CtrDrbg::from_seed(&seed()).expect("seed");
         let mut first = [0u8; 32];
         let mut second = [0u8; 32];
         rng.fill(&mut first).expect("first");
@@ -506,8 +542,8 @@ mod tests {
     fn different_seeds_give_different_streams() {
         let mut other = seed();
         other[0] ^= 1;
-        let mut first = Rng::from_seed(&seed()).expect("seed");
-        let mut second = Rng::from_seed(&other).expect("seed");
+        let mut first = CtrDrbg::from_seed(&seed()).expect("seed");
+        let mut second = CtrDrbg::from_seed(&other).expect("seed");
         let mut a = [0u8; 32];
         let mut b = [0u8; 32];
         first.fill(&mut a).expect("fill");
@@ -519,7 +555,7 @@ mod tests {
     /// are not a whole number of blocks must still be filled exactly.
     #[test]
     fn requests_stay_inside_the_buffer() {
-        let mut rng = Rng::from_seed(&seed()).expect("seed");
+        let mut rng = CtrDrbg::from_seed(&seed()).expect("seed");
         const PAD: usize = 32;
         let mut buf = [0xaau8; PAD + 1000 + PAD];
         for len in [0, 1, 15, 16, 17, 31, 100, 1000] {
@@ -542,10 +578,10 @@ mod tests {
     fn a_short_seed_is_refused() {
         let short = [0x5au8; MIN_SEED - 1];
         assert_eq!(
-            Rng::from_seed(&short).err(),
+            CtrDrbg::from_seed(&short).err(),
             Some(Error::InvalidSeedLength(MIN_SEED - 1))
         );
-        let mut rng = Rng::from_seed(&seed()).expect("seed");
+        let mut rng = CtrDrbg::from_seed(&seed()).expect("seed");
         assert_eq!(
             rng.reseed_from(&short).err(),
             Some(Error::InvalidSeedLength(MIN_SEED - 1))
@@ -556,8 +592,8 @@ mod tests {
     /// was, still producing the stream it was going to produce.
     #[test]
     fn a_refused_reseed_changes_nothing() {
-        let mut rng = Rng::from_seed(&seed()).expect("seed");
-        let mut untouched = Rng::from_seed(&seed()).expect("seed");
+        let mut rng = CtrDrbg::from_seed(&seed()).expect("seed");
+        let mut untouched = CtrDrbg::from_seed(&seed()).expect("seed");
         assert!(rng.reseed_from(&[0u8; MIN_SEED - 1]).is_err());
         let mut a = [0u8; 32];
         let mut b = [0u8; 32];
@@ -570,8 +606,8 @@ mod tests {
     /// start again.
     #[test]
     fn reseeding_moves_the_generator_on() {
-        let mut rng = Rng::from_seed(&seed()).expect("seed");
-        let mut untouched = Rng::from_seed(&seed()).expect("seed");
+        let mut rng = CtrDrbg::from_seed(&seed()).expect("seed");
+        let mut untouched = CtrDrbg::from_seed(&seed()).expect("seed");
         rng.reseed_from(&[0x11u8; MIN_SEED]).expect("reseed");
         assert_eq!(rng.counter, 1);
         let mut a = [0u8; 32];
@@ -585,7 +621,7 @@ mod tests {
     /// largest allowed one is not.
     #[test]
     fn an_oversized_request_is_refused() {
-        let mut rng = Rng::from_seed(&seed()).expect("seed");
+        let mut rng = CtrDrbg::from_seed(&seed()).expect("seed");
         let mut buf = [0u8; MAX_REQUEST + 1];
         assert_eq!(
             rng.fill(&mut buf).err(),
@@ -600,7 +636,7 @@ mod tests {
     /// the count is moved.
     #[test]
     fn running_out_stops_a_generator_until_it_is_fed() {
-        let mut rng = Rng::from_seed(&seed()).expect("seed");
+        let mut rng = CtrDrbg::from_seed(&seed()).expect("seed");
         rng.counter = RESEED_INTERVAL + 1;
         let mut buf = [0u8; 16];
         assert_eq!(rng.fill(&mut buf).err(), Some(Error::ReseedRequired));
@@ -612,10 +648,10 @@ mod tests {
     /// caller never sees it happen.
     #[test]
     fn a_generator_with_a_source_reseeds_itself() {
-        let Ok(system) = System::try_new() else {
+        let Ok(system) = entropy::System::try_new() else {
             return;
         };
-        let mut rng = Rng::try_new(system).expect("rng");
+        let mut rng = CtrDrbg::try_new(system).expect("rng");
         rng.counter = RESEED_INTERVAL + 1;
         let mut buf = [0u8; 16];
         rng.fill(&mut buf).expect("fill");
@@ -626,7 +662,7 @@ mod tests {
     #[test]
     fn the_generator_wipes_itself() {
         fn wipes<T: ZeroizeOnDrop>() {}
-        wipes::<Rng<External>>();
+        wipes::<CtrDrbg<entropy::External>>();
     }
 
     /// Output that is technically written but obviously not random
@@ -634,7 +670,7 @@ mod tests {
     /// wide.
     #[test]
     fn bits_are_not_wildly_skewed() {
-        let mut rng = Rng::from_seed(&seed()).expect("seed");
+        let mut rng = CtrDrbg::from_seed(&seed()).expect("seed");
         let mut buf = [0u8; 4096];
         rng.fill(&mut buf).expect("fill");
         let set: u32 = buf.iter().map(|b| b.count_ones()).sum();
@@ -710,7 +746,7 @@ mod tests {
                 Ok(())
             }
         }
-        let mut rng = Rng::try_new(Board(1)).expect("board");
+        let mut rng = CtrDrbg::try_new(Board(1)).expect("board");
         let mut buf = [0u8; 32];
         rng.fill(&mut buf).expect("fill");
         assert_ne!(buf, [0u8; 32]);

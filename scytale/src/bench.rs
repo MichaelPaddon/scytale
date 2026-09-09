@@ -93,7 +93,7 @@ use crate::mac::Mac;
 use crate::mac::hmac::Hmac;
 use crate::mac::poly1305::Poly1305;
 use crate::pke::rsa as oaep;
-use crate::random::Rng;
+use crate::random::CtrDrbg;
 use crate::sig::{ecdsa, ed25519, rsa};
 
 /// Buffer sizes reported, the ones `openssl speed` uses.
@@ -736,7 +736,7 @@ fn single_section(options: &Options) -> bool {
     };
     // Seeded rather than drawn, so a run repeats and no entropy
     // source is needed for a measurement.
-    let Ok(mut rng) = Rng::from_seed(&[0x5au8; 64]) else {
+    let Ok(mut rng) = CtrDrbg::from_seed(&[0x5au8; 64]) else {
         return false;
     };
     let mut tasks: Vec<Task<'_>> = vec![
@@ -794,8 +794,8 @@ const FF3_TWEAK: [u8; 7] = [0x3c; 7];
 
 /// A generator seeded rather than drawn, so that every key below is
 /// the same one on every run.
-fn seeded() -> Result<Rng<crate::random::External>, Error> {
-    Rng::from_seed(&[0x5au8; 64])
+fn seeded() -> Result<CtrDrbg<crate::random::entropy::External>, Error> {
+    CtrDrbg::from_seed(&[0x5au8; 64])
 }
 
 /// Whether the heading over the operation groups has been printed;

@@ -18,10 +18,10 @@
 //!
 //! ```
 //! use scytale::kem::ml_kem::ml_kem_768::PrivateKey;
-//! use scytale::random::{Rng, System};
+//! use scytale::random::CtrDrbg;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = Rng::try_new(System::try_new()?)?;
+//! let mut rng = CtrDrbg::from_system()?;
 //! let recipient = PrivateKey::generate(&mut rng)?;
 //!
 //! // The sender needs only the public key.

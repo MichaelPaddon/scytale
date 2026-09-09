@@ -1474,10 +1474,7 @@ mod tests {
     fn compressed_points() {
         fn check<const L: usize>(curve: &Curve<L>) {
             let e = Engine::new(curve);
-            let mut rng = crate::random::Rng::try_new(
-                crate::random::System::try_new().unwrap(),
-            )
-            .unwrap();
+            let mut rng = crate::random::CtrDrbg::from_system().unwrap();
             let mut sec1 = [0u8; 97];
             let w = width::<L>();
             for _ in 0..4 {
@@ -1588,10 +1585,7 @@ mod tests {
     #[test]
     fn verify_refusals() {
         let e = Engine::new(&P256);
-        let mut rng = crate::random::Rng::try_new(
-            crate::random::System::try_new().unwrap(),
-        )
-        .unwrap();
+        let mut rng = crate::random::CtrDrbg::from_system().unwrap();
         let d = Secret::generate(&e, &mut rng).unwrap();
         let public = d.public(&e);
         let mut sig = [0u8; 64];
@@ -1626,10 +1620,7 @@ mod tests {
     #[test]
     fn agreement() {
         let e = Engine::new(&P384);
-        let mut rng = crate::random::Rng::try_new(
-            crate::random::System::try_new().unwrap(),
-        )
-        .unwrap();
+        let mut rng = crate::random::CtrDrbg::from_system().unwrap();
         let a = Secret::generate(&e, &mut rng).unwrap();
         let b = Secret::generate(&e, &mut rng).unwrap();
         let mut ab = [0u8; 48];

@@ -12,10 +12,10 @@
 //! ```
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::pke::rsa::Rsa2048PrivateKey;
-//! use scytale::random::{Rng, System};
+//! use scytale::random::CtrDrbg;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = Rng::try_new(System::try_new()?)?;
+//! let mut rng = CtrDrbg::from_system()?;
 //! let key = Rsa2048PrivateKey::generate(&mut rng)?;
 //!
 //! // The sender encrypts a session key to the public half.

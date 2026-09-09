@@ -1057,8 +1057,8 @@ mod tests {
     /// with and without its CRT pieces, all agreeing byte for byte.
     #[test]
     fn generates_working_keys() {
-        use crate::random::{Rng, System};
-        let mut rng = Rng::try_new(System::try_new().unwrap()).unwrap();
+        use crate::random::CtrDrbg;
+        let mut rng = CtrDrbg::from_system().unwrap();
         let key = Rsa1024PrivateKey::generate(&mut rng).unwrap();
 
         let sig = key.sign_pss::<Sha256>(MSG, &[7u8; 16]).unwrap();
@@ -1246,10 +1246,7 @@ mod tests {
     }
 
     fn generated() -> Rsa1024PrivateKey {
-        let mut rng = crate::random::Rng::try_new(
-            crate::random::System::try_new().unwrap(),
-        )
-        .unwrap();
+        let mut rng = crate::random::CtrDrbg::from_system().unwrap();
         Rsa1024PrivateKey::generate(&mut rng).unwrap()
     }
 

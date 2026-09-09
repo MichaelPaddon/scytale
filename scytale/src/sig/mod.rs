@@ -10,11 +10,11 @@
 //!
 //! ```
 //! use scytale::Random;
-//! use scytale::random::{Rng, System};
+//! use scytale::random::CtrDrbg;
 //! use scytale::sig::ed25519;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = Rng::try_new(System::try_new()?)?;
+//! let mut rng = CtrDrbg::from_system()?;
 //! let mut secret = [0u8; ed25519::KEY_SIZE];
 //! rng.fill(&mut secret)?;
 //!

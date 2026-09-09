@@ -43,10 +43,10 @@
 //! ```
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::pke::rsa::Rsa2048PrivateKey;
-//! use scytale::random::{Rng, System};
+//! use scytale::random::CtrDrbg;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = Rng::try_new(System::try_new()?)?;
+//! let mut rng = CtrDrbg::from_system()?;
 //! let key = Rsa2048PrivateKey::generate(&mut rng)?;
 //!
 //! // The sender encrypts a session key to the public half.
@@ -712,8 +712,8 @@ mod tests {
     /// message.
     #[test]
     fn oaep_round_trips() {
-        use crate::random::{Rng, System};
-        let mut rng = Rng::try_new(System::try_new().unwrap()).unwrap();
+        use crate::random::CtrDrbg;
+        let mut rng = CtrDrbg::from_system().unwrap();
         let key = key1024();
         let public = key.public_key();
         let mut out = [0u8; 128];
@@ -733,8 +733,8 @@ mod tests {
     /// parts through export and CRT import.
     #[test]
     fn generated_key_round_trips() {
-        use crate::random::{Rng, System};
-        let mut rng = Rng::try_new(System::try_new().unwrap()).unwrap();
+        use crate::random::CtrDrbg;
+        let mut rng = CtrDrbg::from_system().unwrap();
         let key = Rsa1024PrivateKey::generate(&mut rng).unwrap();
         let mut out = [0u8; 128];
         let c = key
@@ -859,10 +859,7 @@ mod tests {
     /// public half round-trips too.
     #[test]
     fn formats_round_trip() {
-        let mut rng = crate::random::Rng::try_new(
-            crate::random::System::try_new().unwrap(),
-        )
-        .unwrap();
+        let mut rng = crate::random::CtrDrbg::from_system().unwrap();
         let key = Rsa1024PrivateKey::generate(&mut rng).unwrap();
         let sealed = key
             .public_key()
@@ -925,10 +922,7 @@ mod tests {
     /// key without its primes cannot be written.
     #[test]
     fn pss_keys_and_plain_keys_are_refused() {
-        let mut rng = crate::random::Rng::try_new(
-            crate::random::System::try_new().unwrap(),
-        )
-        .unwrap();
+        let mut rng = crate::random::CtrDrbg::from_system().unwrap();
         let key = Rsa1024PrivateKey::generate(&mut rng).unwrap();
         let mut out = [0u8; 8 * 128];
         let n = key.der_bytes(&mut out).unwrap();

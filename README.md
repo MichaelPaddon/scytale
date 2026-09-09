@@ -71,10 +71,11 @@ on x86-64, aarch64 and riscv64 hardware rather than on the machine
 that happens to be to hand. The Goals section below says exactly what that
 means.
 
-Work from here goes into speed and into algorithms that are still
-missing, not into rearranging what is already here. API changes will
-be avoided; the version number is below one, but the shape of the
-library is not expected to move.
+Work from here will focus on speed and algorithms that are still
+missing. The API is still being stabilized, and the version number is
+still below one, but the major shape of the library is not expected to
+change massively. Expect implementation details to become better hidden and
+interfaces to be streamlined for usuability.
 
 It builds on stable Rust 1.88 or later, on any architecture,
 with or without an operating system under it.
@@ -87,10 +88,10 @@ cargo add scytale
 
 ```rust
 use scytale::cipher::{aes::Aes256, mode::Gcm};
-use scytale::random::{Rng, System};
+use scytale::random::CtrDrbg;
 use scytale::{KeyType, Random};
 
-let mut rng = Rng::try_new(System::try_new()?)?;
+let mut rng = CtrDrbg::from_system()?;
 let key = Aes256::random_key(&mut rng)?;
 let mut nonce = [0u8; 12];
 rng.fill(&mut nonce)?;
@@ -276,10 +277,10 @@ provides a generator you hold:
 
 ```rust
 use scytale::cipher::aes::Aes256;
-use scytale::random::{Rng, System};
+use scytale::random::CtrDrbg;
 use scytale::{KeyType, Random};
 
-let mut rng = Rng::try_new(System::try_new()?)?;
+let mut rng = CtrDrbg::from_system()?;
 
 // A key of the right width for the cipher, which wipes itself.
 let key = Aes256::random_key(&mut rng)?;
@@ -289,12 +290,21 @@ let mut nonce = [0u8; 12];
 rng.fill(&mut nonce)?;
 ```
 
-It is the CTR_DRBG of NIST SP 800-90A: AES-256 driven by a counter,
-with its key and counter replaced after every request, checked
-against the ACVP vectors for that mechanism alongside everything
-else. Seed material of any length and any density is condensed by the
-standard's derivation function, so entropy from a slow or biased
-source is worth its full weight.
+`CtrDrbg` is named for what it is, the CTR_DRBG of NIST SP 800-90A:
+AES-256 driven by a counter, with its key and counter replaced after
+every request, checked against the ACVP vectors for that mechanism
+alongside everything else. Seed material of any length and any
+density is condensed by the standard's derivation function, so
+entropy from a slow or biased source is worth its full weight.
+
+`from_system` asks this machine for the seed, which is what almost
+every caller wants. The sources are named individually under
+`random::entropy` for the cases that are not: `entropy::Processor`
+for the processor's own generator, and `entropy::External` for a
+generator seeded with entropy you gathered, through
+`CtrDrbg::<entropy::External>::from_seed`. What your code should
+take is the `Random` trait, so a second generator, or a fixed
+sequence in a test, drops in without it noticing.
 
 | Where it runs | What seeds it |
 | --- | --- |
@@ -325,8 +335,8 @@ fails and the program does not start, rather than every later call
 failing. That is not the end of the road on such a board: a hardware
 generator on a bus, a ring oscillator or a chip on I2C is supplied
 through the `random::Entropy` trait, and entropy gathered some other
-way goes in through `Rng::from_seed`. Either is served exactly as
-well as a machine with an instruction for it.
+way goes in through `CtrDrbg::from_seed`. Either is served exactly
+as well as a machine with an instruction for it.
 
 Because the generator has state, it is yours to look after. After a
 `fork`, or after a virtual machine is restored from a snapshot, the

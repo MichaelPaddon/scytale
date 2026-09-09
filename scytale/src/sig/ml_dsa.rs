@@ -31,11 +31,11 @@
 //! the form to store.
 //!
 //! ```
-//! use scytale::random::{Rng, System};
+//! use scytale::random::CtrDrbg;
 //! use scytale::sig::ml_dsa::ml_dsa_65::{PrivateKey, PublicKey};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let mut rng = Rng::try_new(System::try_new()?)?;
+//! let mut rng = CtrDrbg::from_system()?;
 //! let key = PrivateKey::generate(&mut rng)?;
 //! let signature = key.sign(&mut rng, b"", b"release v1.2")?;
 //!
@@ -1379,10 +1379,7 @@ mod tests {
         macro_rules! check {
             ($module:ident) => {{
                 use $module::*;
-                let mut rng = crate::random::Rng::try_new(
-                    crate::random::System::try_new().unwrap(),
-                )
-                .unwrap();
+                let mut rng = crate::random::CtrDrbg::from_system().unwrap();
                 let key = PrivateKey::generate(&mut rng).unwrap();
                 let public = key.public_key();
                 let sig = key.sign(&mut rng, b"ctx", b"message").unwrap();
