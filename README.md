@@ -113,8 +113,7 @@ The same binary does that on a laptop with VAES and on a board with
 no cryptographic instructions at all.
 
 The API documentation is on [docs.rs](https://docs.rs/scytale), and
-`cargo doc --open` builds it locally with your own processor's
-modules in it.
+`cargo doc --open` builds it locally.
 
 ## Goals
 
@@ -381,10 +380,12 @@ to the portable code.
 
 ## Documentation
 
-The API documentation for the main branch, one copy per architecture
-so that each processor's own modules can be read, is at
+The API documentation for the main branch is at
 <https://michaelpaddon.github.io/scytale/>. Released versions are on
-[docs.rs](https://docs.rs/scytale). Locally, `cargo doc --open`.
+[docs.rs](https://docs.rs/scytale). Locally, `cargo doc --open`. One
+copy serves every architecture: the implementations that exist only
+on one of them are private, so the documentation does not vary with
+the target.
 
 ## Using it
 

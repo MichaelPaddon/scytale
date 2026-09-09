@@ -22,17 +22,6 @@ categories = [
 # vectors in the unit tests remain.
 exclude = ["tests/vectors"]
 
-# Documents every architecture that has its own implementations, so
-# that the backend modules for each are browsable, not only the one
-# docs.rs happens to build on.
-[package.metadata.docs.rs]
-targets = [
-    "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu",
-    "riscv64gc-unknown-linux-gnu",
-]
-rustdoc-args = ["--cfg", "docsrs"]
-
 [dependencies]
 zeroize = { version = "1", default-features = false, features = ["derive"] }
 

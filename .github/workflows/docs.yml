@@ -1,8 +1,8 @@
 # Publishes the API documentation for the main branch to GitHub
-# Pages, one tree per architecture that has its own implementations,
-# since the modules for each only exist when building for it. This
-# is the browsable copy between releases; docs.rs builds the released
-# ones.
+# Pages. One tree is enough: the implementations that exist only on
+# one architecture are private now, so nothing in the documentation
+# varies with the target. This is the browsable copy between
+# releases; docs.rs builds the released ones.
 #
 # Pages must be enabled in the repository settings with "GitHub
 # Actions" as the source before the deploy step can succeed.
@@ -32,50 +32,34 @@ jobs:
         run: |
           rustup update --no-self-update stable
           rustup default stable
-          rustup target add aarch64-unknown-linux-gnu \
-                            riscv64gc-unknown-linux-gnu
 
-      - name: Build for each architecture
-        run: |
-          set -eu
-          mkdir -p site
-          for target in x86_64-unknown-linux-gnu \
-                        aarch64-unknown-linux-gnu \
-                        riscv64gc-unknown-linux-gnu; do
-              cargo doc --workspace --no-deps --target "$target"
-              name=${target%%-*}
-              cp -r "target/$target/doc" "site/$name"
-          done
+      - name: Build
+        run: cargo doc --workspace --no-deps
 
       - name: Write the index
+        # Two crates are documented, so there is no root page of
+        # cargo's own to land on.
         run: |
-          cat > site/index.html <<'HTML'
+          cat > target/doc/index.html <<'HTML'
           <!DOCTYPE html>
           <html lang="en">
           <head>
           <meta charset="utf-8">
           <title>scytale documentation</title>
-          <meta http-equiv="refresh" content="3; url=x86_64/scytale/">
+          <meta http-equiv="refresh" content="0; url=scytale/">
           </head>
           <body>
-          <h1>scytale</h1>
-          <p>API documentation for the main branch, by architecture.
-          The modules holding each processor's own implementations
-          appear only in that architecture's copy.</p>
-          <ul>
-          <li><a href="x86_64/scytale/">x86-64</a> (default in a moment)</li>
-          <li><a href="aarch64/scytale/">AArch64</a></li>
-          <li><a href="riscv64gc/scytale/">RISC-V (RV64GC)</a></li>
-          </ul>
-          <p>Released versions are on
+          <p>API documentation for the main branch:
+          <a href="scytale/">scytale</a>.
+          Released versions are on
           <a href="https://docs.rs/scytale">docs.rs</a>.</p>
           </body>
           </html>
           HTML
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
-          path: site
+          path: target/doc
 
   deploy:
     needs: build
@@ -90,4 +74,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
