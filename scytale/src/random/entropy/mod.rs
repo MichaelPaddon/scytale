@@ -81,9 +81,13 @@ use bare::Sampler;
 /// at all rather than one that hands out its output. Every sample
 /// drawn afterwards is examined too.
 ///
-/// Available on every architecture with an instruction for it:
-/// `rdseed` or `rdrand`, `rndr`, or the `seed` register. Elsewhere
-/// [`try_new`](Processor::try_new) returns [`Error::NotSupported`].
+/// Available where the processor has an instruction for it and an
+/// ordinary program may use it: `rdseed` or `rdrand` on x86-64,
+/// `rndr` on AArch64, and RISC-V's `seed` register on bare metal
+/// only, since under an operating system reading it raises an illegal
+/// instruction rather than declining. Elsewhere
+/// [`try_new`](Processor::try_new) returns [`Error::NotSupported`],
+/// and [`System`] is the way to reach the machine's own source.
 #[derive(Clone, Debug)]
 pub struct Processor {
     sampler: Sampler,
@@ -281,6 +285,25 @@ mod tests {
         let mut buf = [0xaau8; 16];
         assert_eq!(External.fill(&mut buf).err(), Some(Error::ReseedRequired));
         assert_eq!(buf, [0xaau8; 16], "left the buffer alone");
+    }
+
+    /// Asking must be safe on every target. A register an ordinary
+    /// program may not read has to be refused rather than tried:
+    /// RISC-V's raises an illegal instruction instead of declining,
+    /// which would end the process rather than return. This test
+    /// calls it on every architecture on purpose.
+    #[test]
+    fn asking_the_processor_never_traps() {
+        match Processor::try_new() {
+            Ok(mut processor) => {
+                let mut buf = [0u8; 8];
+                processor.fill(&mut buf).expect("fill");
+            }
+            Err(e) => assert!(
+                matches!(e, Error::NotSupported | Error::EntropyUnavailable(_)),
+                "{e:?}"
+            ),
+        }
     }
 
     /// The processor, where the machine running the tests has one and

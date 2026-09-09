@@ -243,11 +243,21 @@ struct Choice;
 impl Choice {
     /// There is no register to ask whether the `seed` register may be
     /// read: where the machine has not opened it, reading raises an
-    /// illegal instruction rather than answering. So there is nothing
-    /// to check here, and a machine that has not opened it does not
-    /// reach this code at all.
+    /// illegal instruction rather than answering, which kills the
+    /// program rather than failing a call.
+    ///
+    /// So it is only tried where the answer is known in advance. On
+    /// bare metal the firmware that opened it is the same firmware
+    /// this is linked into. Under an operating system it is not: the
+    /// kernel keeps the register to itself on every system that has
+    /// been asked so far, and [`System`](super::System) is the way to
+    /// reach what the kernel made of it.
     fn try_new() -> Result<Self, Error> {
-        Ok(Choice)
+        if cfg!(target_os = "none") {
+            Ok(Choice)
+        } else {
+            Err(Error::NotSupported)
+        }
     }
 
     fn tries(&self) -> usize {
