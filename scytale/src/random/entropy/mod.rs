@@ -29,9 +29,13 @@
 //! let mut key = [0u8; 32];
 //! rng.fill(&mut key)?;
 //!
-//! // The processor's own generator, asked for by name.
-//! let mut own = CtrDrbg::try_new(entropy::Processor::try_new()?)?;
-//! own.fill(&mut key)?;
+//! // The processor's own generator, asked for by name, where the
+//! // processor has one: not every architecture offers it to user
+//! // space, so this is the shape such a call has to take.
+//! if let Ok(source) = entropy::Processor::try_new() {
+//!     let mut own = CtrDrbg::try_new(source)?;
+//!     own.fill(&mut key)?;
+//! }
 //!
 //! // Material gathered some other way, for a bare board or a test.
 //! // It must be full entropy over its whole length, and at least
