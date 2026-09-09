@@ -53,20 +53,81 @@
 //! # }
 //! ```
 
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
+
 use core::fmt;
 
 use super::xor;
 use crate::cipher::{BlockCipher, ByteOrder, CounterFn, OneBlock, counter_fn};
 use crate::{ByteArray, Error};
 
+/// What does the work, settled when the mode is built, because it is
+/// the processor that decides and the processor does not change.
+///
+/// Where this cipher runs on the AES instructions, [`x86_64::Engine`]
+/// is counter mode written out for them, start to finish. Anywhere
+/// else it is the construction over the cipher's own bulk encrypt,
+/// which is as fast as that processor allows.
+enum Engine<C: BlockCipher> {
+    #[cfg(target_arch = "x86_64")]
+    Native(x86_64::Engine<C>),
+    Generic(CounterFn<C>),
+}
+
+/// By hand rather than derived: an engine holds no cipher, only a
+/// pointer to the loop written for one, so it clones whatever `C` is.
+impl<C: BlockCipher> Clone for Engine<C> {
+    fn clone(&self) -> Self {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            Engine::Native(engine) => Engine::Native(engine.clone()),
+            Engine::Generic(blocks) => Engine::Generic(*blocks),
+        }
+    }
+}
+
+impl<C: BlockCipher> Engine<C> {
+    /// The best engine for this cipher on this processor.
+    fn new() -> Self {
+        #[cfg(target_arch = "x86_64")]
+        if let Some(native) = x86_64::Engine::new() {
+            return Engine::Native(native);
+        }
+        Engine::Generic(counter_fn::<C>())
+    }
+
+    /// Encrypts the counter blocks made from `counter` and XORs them
+    /// over `data`, which is a whole number of blocks, leaving
+    /// `counter` on the block after the last.
+    fn blocks(&self, cipher: &C, counter: &mut C::Block, data: &mut [u8]) {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            Engine::Native(engine) => {
+                // The engine exists only for a cipher whose block is
+                // this width, so the conversion cannot fail; the
+                // compiler does not carry that across the pointer it
+                // was chosen through.
+                match <&mut [u8; 16]>::try_from(counter.as_mut()) {
+                    Ok(counter) => {
+                        engine.xor_counter_blocks(cipher, counter, data)
+                    }
+                    Err(_) => debug_assert!(false, "block is not a block"),
+                }
+            }
+            Engine::Generic(blocks) => {
+                blocks(cipher, counter, ByteOrder::Big, data)
+            }
+        }
+    }
+}
+
 /// Counter mode over a block cipher.
 #[derive(Clone)]
 pub struct Ctr<C: BlockCipher> {
     cipher: C,
-    /// The counter loop this cipher gets, settled when the mode is
-    /// built: a hand-written one where there is one for this cipher
-    /// on this processor, the generic construction otherwise.
-    counter: CounterFn<C>,
+    /// What does the work, settled when the mode is built.
+    engine: Engine<C>,
 }
 
 impl<C: BlockCipher> Ctr<C>
@@ -77,7 +138,7 @@ where
     pub fn new(key: &C::Key) -> Self {
         Ctr {
             cipher: C::new(key),
-            counter: counter_fn::<C>(),
+            engine: Engine::new(),
         }
     }
 
@@ -108,7 +169,7 @@ where
     pub fn stream(&self, counter: &C::Block) -> Stream<'_, C> {
         Stream {
             cipher: &self.cipher,
-            blocks: self.counter,
+            engine: self.engine.clone(),
             counter: *counter,
             keystream: C::zero_block(),
             used: size_of::<C::Block>(),
@@ -169,8 +230,8 @@ fn carry_out_of_low32<B: ByteArray>(counter: &mut B) {
 /// There is nothing to finish.
 pub struct Stream<'a, C: BlockCipher> {
     cipher: &'a C,
-    /// The counter loop chosen when the mode was built.
-    blocks: CounterFn<C>,
+    /// What does the work, chosen when the mode was built.
+    engine: Engine<C>,
     counter: C::Block,
     /// The keystream block a previous piece ended inside.
     keystream: C::Block,
@@ -207,10 +268,9 @@ where
             let room = (u32::MAX - low32(self.counter.as_ref())) as usize + 1;
             let take = (whole.len() - done).min(room);
             let run = &mut whole[done..done + take];
-            (self.blocks)(
+            self.engine.blocks(
                 self.cipher,
                 &mut self.counter,
-                ByteOrder::Big,
                 <C::Block as ByteArray>::flatten_mut(run),
             );
             if take == room {
@@ -299,6 +359,54 @@ mod tests {
 
     /// The cipher counts in the last four bytes and drops the carry
     /// there, so a run crossing that boundary is split in two and the
+    /// The loops add to the last byte of the block without carrying
+    /// out of it, so a message long enough for that byte to overflow
+    /// must be cut where it would, and the carry done in full.
+    ///
+    /// Every starting byte is tried, since where the cut falls
+    /// depends on it, and the message is long enough to pass the
+    /// boundary more than once.
+    #[test]
+    fn crosses_the_low_byte_boundary() {
+        // Three times round the 256 blocks that byte counts.
+        const N: usize = 3 * 256 * 16 + 32;
+        let key = [0x11u8; 16];
+        let aes = Aes::<16>::new(&key);
+
+        for last in [0u8, 1, 15, 16, 127, 239, 240, 241, 254, 255] {
+            let mut start = [0x42u8; 16];
+            start[15] = last;
+
+            let mut want = [0u8; N];
+            let mut counter = start;
+            for chunk in want.chunks_mut(16) {
+                let mut block = counter;
+                aes.encrypt_one(&mut block);
+                chunk.copy_from_slice(&block[..chunk.len()]);
+                increment(&mut counter);
+            }
+
+            let mut got = [0u8; N];
+            ctr(&key).encrypt(&start, &mut got).unwrap();
+            assert_eq!(got, want, "counter ending {last}");
+
+            // And in pieces, so a run starts at every offset within
+            // the byte as well as at the boundary itself.
+            for piece in [16, 4080, 4096, 4112] {
+                let mut got = [0u8; N];
+                let mode = ctr(&key);
+                let mut stream = mode.stream(&start);
+                for part in got.chunks_mut(piece) {
+                    stream.update(part).unwrap();
+                }
+                assert_eq!(
+                    got, want,
+                    "counter ending {last}, {piece} at a time"
+                );
+            }
+        }
+    }
+
     /// carry put back by hand. Starting two blocks short of the wrap
     /// exercises both sides of the split, and the run after it is
     /// long enough to reach the bulk path and leave a tail.
