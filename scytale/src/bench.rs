@@ -66,6 +66,7 @@ use cpu_time::ThreadTime;
 use crate::Key;
 use crate::cipher::chacha20;
 use crate::cipher::mode::ChaCha20Poly1305;
+use crate::cipher::mode::ctr;
 use crate::cipher::mode::{
     Cbc, Cfb1, Cfb8, Cfb128, Ctr, Gcm, GcmSiv, Kw, Kwp, Ofb, Xpn, Xts,
 };
@@ -374,6 +375,7 @@ fn report(options: &Options) -> bool {
         sha3::portable::Shake256,
     >("portable", options);
     ran |= single_section(options);
+    ran |= width_section(options);
 
     ran |= kdf_ops(options);
     ran |= kex_ops(options);
@@ -387,6 +389,49 @@ fn report(options: &Options) -> bool {
         eprintln!("speed: nothing matched");
     }
     ran
+}
+
+/// The widths counter mode is written in, measured beside each other.
+///
+/// Every other row takes whichever width the processor offers, so
+/// nothing else here can say whether the wider one earns its keep: the
+/// per-implementation sections name a cipher, and the mode picks its
+/// own width whatever cipher it was given. These name the width
+/// instead, and the cipher is the same one throughout.
+///
+/// A width the processor cannot run is left out rather than reported
+/// as nothing, so on an architecture with only one of them only that
+/// one appears.
+const WIDTHS: [(&str, ctr::Choice); 3] = [
+    ("aes-128-ctr-wide", ctr::Choice::Wide),
+    ("aes-128-ctr-narrow", ctr::Choice::Narrow),
+    ("aes-128-ctr-generic", ctr::Choice::Generic),
+];
+
+/// Measures counter mode at each width, returning whether it ran
+/// anything.
+fn width_section(options: &Options) -> bool {
+    let key = Key::from(KEY128);
+    let mut modes: Vec<(&'static str, Ctr<aes::Aes128>)> = WIDTHS
+        .iter()
+        .filter(|(name, _)| options.wants("width", name))
+        .filter_map(|&(name, choice)| {
+            Ctr::with_choice(&key, choice).map(|mode| (name, mode))
+        })
+        .collect();
+    if modes.is_empty() {
+        return false;
+    }
+
+    println!("\nwidth");
+    println!("{}", heading());
+    for (name, mode) in &mut modes {
+        let mut operation: Operation<'_> = Box::new(|d: &mut [u8]| {
+            let _ = mode.encrypt(&IV, d);
+        });
+        println!("{}", row(name, &mut operation, options.budget));
+    }
+    true
 }
 
 /// Measures one implementation, returning whether it ran anything.
@@ -1507,7 +1552,7 @@ fn fpe_ops(options: &Options) -> bool {
 /// they name so that a filter can be applied before any key is
 /// expanded, which is what lets an unsupported implementation be
 /// skipped silently.
-const ALGORITHMS: [&str; 20] = [
+const ALGORITHMS: [&str; 21] = [
     "aes-128-ecb-enc",
     "aes-128-ecb-dec",
     "aes-256-ecb-enc",
@@ -1518,6 +1563,7 @@ const ALGORITHMS: [&str; 20] = [
     "aes-128-cfb128-enc",
     "aes-128-ofb",
     "aes-128-ctr",
+    "aes-256-ctr",
     "aes-128-gmac",
     "aes-128-gcm-enc",
     "aes-128-gcm-dec",
@@ -1544,6 +1590,7 @@ struct Keys<
     cfb128: Cfb128<A>,
     ofb: Ofb<A>,
     ctr: Ctr<A>,
+    ctr256: Ctr<B>,
     gcm128: Gcm<A>,
     gcm256: Gcm<B>,
     siv: GcmSiv<A>,
@@ -1603,6 +1650,7 @@ where
             cfb128: Cfb128::new(&k128),
             ofb: Ofb::new(&k128),
             ctr: Ctr::new(&k128),
+            ctr256: Ctr::new(&k256),
             gcm128: Gcm::new(&k128),
             gcm256: Gcm::new(&k256),
             siv: GcmSiv::new(&k128),
@@ -1634,6 +1682,7 @@ where
             cfb128,
             ofb,
             ctr,
+            ctr256,
             gcm128,
             gcm256,
             siv,
@@ -1714,6 +1763,12 @@ where
                 "aes-128-ctr",
                 Box::new(|d: &mut [u8]| {
                     let _ = ctr.encrypt(&IV, d);
+                }),
+            ),
+            (
+                "aes-256-ctr",
+                Box::new(|d: &mut [u8]| {
+                    let _ = ctr256.encrypt(&IV, d);
                 }),
             ),
             // The buffer is the additional data and the message is
