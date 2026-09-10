@@ -157,7 +157,16 @@ fn speed() {
         assert!(self_test(), "self-test");
         return;
     }
-    assert!(report(&options), "nothing measured");
+    if !report(&options) {
+        // Nothing ran. With filters that is a request for rows which
+        // do not exist, which `report` has just explained; there is
+        // nothing to measure and nothing wrong. With no filters it
+        // means the harness itself measured nothing, which is a fault.
+        assert!(
+            !options.filters.is_empty(),
+            "no filters, and still nothing measured"
+        );
+    }
 }
 
 /// What the command line asked for.
@@ -386,7 +395,7 @@ fn report(options: &Options) -> bool {
     ran |= fpe_ops(options);
 
     if !ran {
-        eprintln!("speed: nothing matched");
+        explain(&options.filters);
     }
     ran
 }
@@ -432,6 +441,57 @@ fn width_section(options: &Options) -> bool {
         println!("{}", row(name, &mut operation, options.budget));
     }
     true
+}
+
+/// Every row name the harness knows, for saying what a filter could
+/// have meant.
+///
+/// The lists are per family and live beside the code that measures
+/// each, so this gathers them rather than being a second copy to keep
+/// in step.
+fn every_row_name() -> impl Iterator<Item = &'static str> {
+    ALGORITHMS
+        .iter()
+        .chain(HASHES.iter())
+        .chain(CHACHA.iter())
+        .chain(SINGLE.iter())
+        .chain(KDF_JOBS.iter())
+        .chain(KEX_JOBS.iter())
+        .chain(SIG_JOBS.iter())
+        .chain(PQ_SIG_JOBS.iter())
+        .chain(KEM_JOBS.iter())
+        .chain(PKE_JOBS.iter())
+        .chain(FPE_JOBS.iter())
+        .copied()
+        .chain(WIDTHS.iter().map(|&(name, _)| name))
+}
+
+/// Says what a filter that selected nothing could have meant.
+///
+/// Nearly always one word is spelt right but asks for a row that does
+/// not exist, or two words are each fine and have no row in common --
+/// `ctr aes-256`, where counter mode has only a 128-bit row. Showing
+/// each word beside the rows it does match makes both visible.
+fn explain(filters: &[String]) {
+    eprintln!("speed: no row matches every filter word.");
+    for filter in filters {
+        let matched: Vec<&str> = every_row_name()
+            .filter(|name| filter.split(',').any(|word| name.contains(word)))
+            .collect();
+        if matched.is_empty() {
+            eprintln!(
+                "  {filter:<16} no row name holds this; \
+                 an implementation, perhaps?"
+            );
+        } else {
+            eprintln!("  {filter:<16} {}", matched.join(" "));
+        }
+    }
+    eprintln!(
+        "A row runs when its implementation and algorithm names \
+         together hold\nevery word given. Commas inside a word offer \
+         alternatives; see --help."
+    );
 }
 
 /// Measures one implementation, returning whether it ran anything.
