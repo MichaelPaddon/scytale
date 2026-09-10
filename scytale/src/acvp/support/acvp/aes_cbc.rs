@@ -7,6 +7,7 @@ use super::{groups as suite_groups, hex, key_of};
 use crate::KeyType;
 use crate::cipher::BlockCipher;
 use crate::cipher::mode::Cbc;
+use crate::cipher::mode::cbc;
 use serde_json::Value;
 
 /// The IV as the cipher's block type.
@@ -23,14 +24,26 @@ const MCT_ITERATIONS: usize = 1000;
 
 /// Runs the one-shot (AFT) groups against `C`; a no-op without the
 /// vendored vectors.
+/// Runs them against every implementation this processor has, not
+/// only the one the mode would pick: which that is depends on the
+/// machine, so anything else leaves whichever the machine did not
+/// choose unvalidated.
 pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
     let Some(groups) = groups::<C>("AFT") else {
         return;
     };
-    let count: usize = groups
-        .iter()
-        .map(|(group, encrypt)| aft::<C>(group, *encrypt))
-        .sum();
+    let mut count = 0;
+    let mut engines = 0;
+    for choice in cbc::CHOICES {
+        if Cbc::<C>::with_choice(&C::zero_key(), choice).is_none() {
+            continue;
+        }
+        engines += 1;
+        for (group, encrypt) in &groups {
+            count += aft::<C>(group, *encrypt, choice);
+        }
+    }
+    assert!(engines >= 1, "no implementation to test");
     // Guard against a truncated or wrong file passing vacuously.
     assert!(count >= 500, "only {count} AFT cases");
 }
@@ -41,10 +54,15 @@ pub fn run_mct<C: BlockCipher<Block = [u8; 16]>>() {
     let Some(groups) = groups::<C>("MCT") else {
         return;
     };
-    let count: usize = groups
-        .iter()
-        .map(|(group, encrypt)| mct::<C>(group, *encrypt))
-        .sum();
+    let mut count = 0;
+    for choice in cbc::CHOICES {
+        if Cbc::<C>::with_choice(&C::zero_key(), choice).is_none() {
+            continue;
+        }
+        for (group, encrypt) in &groups {
+            count += mct::<C>(group, *encrypt, choice);
+        }
+    }
     assert!(count >= 200, "only {count} MCT steps");
 }
 
@@ -53,18 +71,22 @@ fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
     suite_groups::<C>(FILE, "ACVP-AES-CBC", "1.0", test_type)
 }
 
-fn cbc<C: BlockCipher<Block = [u8; 16]>>(key: &[u8]) -> Option<Cbc<C>> {
-    Some(Cbc::new(&key_of::<C>(key)?))
+fn cbc<C: BlockCipher<Block = [u8; 16]>>(
+    key: &[u8],
+    choice: cbc::Choice,
+) -> Option<Cbc<C>> {
+    Cbc::with_choice(&key_of::<C>(key)?, choice)
 }
 
 /// Algorithm Functional Test: one message, one IV.
 fn aft<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
+    choice: cbc::Choice,
 ) -> usize {
     let mut count = 0;
     for t in group["tests"].as_array().expect("tests") {
-        let Some(cbc) = cbc::<C>(&hex(&t["key"])) else {
+        let Some(cbc) = cbc::<C>(&hex(&t["key"]), choice) else {
             continue;
         };
         let iv = hex(&t["iv"]);
@@ -93,6 +115,7 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
 fn mct<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
+    choice: cbc::Choice,
 ) -> usize {
     let (input_name, output_name) =
         if encrypt { ("pt", "ct") } else { ("ct", "pt") };
@@ -113,7 +136,7 @@ fn mct<C: BlockCipher<Block = [u8; 16]>>(
             assert_eq!(iv, hex(&step["iv"]), "{tag} iv");
             assert_eq!(input, hex(&step[input_name]), "{tag} input");
 
-            let cbc = cbc::<C>(&key).expect("width");
+            let cbc = cbc::<C>(&key, choice).expect("width");
             let (last, previous) = if encrypt {
                 step_encrypt(&cbc, &iv, &input)
             } else {

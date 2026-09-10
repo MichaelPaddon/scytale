@@ -68,6 +68,19 @@
 use core::fmt;
 
 use super::ghash::BLOCK;
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
+
+// The loops written out for this processor, whichever it is. Each
+// architecture's module offers the same entry points, so the code
+// below needs no conditionals beyond whether there is one at all.
+#[cfg(target_arch = "aarch64")]
+use self::aarch64 as native;
+#[cfg(target_arch = "x86_64")]
+use self::x86_64 as native;
+
 use super::{LANES, xor};
 use crate::Error;
 use crate::cipher::{BlockCipher, OneBlock};
@@ -81,6 +94,83 @@ use crate::util;
 pub struct Xts<C: BlockCipher<Block = [u8; BLOCK]>> {
     data: C,
     tweak: C,
+    /// What does the bulk work, settled when the mode is built. Read
+    /// only where there is a loop written out to reach.
+    #[cfg_attr(
+        not(any(target_arch = "aarch64", target_arch = "x86_64")),
+        allow(dead_code)
+    )]
+    engine: Engine<C>,
+}
+
+/// Which implementation to use.
+///
+/// A caller never names one: the mode takes the best the processor
+/// has. The tests and the vector suites do name them, so that every
+/// implementation is validated and not only the one this machine
+/// would pick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Choice {
+    /// XTS written out, two blocks to a register.
+    Wide,
+    /// The same, one block to a register.
+    Narrow,
+    /// The construction over the cipher's own bulk calls.
+    Generic,
+}
+
+/// Every implementation, best first.
+pub(crate) const CHOICES: [Choice; 3] =
+    [Choice::Wide, Choice::Narrow, Choice::Generic];
+
+/// What does the bulk work, settled when the mode is built.
+enum Engine<C: BlockCipher<Block = [u8; BLOCK]>> {
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    Native(native::Engine<C>),
+    /// What the other arm is written for. On an architecture with no
+    /// such arm nothing here names `C`, and the parameter would
+    /// otherwise go unused.
+    Generic(core::marker::PhantomData<C>),
+}
+
+/// By hand rather than derived: an engine holds no cipher, only a
+/// pointer to the loop written for one, so it clones whatever `C` is.
+impl<C: BlockCipher<Block = [u8; BLOCK]>> Clone for Engine<C> {
+    fn clone(&self) -> Self {
+        match self {
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            Engine::Native(engine) => Engine::Native(engine.clone()),
+            Engine::Generic(_) => Engine::Generic(core::marker::PhantomData),
+        }
+    }
+}
+
+impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
+    /// The best engine for this cipher on this processor.
+    fn new() -> Self {
+        for choice in CHOICES {
+            if let Some(engine) = Self::with(choice) {
+                return engine;
+            }
+        }
+        Engine::Generic(core::marker::PhantomData)
+    }
+
+    /// The engine `choice` names, or `None` where this processor or
+    /// this cipher has no such thing.
+    fn with(choice: Choice) -> Option<Self> {
+        match choice {
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            Choice::Wide => native::Engine::at_width(true).map(Engine::Native),
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            Choice::Narrow => {
+                native::Engine::at_width(false).map(Engine::Native)
+            }
+            Choice::Generic => Some(Engine::Generic(core::marker::PhantomData)),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> fmt::Debug for Xts<C> {
@@ -103,6 +193,26 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
         Ok(Xts {
             data: C::new(data),
             tweak: C::new(tweak),
+            engine: Engine::new(),
+        })
+    }
+
+    /// The mode over the implementation `choice` names, or `None`
+    /// where this processor or this cipher has no such thing.
+    ///
+    /// For the tests and the vector suites, which run every
+    /// implementation rather than only the one [`try_new`](Self::try_new)
+    /// would take.
+    #[cfg(test)]
+    pub(crate) fn with_choice(
+        data: &C::Key,
+        tweak: &C::Key,
+        choice: Choice,
+    ) -> Option<Self> {
+        Some(Xts {
+            data: C::new(data),
+            tweak: C::new(tweak),
+            engine: Engine::with(choice)?,
         })
     }
 
@@ -280,6 +390,11 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
     /// Runs the blocks that need no stealing, in groups, advancing
     /// the tweak as it goes.
     fn bulk(&self, data: &mut [u8], t: &mut [u8; BLOCK], encrypt: bool) {
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        if let Engine::Native(engine) = &self.engine {
+            engine.bulk(&self.data, t, data, encrypt);
+            return;
+        }
         let (whole, _) = data.as_chunks_mut::<BLOCK>();
         let mut tweaks = [[0u8; BLOCK]; LANES];
         for group in whole.chunks_mut(LANES) {
@@ -320,16 +435,19 @@ fn multiply_by_alpha(tweak: &mut [u8; BLOCK]) {
 /// Done without a branch, since the tweaks after the first depend on
 /// the key.
 #[inline]
-fn alpha(tweak: u128) -> u128 {
+pub(crate) fn alpha(tweak: u128) -> u128 {
     let carry = tweak >> 127;
     (tweak << 1) ^ (0u128.wrapping_sub(carry) & 0x87)
 }
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
     use crate::Key;
     use crate::cipher::aes::Aes128;
+    use std::vec::Vec;
 
     const MAX: usize = 80;
 
@@ -405,6 +523,47 @@ mod tests {
         assert_eq!(data, cipher, "encrypt");
         xts.decrypt(tweak, data).unwrap();
         assert_eq!(data, plain, "decrypt");
+    }
+
+    /// Every implementation this processor has must agree, at every
+    /// length around the group boundaries of both widths, with and
+    /// without a block to steal from.
+    #[test]
+    fn the_engines_agree() {
+        const MAX: usize = 5 * 16 * BLOCK + 7;
+        let data = Key::from([0x44u8; 16]);
+        let tweak = Key::from([0x55u8; 16]);
+        let t = [0x66u8; BLOCK];
+        let mut message = [0u8; MAX];
+        for (i, b) in message.iter_mut().enumerate() {
+            *b = (i * 11 + 5) as u8;
+        }
+
+        let all: Vec<Xts<Aes128>> = CHOICES
+            .iter()
+            .filter_map(|&c| Xts::<Aes128>::with_choice(&data, &tweak, c))
+            .collect();
+        assert!(!all.is_empty(), "no implementation to test");
+        // The generic one is always to be had.
+        assert!(
+            Xts::<Aes128>::with_choice(&data, &tweak, Choice::Generic)
+                .is_some()
+        );
+
+        for len in BLOCK..MAX {
+            let mut want = [0u8; MAX];
+            want[..len].copy_from_slice(&message[..len]);
+            all[all.len() - 1].encrypt(&t, &mut want[..len]).unwrap();
+
+            for (i, xts) in all.iter().enumerate() {
+                let mut got = [0u8; MAX];
+                got[..len].copy_from_slice(&message[..len]);
+                xts.encrypt(&t, &mut got[..len]).unwrap();
+                assert_eq!(got[..len], want[..len], "encrypt {len}, {i}");
+                xts.decrypt(&t, &mut got[..len]).unwrap();
+                assert_eq!(got[..len], message[..len], "decrypt {len}, {i}");
+            }
+        }
     }
 
     #[test]

@@ -11,7 +11,7 @@ use super::{groups as suite_groups, hex, key_of};
 use crate::Error;
 use crate::KeyType;
 use crate::cipher::BlockCipher;
-use crate::cipher::mode::{GcmSiv, SivKey};
+use crate::cipher::mode::{GcmSiv, SivKey, gcm_siv};
 use serde_json::Value;
 
 const FILE: &str = "ACVP-AES-GCM-SIV-1.0/internalProjection.json";
@@ -21,17 +21,29 @@ const TAG: usize = 16;
 
 /// Runs the one-shot (AFT) groups against `C`; a no-op without the
 /// vendored vectors.
+/// Runs them against every implementation this processor has, not
+/// only the one the mode would pick: which that is depends on the
+/// machine, so anything else leaves whichever the machine did not
+/// choose unvalidated.
 pub fn run_aft<C: BlockCipher<Block = [u8; 16], Key: SivKey>>() {
     let Some(groups) = groups::<C>("AFT") else {
         return;
     };
     let mut cases = 0;
     let mut rejections = 0;
-    for (group, encrypt) in &groups {
-        let (n, r) = aft::<C>(group, *encrypt);
-        cases += n;
-        rejections += r;
+    let mut engines = 0;
+    for choice in gcm_siv::CHOICES {
+        if GcmSiv::<C>::with_choice(&C::zero_key(), choice).is_none() {
+            continue;
+        }
+        engines += 1;
+        for (group, encrypt) in &groups {
+            let (n, r) = aft::<C>(group, *encrypt, choice);
+            cases += n;
+            rejections += r;
+        }
     }
+    assert!(engines >= 1, "no implementation to test");
     assert!(cases >= 33, "only {cases} AFT cases");
     assert!(
         rejections >= 1,
@@ -47,6 +59,7 @@ fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
 fn aft<C: BlockCipher<Block = [u8; 16], Key: SivKey>>(
     group: &Value,
     encrypt: bool,
+    choice: gcm_siv::Choice,
 ) -> (usize, usize) {
     let mut cases = 0;
     let mut rejections = 0;
@@ -56,7 +69,8 @@ fn aft<C: BlockCipher<Block = [u8; 16], Key: SivKey>>(
         let Some(key) = key_of::<C>(&hex(&t["key"])) else {
             continue;
         };
-        let siv = GcmSiv::<C>::new(&key);
+        let siv =
+            GcmSiv::<C>::with_choice(&key, choice).expect("implementation");
         let nonce: [u8; 12] = hex(&t["iv"]).try_into().expect("nonce");
         let aad = hex(&t["aad"]);
         let sealed = hex(&t["ct"]);

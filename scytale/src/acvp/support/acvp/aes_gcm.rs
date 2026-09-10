@@ -14,23 +14,36 @@ use crate::Error;
 use crate::KeyType;
 use crate::cipher::BlockCipher;
 use crate::cipher::mode::Gcm;
+use crate::cipher::mode::gcm;
 use serde_json::Value;
 
 const FILE: &str = "ACVP-AES-GCM-1.0/internalProjection.json";
 
 /// Runs the one-shot (AFT) groups against `C`; a no-op without the
 /// vendored vectors.
+/// Runs them against every implementation this processor has, not
+/// only the one the mode would pick: which that is depends on the
+/// machine, so anything else leaves whichever the machine did not
+/// choose unvalidated.
 pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
     let Some(groups) = groups::<C>("AFT") else {
         return;
     };
     let mut cases = 0;
     let mut rejections = 0;
-    for (group, encrypt) in &groups {
-        let (n, r) = aft::<C>(group, *encrypt);
-        cases += n;
-        rejections += r;
+    let mut engines = 0;
+    for choice in gcm::CHOICES {
+        if Gcm::<C>::with_choice(&C::zero_key(), choice).is_none() {
+            continue;
+        }
+        engines += 1;
+        for (group, encrypt) in &groups {
+            let (n, r) = aft::<C>(group, *encrypt, choice);
+            cases += n;
+            rejections += r;
+        }
     }
+    assert!(engines >= 1, "no implementation to test");
     // Guard against a truncated or wrong file passing vacuously, and
     // against the rejection cases quietly disappearing.
     assert!(cases >= 20, "only {cases} AFT cases");
@@ -48,6 +61,7 @@ fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
 fn aft<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
+    choice: gcm::Choice,
 ) -> (usize, usize) {
     let tag_len = group["tagLen"].as_u64().expect("tagLen") as usize / 8;
     let mut cases = 0;
@@ -58,7 +72,7 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
         let Some(key) = key_of::<C>(&hex(&t["key"])) else {
             continue;
         };
-        let gcm = Gcm::<C>::new(&key);
+        let gcm = Gcm::<C>::with_choice(&key, choice).expect("implementation");
         let nonce = hex(&t["iv"]);
         let aad = hex(&t["aad"]);
 

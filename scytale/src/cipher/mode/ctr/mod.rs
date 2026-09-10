@@ -53,26 +53,43 @@
 //! # }
 //! ```
 
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
+#[cfg(target_arch = "riscv64")]
+mod riscv64;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
+#[cfg(target_arch = "aarch64")]
+use self::aarch64 as native;
+#[cfg(target_arch = "riscv64")]
+use self::riscv64 as native;
+#[cfg(target_arch = "x86_64")]
+use self::x86_64 as native;
+
 use core::fmt;
 
-use super::xor;
-use crate::cipher::{BlockCipher, ByteOrder, CounterFn, OneBlock, counter_fn};
+use super::{ByteOrder, counter_blocks, xor};
+use crate::cipher::{BlockCipher, OneBlock};
 use crate::{ByteArray, Error};
 
 /// What does the work, settled when the mode is built, because it is
 /// the processor that decides and the processor does not change.
 ///
-/// Where this cipher runs on the AES instructions, [`x86_64::Engine`]
+/// Where this cipher runs on the AES instructions, the native engine
 /// is counter mode written out for them, start to finish. Anywhere
 /// else it is the construction over the cipher's own bulk encrypt,
 /// which is as fast as that processor allows.
 enum Engine<C: BlockCipher> {
-    #[cfg(target_arch = "x86_64")]
-    Native(x86_64::Engine<C>),
-    Generic(CounterFn<C>),
+    #[cfg(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    ))]
+    Native(native::Engine<C>),
+    /// The construction over the cipher's own bulk encrypt, which
+    /// needs nothing of its own: the cipher comes in with the data.
+    Generic,
 }
 
 /// By hand rather than derived: an engine holds no cipher, only a
@@ -80,21 +97,70 @@ enum Engine<C: BlockCipher> {
 impl<C: BlockCipher> Clone for Engine<C> {
     fn clone(&self) -> Self {
         match self {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "x86_64"
+            ))]
             Engine::Native(engine) => Engine::Native(engine.clone()),
-            Engine::Generic(blocks) => Engine::Generic(*blocks),
+            Engine::Generic => Engine::Generic,
         }
     }
 }
 
+/// Which implementation to use.
+///
+/// A caller never names one: the mode takes the best the processor
+/// has. The tests and the vector suites do name them, so that every
+/// implementation is validated and not only the one this machine
+/// would pick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Choice {
+    /// Counter mode written out, two blocks to a register.
+    Wide,
+    /// The same, one block to a register.
+    Narrow,
+    /// The construction over the cipher's own bulk encrypt.
+    Generic,
+}
+
+/// Every implementation, best first.
+pub(crate) const CHOICES: [Choice; 3] =
+    [Choice::Wide, Choice::Narrow, Choice::Generic];
+
 impl<C: BlockCipher> Engine<C> {
     /// The best engine for this cipher on this processor.
     fn new() -> Self {
-        #[cfg(target_arch = "x86_64")]
-        if let Some(native) = x86_64::Engine::new() {
-            return Engine::Native(native);
+        for choice in CHOICES {
+            if let Some(engine) = Self::with(choice) {
+                return engine;
+            }
         }
-        Engine::Generic(counter_fn::<C>())
+        Engine::Generic
+    }
+
+    /// The engine `choice` names, or `None` where this processor or
+    /// this cipher has no such thing.
+    fn with(choice: Choice) -> Option<Self> {
+        match choice {
+            #[cfg(any(
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "x86_64"
+            ))]
+            Choice::Wide => native::Engine::at_width(true).map(Engine::Native),
+            #[cfg(any(
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "x86_64"
+            ))]
+            Choice::Narrow => {
+                native::Engine::at_width(false).map(Engine::Native)
+            }
+            Choice::Generic => Some(Engine::Generic),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
     }
 
     /// Encrypts the counter blocks made from `counter` and XORs them
@@ -102,7 +168,11 @@ impl<C: BlockCipher> Engine<C> {
     /// `counter` on the block after the last.
     fn blocks(&self, cipher: &C, counter: &mut C::Block, data: &mut [u8]) {
         match self {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "x86_64"
+            ))]
             Engine::Native(engine) => {
                 // The engine exists only for a cipher whose block is
                 // this width, so the conversion cannot fail; the
@@ -115,8 +185,8 @@ impl<C: BlockCipher> Engine<C> {
                     Err(_) => debug_assert!(false, "block is not a block"),
                 }
             }
-            Engine::Generic(blocks) => {
-                blocks(cipher, counter, ByteOrder::Big, data)
+            Engine::Generic => {
+                counter_blocks(cipher, counter, ByteOrder::Big, data)
             }
         }
     }
@@ -140,6 +210,20 @@ where
             cipher: C::new(key),
             engine: Engine::new(),
         }
+    }
+
+    /// The mode over the implementation `choice` names, or `None`
+    /// where this processor or this cipher has no such thing.
+    ///
+    /// For the tests and the vector suites, which run every
+    /// implementation rather than only the one [`new`](Self::new)
+    /// would take.
+    #[cfg(test)]
+    pub(crate) fn with_choice(key: &C::Key, choice: Choice) -> Option<Self> {
+        Some(Ctr {
+            cipher: C::new(key),
+            engine: Engine::with(choice)?,
+        })
     }
 
     /// Encrypts `data` in place, starting from `counter`. Any length
@@ -308,7 +392,7 @@ impl<C: BlockCipher> fmt::Debug for Stream<'_, C> {
 mod tests {
     use super::*;
     use crate::Key;
-    use crate::cipher::aes::Aes;
+    use crate::cipher::aes::{Aes, Aes128};
 
     /// Enough to cover several bulk groups and a partial tail.
     const MAX: usize = 20 * 16 + 5;
@@ -359,6 +443,45 @@ mod tests {
 
     /// The cipher counts in the last four bytes and drops the carry
     /// there, so a run crossing that boundary is split in two and the
+    /// Every implementation this processor has must agree with the
+    /// keystream taken a block at a time, at every length around the
+    /// group boundaries of both widths.
+    #[test]
+    fn the_engines_agree() {
+        // Past the wider group more than once, with an odd tail.
+        const N: usize = 3 * 16 * 16 + 5 * 16 + 7;
+        let key = [0x5au8; 16];
+        let start = [0x77u8; 16];
+        let aes = Aes::<16>::new(&key);
+
+        let mut want = [0u8; N];
+        let mut counter = start;
+        for chunk in want.chunks_mut(16) {
+            let mut block = counter;
+            aes.encrypt_one(&mut block);
+            chunk.copy_from_slice(&block[..chunk.len()]);
+            increment(&mut counter);
+        }
+
+        let key = Key::from(key);
+        let mut engines = 0;
+        for choice in CHOICES {
+            let Some(ctr) = Ctr::<Aes128>::with_choice(&key, choice) else {
+                continue;
+            };
+            engines += 1;
+            for n in 0..=N {
+                let mut got = [0u8; N];
+                ctr.encrypt(&start, &mut got[..n]).unwrap();
+                assert_eq!(got[..n], want[..n], "{n} bytes, {choice:?}");
+            }
+        }
+        assert!(engines >= 1, "no implementation to test");
+        // The generic one is always to be had, and on a processor
+        // with the instructions the narrower written-out one is too.
+        assert!(Ctr::<Aes128>::with_choice(&key, Choice::Generic).is_some());
+    }
+
     /// The loops add to the last byte of the block without carrying
     /// out of it, so a message long enough for that byte to overflow
     /// must be cut where it would, and the carry done in full.

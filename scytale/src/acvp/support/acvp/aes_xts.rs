@@ -14,22 +14,44 @@ use super::{groups as suite_groups, hex, key_of};
 use crate::KeyType;
 use crate::cipher::BlockCipher;
 use crate::cipher::mode::Xts;
+use crate::cipher::mode::xts;
 use serde_json::Value;
 
 const FILE: &str = "ACVP-AES-XTS-1.0/internalProjection.json";
 
 /// Runs the one-shot (AFT) groups against `C`; a no-op without the
 /// vendored vectors.
+/// Runs them against every implementation this processor has, not
+/// only the one the mode would pick: which that is depends on the
+/// machine, so anything else leaves whichever the machine did not
+/// choose unvalidated.
 pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
     let Some(groups) = groups::<C>("AFT") else {
         return;
     };
     let mut cases = 0;
-    for (group, encrypt) in &groups {
-        let bits = group["payloadLen"].as_u64().expect("payloadLen");
-        cases += aft::<C>(group, *encrypt, bits as usize);
+    let mut engines = 0;
+    for choice in xts::CHOICES {
+        let (data, tweak) = (C::zero_key(), one_key::<C>());
+        if Xts::<C>::with_choice(&data, &tweak, choice).is_none() {
+            continue;
+        }
+        engines += 1;
+        for (group, encrypt) in &groups {
+            let bits = group["payloadLen"].as_u64().expect("payloadLen");
+            cases += aft::<C>(group, *encrypt, bits as usize, choice);
+        }
     }
+    assert!(engines >= 1, "no implementation to test");
     assert!(cases >= 133, "only {cases} AFT cases");
+}
+
+/// A key that differs from the zero one, which XTS needs: the two it
+/// takes may not be equal.
+fn one_key<C: KeyType>() -> C::Key {
+    let mut key = C::zero_key();
+    key.as_mut()[0] = 1;
+    key
 }
 
 fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
@@ -43,6 +65,7 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
     bits: usize,
+    choice: xts::Choice,
 ) -> usize {
     let mut count = 0;
     for t in group["tests"].as_array().expect("tests") {
@@ -53,7 +76,8 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
         else {
             continue;
         };
-        let xts = Xts::<C>::try_new(&data, &tweak).expect("key");
+        let xts = Xts::<C>::with_choice(&data, &tweak, choice)
+            .expect("implementation");
         let tweak: [u8; 16] = hex(&t["tweakValue"]).try_into().expect("tweak");
         let (input, expected) = if encrypt {
             (hex(&t["pt"]), hex(&t["ct"]))

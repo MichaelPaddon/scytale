@@ -37,6 +37,9 @@ pub const KEY_SIZE: usize = 32;
 /// The block, and tag, length in bytes.
 const BLOCK: usize = 16;
 
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
+
 /// A 44-bit limb's worth of ones.
 const MASK44: u64 = (1 << 44) - 1;
 
@@ -63,6 +66,11 @@ pub struct Poly1305 {
     /// Bytes of a block not yet complete.
     block: [u8; BLOCK],
     used: usize,
+    /// The powers of `r` the loop written out for this processor
+    /// wants, worked out the first time a run long enough to use them
+    /// arrives. A short message never pays for them.
+    #[cfg(target_arch = "x86_64")]
+    powers: Option<x86_64::Powers>,
 }
 
 impl Poly1305 {
@@ -90,6 +98,8 @@ impl Poly1305 {
             h: [0; 3],
             block: [0; BLOCK],
             used: 0,
+            #[cfg(target_arch = "x86_64")]
+            powers: None,
         }
     }
 
@@ -135,6 +145,19 @@ impl Poly1305 {
         h0 &= MASK44;
         h1 += c;
         self.h = [h0, h1, h2];
+    }
+
+    /// Makes sure the powers of `r` are to hand, and says whether
+    /// this processor can use them.
+    #[cfg(target_arch = "x86_64")]
+    fn ready(&mut self) -> bool {
+        if self.powers.is_none() {
+            if !x86_64::supported() {
+                return false;
+            }
+            self.powers = Some(x86_64::Powers::new(&self.r));
+        }
+        true
     }
 
     /// Fully reduces the accumulator, adds `s`, and returns the tag.
@@ -215,6 +238,20 @@ impl Mac for Poly1305 {
             self.absorb(&block, 1);
             self.used = 0;
         }
+        #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
+        let mut data = data;
+
+        // Whole groups through the loop written out for this
+        // processor, where there is one, and the odd blocks after.
+        #[cfg(target_arch = "x86_64")]
+        if data.len() >= x86_64::SPAN && self.ready() {
+            let groups = data.len() / x86_64::SPAN;
+            let (whole, rest) = data.split_at(groups * x86_64::SPAN);
+            let powers = self.powers.expect("just made");
+            x86_64::bulk(&mut self.h, &powers, whole);
+            data = rest;
+        }
+
         let (blocks, rest) = data.as_chunks::<BLOCK>();
         for block in blocks {
             self.absorb(block, 1);
@@ -247,6 +284,8 @@ impl Clone for Poly1305 {
             h: self.h,
             block: self.block,
             used: self.used,
+            #[cfg(target_arch = "x86_64")]
+            powers: self.powers,
         }
     }
 }
@@ -301,6 +340,57 @@ mod tests {
     }
 
     /// RFC 8439 section 2.5.2.
+    /// The loop that takes four blocks at once must agree with the
+    /// chain taken a block at a time, at every length around its group
+    /// boundary and with the pieces landing anywhere.
+    ///
+    /// On a processor without the instructions both sides of this are
+    /// the same code, and the test still says the lengths are right.
+    #[test]
+    fn four_at_once_agrees_with_one() {
+        const MAX: usize = 17 * BLOCK + 7;
+        let key = [0x2bu8; KEY_SIZE];
+        let mut data = [0u8; MAX];
+        for (i, b) in data.iter_mut().enumerate() {
+            *b = (i * 7 + 1) as u8;
+        }
+
+        for len in 0..MAX {
+            let want = one_at_a_time(&key, &data[..len]);
+
+            let mut p = Poly1305::new(&key);
+            p.update(&data[..len]);
+            assert_eq!(p.finalize(), want, "{len} bytes");
+
+            // Pieces, so a run starts and ends part way along and the
+            // part block is carried between calls.
+            for piece in [1, 16, 17, 64, 65] {
+                let mut p = Poly1305::new(&key);
+                for part in data[..len].chunks(piece) {
+                    p.update(part);
+                }
+                assert_eq!(p.finalize(), want, "{len} bytes in {piece}");
+            }
+        }
+    }
+
+    /// The tag with every block put through the chain on its own,
+    /// which no bulk path touches.
+    fn one_at_a_time(key: &[u8; KEY_SIZE], message: &[u8]) -> [u8; BLOCK] {
+        let mut p = Poly1305::new(key);
+        let (blocks, rest) = message.as_chunks::<BLOCK>();
+        for block in blocks {
+            p.absorb(block, 1);
+        }
+        if !rest.is_empty() {
+            let mut block = [0u8; BLOCK];
+            block[..rest.len()].copy_from_slice(rest);
+            block[rest.len()] = 1;
+            p.absorb(&block, 0);
+        }
+        p.tag()
+    }
+
     #[test]
     fn rfc8439_example() {
         check(

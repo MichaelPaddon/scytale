@@ -30,12 +30,11 @@
 
 #![allow(unsafe_code)]
 
-use core::any::Any;
-
+use super::super::{ByteOrder, add_counter};
+use crate::align::At16;
 use crate::cipher::BlockCipher;
-use crate::cipher::aes::x86_64::{Keyed, Schedule, has_aesni};
-use crate::cipher::aes::{Aes, Aes128, Aes192, Aes256};
-use crate::cipher::is;
+use crate::cipher::aes::x86_64::{Keys, has_aesni, keys};
+use crate::probe::Probe;
 
 /// The block these loops work in.
 const BLOCK: usize = 16;
@@ -52,12 +51,6 @@ const SPAN: usize = GROUP * BLOCK;
 /// The same at the wider width, where a register holds two blocks.
 const WIDE_GROUP: usize = 2 * REGISTERS;
 const WIDE_SPAN: usize = WIDE_GROUP * BLOCK;
-
-/// Constants the loops read, at the width they load them. Their
-/// contents are named only by the assembly, which reaches them by
-/// symbol rather than through a pointer the compiler can follow.
-#[repr(align(16))]
-struct Bytes<const N: usize>(#[allow(dead_code)] [u8; N]);
 
 /// What each register adds to the base counter to make its blocks,
 /// and after those, in the last place, what the base itself moves on
@@ -77,7 +70,7 @@ struct Bytes<const N: usize>(#[allow(dead_code)] [u8; N]);
 /// [`Engine::xor_counter_blocks`] keeps every run short enough that
 /// it cannot, and does the carrying itself between runs, which falls
 /// due once in every 256 blocks.
-static OFFSETS: Bytes<{ BLOCK * (REGISTERS + 1) }> = {
+static OFFSETS: At16<[u8; BLOCK * (REGISTERS + 1)]> = {
     let mut b = [0u8; BLOCK * (REGISTERS + 1)];
     let mut i = 0;
     while i < REGISTERS {
@@ -85,12 +78,12 @@ static OFFSETS: Bytes<{ BLOCK * (REGISTERS + 1) }> = {
         i += 1;
     }
     b[BLOCK * REGISTERS + BLOCK - 1] = GROUP as u8;
-    Bytes(b)
+    At16(b)
 };
 
 /// The same at the wider width, where each register makes two
 /// consecutive blocks and the base moves on by sixteen.
-static WIDE_OFFSETS: Bytes<{ 2 * BLOCK * (REGISTERS + 1) }> = {
+static WIDE_OFFSETS: At16<[u8; 2 * BLOCK * (REGISTERS + 1)]> = {
     let mut b = [0u8; 2 * BLOCK * (REGISTERS + 1)];
     let mut i = 0;
     while i < REGISTERS {
@@ -100,15 +93,8 @@ static WIDE_OFFSETS: Bytes<{ 2 * BLOCK * (REGISTERS + 1) }> = {
     }
     b[2 * BLOCK * REGISTERS + BLOCK - 1] = WIDE_GROUP as u8;
     b[2 * BLOCK * REGISTERS + 2 * BLOCK - 1] = WIDE_GROUP as u8;
-    Bytes(b)
+    At16(b)
 };
-
-/// How to reach the round keys of the cipher the mode was built over.
-///
-/// Settled when the mode is built, because which implementation
-/// expanded the key is the processor's to decide and only the object
-/// knows.
-type Keys<C> = for<'a> fn(&'a C) -> Option<Schedule<'a>>;
 
 /// Counter mode's loop, and how to reach the key it runs under.
 pub(crate) struct Engine<C> {
@@ -130,16 +116,16 @@ impl<C> Clone for Engine<C> {
 }
 
 impl<C: BlockCipher> Engine<C> {
-    /// The engine for this cipher, or `None` where this processor
-    /// lacks the instructions or `C` is not a cipher this is written
-    /// for.
-    pub(crate) fn new() -> Option<Self> {
-        if !has_aesni() {
+    /// The engine for this cipher at the width asked for, or `None`
+    /// where this processor lacks the instructions for it or `C` is
+    /// not a cipher this is written for.
+    pub(crate) fn at_width(wide: bool) -> Option<Self> {
+        if !has_aesni() || (wide && !has_vaes()) {
             return None;
         }
         Some(Engine {
             keys: keys::<C>()?,
-            wide: has_vaes(),
+            wide,
         })
     }
 
@@ -194,7 +180,11 @@ impl<C: BlockCipher> Engine<C> {
                             groups,
                         );
                     }
-                    advance(counter, (groups * WIDE_GROUP) as u32);
+                    add_counter(
+                        counter,
+                        ByteOrder::Big,
+                        (groups * WIDE_GROUP) as u32,
+                    );
                     rest = tail;
                 }
             }
@@ -212,7 +202,7 @@ impl<C: BlockCipher> Engine<C> {
                         groups,
                     );
                 }
-                advance(counter, (groups * GROUP) as u32);
+                add_counter(counter, ByteOrder::Big, (groups * GROUP) as u32);
                 rest = tail;
             }
 
@@ -232,7 +222,7 @@ impl<C: BlockCipher> Engine<C> {
                         rest.as_mut_ptr(),
                     );
                 }
-                advance(counter, blocks as u32);
+                add_counter(counter, ByteOrder::Big, blocks as u32);
             }
         }
     }
@@ -242,6 +232,13 @@ impl<C: BlockCipher> Engine<C> {
 /// registers: VAES (leaf 7, ECX bit 9), AVX2 (leaf 7, EBX bit 5), and
 /// the operating system saving the upper halves.
 fn has_vaes() -> bool {
+    PROBED.yes(ask_vaes)
+}
+
+/// Asked once; see [`crate::probe`].
+static PROBED: Probe = Probe::new();
+
+fn ask_vaes() -> bool {
     use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
     let leaf1 = __cpuid(1);
     let wanted = (1 << 27) | (1 << 28);
@@ -255,52 +252,6 @@ fn has_vaes() -> bool {
     // SAFETY: OSXSAVE was just confirmed, so XGETBV is available.
     let xcr0 = unsafe { _xgetbv(0) };
     xcr0 & 0b110 == 0b110
-}
-
-/// Adds `count` to the counter field, the last four bytes of the
-/// block, most significant first, wrapping inside them rather than
-/// carrying out.
-fn advance(counter: &mut [u8; BLOCK], count: u32) {
-    let field = &mut counter[BLOCK - 4..];
-    let n = u32::from_be_bytes([field[0], field[1], field[2], field[3]]);
-    field.copy_from_slice(&n.wrapping_add(count).to_be_bytes());
-}
-
-/// Answers [`keys`] for one group of types.
-macro_rules! arms {
-    ($($ty:ty),* $(,)?) => {
-        $(
-            if is::<$ty, C>() {
-                return Some(|cipher| {
-                    let any = cipher as &dyn Any;
-                    any.downcast_ref::<$ty>().and_then(Keyed::schedule)
-                });
-            }
-        )*
-    };
-}
-
-/// How to reach `C`'s round keys, or `None` if `C` is not a cipher
-/// whose keys these instructions could read.
-///
-/// Asked once, when the mode is built. `C` is a type parameter, so
-/// every comparison is a constant and all but one folds away.
-fn keys<C: BlockCipher>() -> Option<Keys<C>> {
-    arms!(
-        Aes128,
-        Aes192,
-        Aes256,
-        Aes<16>,
-        Aes<24>,
-        Aes<32>,
-        crate::cipher::aes::x86_64::aesni::Aes<16>,
-        crate::cipher::aes::x86_64::aesni::Aes<24>,
-        crate::cipher::aes::x86_64::aesni::Aes<32>,
-        crate::cipher::aes::x86_64::vaes::Aes<16>,
-        crate::cipher::aes::x86_64::vaes::Aes<24>,
-        crate::cipher::aes::x86_64::vaes::Aes<32>,
-    );
-    None
 }
 
 // Every sequence below is written once and used at both widths. The

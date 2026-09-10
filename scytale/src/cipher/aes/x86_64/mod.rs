@@ -12,7 +12,10 @@ pub mod vaes;
 use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
 use zeroize::ZeroizeOnDrop;
 
-use super::{KeySize, MAX_WORDS, expand_words};
+use core::any::Any;
+
+use super::{Aes, Aes128, Aes192, Aes256, KeySize, MAX_WORDS, expand_words};
+use crate::cipher::{BlockCipher, is};
 
 /// Whether the processor reports AES-NI (CPUID leaf 1, ECX bit 25)
 /// and `pshufb`, which comes with SSSE3 (bit 9).
@@ -53,7 +56,12 @@ pub(super) fn has_vaes256() -> bool {
 /// of its own over the cipher and something else asks this when it is
 /// built.
 pub(crate) trait Keyed {
+    /// The keys the rounds run forwards under.
     fn schedule(&self) -> Option<Schedule<'_>>;
+
+    /// The keys the rounds run backwards under, for a mode with a
+    /// loop of its own over decryption.
+    fn decryption(&self) -> Option<Schedule<'_>>;
 }
 
 /// A borrowed view of an expanded encryption key.
@@ -73,6 +81,15 @@ impl<'a> Schedule<'a> {
     fn new(keys: &'a RoundKeys) -> Self {
         Schedule {
             keys: &keys.enc,
+            rounds: keys.size.rounds(),
+        }
+    }
+
+    /// The same for the equivalent inverse cipher, whose keys run
+    /// backwards and have been through `InvMixColumns`.
+    fn inverse(keys: &'a RoundKeys) -> Self {
+        Schedule {
+            keys: &keys.dec,
             rounds: keys.size.rounds(),
         }
     }
@@ -160,4 +177,91 @@ unsafe fn expand(key: &[u8], size: KeySize) -> RoundKeys {
 
         RoundKeys { enc, dec, size }
     }
+}
+
+/// How to reach the round keys of the cipher a mode was built over.
+pub(crate) type Keys<C> = for<'a> fn(&'a C) -> Option<Schedule<'a>>;
+
+/// The same, either way round: `true` asks for the keys decryption
+/// runs under.
+pub(crate) type KeysEitherWay<C> =
+    for<'a> fn(&'a C, bool) -> Option<Schedule<'a>>;
+
+/// Every cipher here whose expanded key these instructions can read.
+///
+/// The dispatching widths and the generic type over them come first,
+/// because that is what a caller normally names; the implementations
+/// beneath them are here too, for a caller that named one directly.
+/// The portable ciphers are not, because their schedules are nothing
+/// these instructions could load.
+///
+/// One list, because a mode that missed an entry would quietly take
+/// its portable path for a cipher it could have run its own loop over,
+/// and nothing would fail.
+macro_rules! keyed {
+    ($mac:ident) => {
+        $mac!(
+            Aes128,
+            Aes192,
+            Aes256,
+            Aes<16>,
+            Aes<24>,
+            Aes<32>,
+            aesni::Aes<16>,
+            aesni::Aes<24>,
+            aesni::Aes<32>,
+            vaes::Aes<16>,
+            vaes::Aes<24>,
+            vaes::Aes<32>,
+        );
+    };
+}
+
+/// Answers [`keys`] for one group of types.
+macro_rules! forwards {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            if is::<$ty, C>() {
+                return Some(|cipher| {
+                    let any = cipher as &dyn Any;
+                    any.downcast_ref::<$ty>().and_then(Keyed::schedule)
+                });
+            }
+        )*
+    };
+}
+
+/// Answers [`keys_either_way`] for one group of types.
+macro_rules! either_way {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            if is::<$ty, C>() {
+                return Some(|cipher, backwards| {
+                    let any = cipher as &dyn Any;
+                    let cipher = any.downcast_ref::<$ty>()?;
+                    if backwards {
+                        Keyed::decryption(cipher)
+                    } else {
+                        Keyed::schedule(cipher)
+                    }
+                });
+            }
+        )*
+    };
+}
+
+/// How to reach `C`'s round keys, or `None` if `C` is not a cipher
+/// whose keys these instructions could read.
+///
+/// Asked once, when a mode is built. `C` is a type parameter, so every
+/// comparison is a constant and all but one folds away.
+pub(crate) fn keys<C: BlockCipher>() -> Option<Keys<C>> {
+    keyed!(forwards);
+    None
+}
+
+/// As [`keys`], for a mode with a loop over decryption as well.
+pub(crate) fn keys_either_way<C: BlockCipher>() -> Option<KeysEitherWay<C>> {
+    keyed!(either_way);
+    None
 }

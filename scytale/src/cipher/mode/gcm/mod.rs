@@ -74,15 +74,31 @@
 //! # }
 //! ```
 
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod aarch64;
+#[cfg(target_arch = "riscv64")]
+pub(crate) mod riscv64;
 #[cfg(target_arch = "x86_64")]
-mod x86_64;
+pub(crate) mod x86_64;
+
+// The loops written out for this processor, whichever it is. Each
+// architecture's module offers the same entry points for GCM itself,
+// so the code below needs no conditionals beyond whether there is one
+// at all. POLYVAL and GCM-SIV reach further into the x86-64 one and
+// name it directly.
+#[cfg(target_arch = "aarch64")]
+pub(crate) use self::aarch64 as native;
+#[cfg(target_arch = "riscv64")]
+pub(crate) use self::riscv64 as native;
+#[cfg(target_arch = "x86_64")]
+pub(crate) use self::x86_64 as native;
 
 use core::fmt;
 
 use super::ghash::{BLOCK, Ghash};
-use super::xor;
+use super::{ByteOrder, counter_blocks, xor};
 use crate::Error;
-use crate::cipher::{BlockCipher, ByteOrder, CounterFn, OneBlock, counter_fn};
+use crate::cipher::{BlockCipher, OneBlock};
 use crate::util;
 
 /// The most message bytes GCM may protect under one key and nonce:
@@ -127,9 +143,15 @@ pub(crate) enum Direction {
 // put them on.
 #[allow(clippy::large_enum_variant)]
 enum Engine<C: BlockCipher<Block = [u8; BLOCK]>> {
-    #[cfg(target_arch = "x86_64")]
-    Native(x86_64::Engine<C>),
-    Generic(CounterFn<C>),
+    #[cfg(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    ))]
+    Native(native::Engine<C>),
+    /// The counter loop over the cipher's own bulk encrypt, with the
+    /// hash run separately.
+    Generic,
 }
 
 /// By hand rather than derived: an engine holds no cipher, only a
@@ -137,23 +159,74 @@ enum Engine<C: BlockCipher<Block = [u8; BLOCK]>> {
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Clone for Engine<C> {
     fn clone(&self) -> Self {
         match self {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "x86_64"
+            ))]
             Engine::Native(engine) => Engine::Native(engine.clone()),
-            Engine::Generic(blocks) => Engine::Generic(*blocks),
+            Engine::Generic => Engine::Generic,
         }
     }
 }
+
+/// Which implementation to use.
+///
+/// A caller never names one: the mode takes the best the processor
+/// has. The tests and the vector suites do name them, so that every
+/// implementation is validated and not only the one this machine
+/// would pick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Choice {
+    /// The one loop, two blocks to a register.
+    Wide,
+    /// The one loop, one block to a register.
+    Narrow,
+    /// The counter loop and the hash, called in turn.
+    Generic,
+}
+
+/// Every implementation, best first.
+pub(crate) const CHOICES: [Choice; 3] =
+    [Choice::Wide, Choice::Narrow, Choice::Generic];
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
     /// The best engine for this cipher on this processor, under hash
     /// subkey `h`.
     fn new(h: &[u8; BLOCK]) -> Self {
-        #[cfg(target_arch = "x86_64")]
-        if let Some(native) = x86_64::Engine::new(h) {
-            return Engine::Native(native);
+        for choice in CHOICES {
+            if let Some(engine) = Self::with(h, choice) {
+                return engine;
+            }
         }
+        Engine::Generic
+    }
+
+    /// The engine `choice` names, or `None` where this processor or
+    /// this cipher has no such thing.
+    fn with(h: &[u8; BLOCK], choice: Choice) -> Option<Self> {
         let _ = h;
-        Engine::Generic(counter_fn::<C>())
+        match choice {
+            #[cfg(any(
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "x86_64"
+            ))]
+            Choice::Wide => {
+                native::Engine::at_width(h, true).map(Engine::Native)
+            }
+            #[cfg(any(
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "x86_64"
+            ))]
+            Choice::Narrow => {
+                native::Engine::at_width(h, false).map(Engine::Native)
+            }
+            Choice::Generic => Some(Engine::Generic),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
     }
 }
 
@@ -163,10 +236,13 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
 /// Everything settled by the key it borrows from the engine, so
 /// starting a message copies nothing that the key already worked out.
 enum Hash<'a, C: BlockCipher<Block = [u8; BLOCK]>> {
-    #[cfg(target_arch = "x86_64")]
-    Native(x86_64::Hasher<'a, C>),
+    #[cfg(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    ))]
+    Native(native::Hasher<'a, C>),
     Generic {
-        blocks: CounterFn<C>,
         hash: Ghash,
         /// What the other arm borrows from the engine. On an
         /// architecture with no such arm nothing is borrowed, and the
@@ -179,10 +255,13 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Hash<'a, C> {
     /// A hash at the start of a message.
     fn new(gcm: &'a Gcm<C>) -> Self {
         match &gcm.engine {
-            #[cfg(target_arch = "x86_64")]
-            Engine::Native(engine) => Hash::Native(x86_64::Hasher::new(engine)),
-            Engine::Generic(blocks) => Hash::Generic {
-                blocks: *blocks,
+            #[cfg(any(
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "x86_64"
+            ))]
+            Engine::Native(engine) => Hash::Native(native::Hasher::new(engine)),
+            Engine::Generic => Hash::Generic {
                 hash: Ghash::new(&gcm.h),
                 engine: core::marker::PhantomData,
             },
@@ -192,7 +271,11 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Hash<'a, C> {
     /// Adds more of the current field to the hash.
     fn hash(&mut self, data: &[u8]) {
         match self {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "x86_64"
+            ))]
             Hash::Native(hasher) => hasher.hash(data),
             Hash::Generic { hash, .. } => hash.update(data),
         }
@@ -201,7 +284,11 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Hash<'a, C> {
     /// Ends the current field, padding it with zeros to a block.
     fn pad(&mut self) {
         match self {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "x86_64"
+            ))]
             Hash::Native(hasher) => hasher.pad(),
             Hash::Generic { hash, .. } => hash.pad(),
         }
@@ -210,7 +297,11 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Hash<'a, C> {
     /// The hash so far. Every field must have been padded first.
     fn finish(&self) -> [u8; BLOCK] {
         match self {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "x86_64"
+            ))]
             Hash::Native(hasher) => hasher.finish(),
             Hash::Generic { hash, .. } => hash.finish(),
         }
@@ -226,19 +317,22 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Hash<'a, C> {
         data: &mut [u8],
     ) {
         match self {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "x86_64"
+            ))]
             Hash::Native(hasher) => {
                 hasher.bulk(cipher, counter, direction, data)
             }
-            Hash::Generic { blocks, hash, .. } => {
+            Hash::Generic { hash, .. } => {
                 if direction == Direction::Decrypt {
                     hash.update(data);
                 }
                 // GCM counts in the last four bytes of the block and
-                // wraps inside them, which is exactly what the
-                // cipher's counter loop does, so there is no boundary
-                // to split the run at.
-                blocks(cipher, counter, ByteOrder::Big, data);
+                // wraps inside them, which is what the counter loop
+                // does, so there is no boundary to split the run at.
+                counter_blocks(cipher, counter, ByteOrder::Big, data);
                 if direction == Direction::Encrypt {
                     hash.update(data);
                 }
@@ -278,6 +372,24 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
             cipher,
             h,
         }
+    }
+
+    /// The mode over the implementation `choice` names, or `None`
+    /// where this processor or this cipher has no such thing.
+    ///
+    /// For the tests and the vector suites, which run every
+    /// implementation rather than only the one [`new`](Self::new)
+    /// would take.
+    #[cfg(test)]
+    pub(crate) fn with_choice(key: &C::Key, choice: Choice) -> Option<Self> {
+        let cipher = C::new(key);
+        let mut h = [0u8; BLOCK];
+        cipher.encrypt_one(&mut h);
+        Some(Gcm {
+            engine: Engine::<C>::with(&h, choice)?,
+            cipher,
+            h,
+        })
     }
 
     /// Encrypts `data` in place and writes its tag.
@@ -646,6 +758,7 @@ mod tests {
     use super::*;
     use crate::Key;
     use crate::cipher::aes::{Aes, Aes128, portable};
+    use std::vec::Vec;
 
     /// Buffers big enough for every case below.
     const MAX: usize = 64;
@@ -968,8 +1081,14 @@ mod tests {
     fn the_engines_agree() {
         const MAX: usize = 9 * 16 * BLOCK + 3;
         let key = [0x9du8; 16];
-        let native = Gcm::<Aes128>::new(&Key::from(key));
         let generic = Gcm::<portable::bitsliced::Aes<16>>::new(&Key::from(key));
+        // Every implementation this processor has, not only the one
+        // the mode would pick.
+        let all: Vec<Gcm<Aes128>> = CHOICES
+            .iter()
+            .filter_map(|&c| Gcm::<Aes128>::with_choice(&Key::from(key), c))
+            .collect();
+        assert!(!all.is_empty(), "no implementation to test");
         let nonce = [0x33u8; 12];
         let aad = [0x77u8; 21];
 
@@ -990,22 +1109,26 @@ mod tests {
             a[..len].copy_from_slice(&message[..len]);
             b[..len].copy_from_slice(&message[..len]);
             let (mut ta, mut tb) = ([0u8; TAG], [0u8; TAG]);
-            native
-                .encrypt(&nonce, &aad, &mut a[..len], &mut ta)
-                .unwrap();
             generic
                 .encrypt(&nonce, &aad, &mut b[..len], &mut tb)
                 .unwrap();
-            assert_eq!(a[..len], b[..len], "ciphertext, {len} bytes");
-            assert_eq!(ta, tb, "tag, {len} bytes");
-
-            native.decrypt(&nonce, &aad, &mut a[..len], &ta).unwrap();
-            assert_eq!(a[..len], message[..len], "plaintext, {len} bytes");
+            for (i, native) in all.iter().enumerate() {
+                a[..len].copy_from_slice(&message[..len]);
+                native
+                    .encrypt(&nonce, &aad, &mut a[..len], &mut ta)
+                    .unwrap();
+                assert_eq!(a[..len], b[..len], "ciphertext, {len}, {i}");
+                assert_eq!(ta, tb, "tag, {len} bytes, {i}");
+                native.decrypt(&nonce, &aad, &mut a[..len], &ta).unwrap();
+                assert_eq!(a[..len], message[..len], "plaintext, {len}, {i}");
+            }
 
             // The same message in pieces, which leaves the hash and
             // the keystream part way through a block, where the bulk
             // loop cannot start and has to give way.
-            for piece in [1, 17, 128, 129] {
+            for (piece, native) in
+                [1, 17, 128, 129].into_iter().zip(all.iter().cycle())
+            {
                 let mut c = [0u8; MAX];
                 c[..len].copy_from_slice(&message[..len]);
                 let mut e = native.encryptor(&nonce).unwrap();
@@ -1057,13 +1180,22 @@ mod tests {
                 // Nothing to check on a processor without them.
                 return;
             }
-            let gcm = Gcm::<Aes128>::new(&Key::from([0u8; 16]));
+            let key = Key::from([0u8; 16]);
+            let gcm = Gcm::<Aes128>::new(&key);
             assert!(matches!(gcm.engine, Engine::Native(_)));
             // And the portable cipher, whose schedule those
             // instructions cannot read, does not.
-            let other =
-                Gcm::<portable::bitsliced::Aes<16>>::new(&Key::from([0u8; 16]));
-            assert!(matches!(other.engine, Engine::Generic { .. }));
+            let other = Gcm::<portable::bitsliced::Aes<16>>::new(&key);
+            assert!(matches!(other.engine, Engine::Generic));
+
+            // The generic one is always to be had, and the narrower
+            // of the two written out is too wherever this test runs
+            // at all, so both are validated and not just the one this
+            // machine would take.
+            assert!(Gcm::<Aes128>::with_choice(&key, Choice::Narrow).is_some());
+            assert!(
+                Gcm::<Aes128>::with_choice(&key, Choice::Generic).is_some()
+            );
         }
     }
 

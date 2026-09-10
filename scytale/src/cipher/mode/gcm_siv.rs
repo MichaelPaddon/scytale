@@ -52,10 +52,16 @@
 
 use core::fmt;
 
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    target_arch = "x86_64"
+))]
+use super::gcm;
 use super::ghash::BLOCK;
 use super::polyval::Polyval;
-use super::xor;
-use crate::cipher::{BlockCipher, ByteOrder, CounterFn, OneBlock, counter_fn};
+use super::{ByteOrder, counter_blocks, xor};
+use crate::cipher::{BlockCipher, OneBlock};
 use crate::util;
 use crate::{Error, Key};
 use zeroize::Zeroize;
@@ -120,10 +126,41 @@ mod sealed {
 pub struct GcmSiv<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> {
     cipher: C,
     key_len: usize,
-    /// The counter loop this cipher gets, settled when the mode is
-    /// built.
-    counter: CounterFn<C>,
+    /// How to reach the round keys of a cipher derived from this key,
+    /// where this processor has the loops that want them.
+    ///
+    /// Encrypting, the counter runs on its own: the tag covers the
+    /// plaintext and the counter comes from the tag, so the hash must
+    /// finish before the cipher starts. Decrypting, the counter comes
+    /// from the tag that arrived, so the cipher runs first and the
+    /// hash covers what it produces, which is the one case here where
+    /// the two can be the same loop.
+    #[cfg_attr(
+        not(any(
+            target_arch = "aarch64",
+            target_arch = "riscv64",
+            target_arch = "x86_64"
+        )),
+        allow(dead_code)
+    )]
+    native: Option<Keys<C>>,
 }
+
+/// How to reach a cipher's round keys; see [`GcmSiv::native`].
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    target_arch = "x86_64"
+))]
+type Keys<C> = gcm::native::Keys<C>;
+
+/// Nothing reaches them on an architecture with no loop to feed.
+#[cfg(not(any(
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    target_arch = "x86_64"
+)))]
+type Keys<C> = core::marker::PhantomData<C>;
 
 impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> fmt::Debug
     for GcmSiv<C>
@@ -134,13 +171,65 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> fmt::Debug
     }
 }
 
+/// Which implementation to use.
+///
+/// A caller never names one: the mode takes the best the processor
+/// has. The tests and the vector suites do name them, so that every
+/// implementation is validated and not only the one this machine
+/// would pick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Choice {
+    /// The counter written out, and when decrypting the hash run
+    /// beside it.
+    Native,
+    /// The construction over the cipher's own counter loop, with the
+    /// hash run separately.
+    Generic,
+}
+
+/// Every implementation, best first.
+pub(crate) const CHOICES: [Choice; 2] = [Choice::Native, Choice::Generic];
+
 impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
     /// Takes the key that all others are derived from.
     pub fn new(key: &C::Key) -> Self {
+        for choice in CHOICES {
+            if let Some(mode) = Self::with_choice(key, choice) {
+                return mode;
+            }
+        }
+        Self::generic(key)
+    }
+
+    /// The mode over the implementation `choice` names, or `None`
+    /// where this processor or this cipher has no such thing.
+    pub(crate) fn with_choice(key: &C::Key, choice: Choice) -> Option<Self> {
+        match choice {
+            #[cfg(any(
+                target_arch = "aarch64",
+                target_arch = "riscv64",
+                target_arch = "x86_64"
+            ))]
+            Choice::Native => {
+                let keys = gcm::native::keys::<C>()?;
+                Some(GcmSiv {
+                    native: Some(keys),
+                    ..Self::generic(key)
+                })
+            }
+            Choice::Generic => Some(Self::generic(key)),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
+    /// The mode over the cipher's own calls, which every processor
+    /// has.
+    fn generic(key: &C::Key) -> Self {
         GcmSiv {
             cipher: C::new(key),
             key_len: key.as_ref().len(),
-            counter: counter_fn::<C>(),
+            native: None,
         }
     }
 
@@ -159,7 +248,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
         let full = authenticate(&hash_key, &cipher, nonce, aad, data)?;
         let mut counter = full;
         counter[BLOCK - 1] |= 0x80;
-        apply(&cipher, self.counter, &mut counter, data);
+        self.apply(&cipher, &mut counter, data);
 
         tag.copy_from_slice(&full);
         Ok(())
@@ -184,15 +273,94 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
         // is recomputed over the plaintext and compared.
         let mut counter = *tag;
         counter[BLOCK - 1] |= 0x80;
-        apply(&cipher, self.counter, &mut counter, data);
-
-        let full = authenticate(&hash_key, &cipher, nonce, aad, data)?;
+        let full = self.decrypt_and_authenticate(
+            &hash_key,
+            &cipher,
+            nonce,
+            aad,
+            &mut counter,
+            data,
+        )?;
         if util::equal(&full, tag) {
             Ok(())
         } else {
             data.fill(0);
             Err(Error::AuthenticationFailed)
         }
+    }
+
+    /// The counter over `data`, with nothing hashed beside it.
+    fn apply(&self, cipher: &C, counter: &mut [u8; BLOCK], data: &mut [u8]) {
+        #[cfg(any(
+            target_arch = "aarch64",
+            target_arch = "riscv64",
+            target_arch = "x86_64"
+        ))]
+        if let Some(schedule) = self.native.and_then(|keys| keys(cipher)) {
+            let (whole, tail) = data.as_chunks_mut::<BLOCK>();
+            gcm::native::siv_counter(
+                schedule,
+                counter,
+                whole.as_flattened_mut(),
+            );
+            steal(cipher, counter, tail);
+            return;
+        }
+        apply(cipher, counter, data);
+    }
+
+    /// Decrypts `data` and hashes the plaintext it produces, which
+    /// here is one pass: the counter comes from the tag that arrived,
+    /// so the cipher does not wait on the hash.
+    #[allow(clippy::too_many_arguments)]
+    fn decrypt_and_authenticate(
+        &self,
+        hash_key: &[u8; BLOCK],
+        cipher: &C,
+        nonce: &[u8; NONCE],
+        aad: &[u8],
+        counter: &mut [u8; BLOCK],
+        data: &mut [u8],
+    ) -> Result<[u8; BLOCK], Error> {
+        #[cfg(any(
+            target_arch = "aarch64",
+            target_arch = "riscv64",
+            target_arch = "x86_64"
+        ))]
+        if let Some(schedule) = self.native.and_then(|keys| keys(cipher)) {
+            {
+                let len = data.len();
+                let mut hash = Polyval::new(hash_key, aad.len() + len);
+                // The additional data comes first, as it does in the
+                // tag's definition, and is a field of its own.
+                hash.update(aad);
+                hash.pad();
+                let (whole, tail) = data.as_chunks_mut::<BLOCK>();
+                let whole = whole.as_flattened_mut();
+                // One pass where there is a loop that decrypts and
+                // hashes together, which so far is x86-64 alone.
+                #[allow(unused_mut)]
+                let mut fused = false;
+                #[cfg(target_arch = "x86_64")]
+                if let Some(native) = hash.native() {
+                    native.bulk(schedule, counter, whole);
+                    fused = true;
+                }
+                if !fused {
+                    // In turn: the counter written out, and then the
+                    // hash over what it produced.
+                    gcm::native::siv_counter(schedule, counter, whole);
+                    hash.update(whole);
+                }
+                steal(cipher, counter, tail);
+                hash.update(tail);
+                hash.pad();
+                hash.update(&lengths(aad.len(), len));
+                return Ok(seal(hash.finish(), cipher, nonce));
+            }
+        }
+        apply(cipher, counter, data);
+        authenticate(hash_key, cipher, nonce, aad, data)
     }
 
     /// Derives the hashing key and the encrypting cipher for one
@@ -237,18 +405,32 @@ fn authenticate<C: BlockCipher<Block = [u8; BLOCK]>>(
     aad: &[u8],
     plaintext: &[u8],
 ) -> Result<[u8; BLOCK], Error> {
-    let mut hash = Polyval::new(hash_key);
+    let mut hash = Polyval::new(hash_key, aad.len() + plaintext.len());
     hash.update(aad);
     hash.pad();
     hash.update(plaintext);
     hash.pad();
 
-    let mut lengths = [0u8; BLOCK];
-    lengths[..8].copy_from_slice(&((aad.len() as u64) * 8).to_le_bytes());
-    lengths[8..].copy_from_slice(&((plaintext.len() as u64) * 8).to_le_bytes());
-    hash.update(&lengths);
+    hash.update(&lengths(aad.len(), plaintext.len()));
+    Ok(seal(hash.finish(), cipher, nonce))
+}
 
-    let mut tag = hash.finish();
+/// The length block the hash ends with: the two lengths in bits, the
+/// little-endian way round.
+fn lengths(aad: usize, message: usize) -> [u8; BLOCK] {
+    let mut lengths = [0u8; BLOCK];
+    lengths[..8].copy_from_slice(&((aad as u64) * 8).to_le_bytes());
+    lengths[8..].copy_from_slice(&((message as u64) * 8).to_le_bytes());
+    lengths
+}
+
+/// The tag from a finished hash: combined with the nonce and
+/// encrypted.
+fn seal<C: BlockCipher<Block = [u8; BLOCK]>>(
+    mut tag: [u8; BLOCK],
+    cipher: &C,
+    nonce: &[u8; NONCE],
+) -> [u8; BLOCK] {
     for (byte, n) in tag.iter_mut().zip(nonce) {
         *byte ^= n;
     }
@@ -256,22 +438,48 @@ fn authenticate<C: BlockCipher<Block = [u8; BLOCK]>>(
     // keeps the tag out of the counter's own range.
     tag[BLOCK - 1] &= 0x7f;
     cipher.encrypt_one(&mut tag);
-    Ok(tag)
+    tag
+}
+
+/// The counter over the last part block, which no bulk loop covers.
+///
+/// The construction over the cipher's own calls does its own, so this
+/// is for the loops written out.
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    target_arch = "x86_64"
+))]
+fn steal<C: BlockCipher<Block = [u8; BLOCK]>>(
+    cipher: &C,
+    counter: &mut [u8; BLOCK],
+    tail: &mut [u8],
+) {
+    if !tail.is_empty() {
+        let mut keystream = *counter;
+        increment(counter);
+        cipher.encrypt_one(&mut keystream);
+        xor(tail, &keystream);
+    }
 }
 
 /// Counter mode as GCM-SIV defines it: the counter is the first four
 /// bytes, read the little-endian way round.
 fn apply<C: BlockCipher<Block = [u8; BLOCK]>>(
     cipher: &C,
-    blocks: CounterFn<C>,
     counter: &mut [u8; BLOCK],
     data: &mut [u8],
 ) {
-    // Whole blocks in one run: the four bytes this mode counts in
-    // wrap inside themselves, which is what the cipher's counter loop
-    // does, so there is no boundary to split at.
+    // Whole blocks in one run: the four bytes this mode counts in wrap
+    // inside themselves, which is what the counter loop does, so there
+    // is no boundary to split at.
     let (whole, tail) = data.as_chunks_mut::<BLOCK>();
-    blocks(cipher, counter, ByteOrder::Little, whole.as_flattened_mut());
+    counter_blocks(
+        cipher,
+        counter,
+        ByteOrder::Little,
+        whole.as_flattened_mut(),
+    );
     if !tail.is_empty() {
         let mut keystream = *counter;
         increment(counter);
@@ -472,6 +680,52 @@ mod tests {
             siv.decrypt(&nonce, b"HEAD", &mut data, &tag).unwrap_err(),
             Error::AuthenticationFailed
         );
+    }
+
+    /// Every implementation this processor has must agree, at every
+    /// length around the group boundaries the loops work in.
+    #[test]
+    fn the_engines_agree() {
+        // Past the length at which the hash starts working out the
+        // powers of its key, so that the loop which runs the cipher
+        // and the hash together is reached as well.
+        const MAX: usize = 2 * 1024 + 5;
+        let key = Key::from([0x21u8; 16]);
+        let nonce = [0x37u8; NONCE];
+        let aad = [0x5au8; 13];
+        let mut message = [0u8; MAX];
+        for (i, b) in message.iter_mut().enumerate() {
+            *b = (i * 9 + 4) as u8;
+        }
+
+        let generic =
+            GcmSiv::<Aes128>::with_choice(&key, Choice::Generic).unwrap();
+        for len in 0..MAX {
+            let mut want = [0u8; MAX];
+            want[..len].copy_from_slice(&message[..len]);
+            let mut wanted_tag = [0u8; TAG];
+            generic
+                .encrypt(&nonce, &aad, &mut want[..len], &mut wanted_tag)
+                .unwrap();
+
+            for choice in CHOICES {
+                let Some(siv) = GcmSiv::<Aes128>::with_choice(&key, choice)
+                else {
+                    continue;
+                };
+                let mut got = [0u8; MAX];
+                got[..len].copy_from_slice(&message[..len]);
+                let mut tag = [0u8; TAG];
+                siv.encrypt(&nonce, &aad, &mut got[..len], &mut tag)
+                    .unwrap();
+                assert_eq!(got[..len], want[..len], "{len}, {choice:?}");
+                assert_eq!(tag, wanted_tag, "tag {len}, {choice:?}");
+
+                siv.decrypt(&nonce, &aad, &mut got[..len], &tag)
+                    .unwrap_or_else(|e| panic!("{len}, {choice:?}: {e:?}"));
+                assert_eq!(got[..len], message[..len], "{len}, {choice:?}");
+            }
+        }
     }
 
     #[test]

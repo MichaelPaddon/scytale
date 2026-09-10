@@ -37,16 +37,102 @@
 //! # }
 //! ```
 
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
+
+// The loops written out for this processor, whichever it is. Each
+// architecture's module offers the same few entry points, so the code
+// below needs no conditionals beyond whether there is one at all.
+#[cfg(target_arch = "aarch64")]
+use self::aarch64 as native;
+#[cfg(target_arch = "x86_64")]
+use self::x86_64 as native;
+
 use core::fmt;
 
 use super::{LANES, xor};
 use crate::cipher::{BlockCipher, OneBlock};
 use crate::{ByteArray, Error};
 
+/// Which implementation to use.
+///
+/// A caller never names one: the mode takes the best the processor
+/// has. The tests and the vector suites do name them, so that every
+/// implementation is validated and not only the one this machine
+/// would pick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Choice {
+    /// Chaining written out, two blocks to a register when
+    /// decrypting.
+    Wide,
+    /// The same, one block to a register.
+    Narrow,
+    /// The construction over the cipher's own calls.
+    Generic,
+}
+
+/// Every implementation, best first.
+pub(crate) const CHOICES: [Choice; 3] =
+    [Choice::Wide, Choice::Narrow, Choice::Generic];
+
+/// What does the work, settled when the mode is built.
+enum Engine<C: BlockCipher> {
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    Native(native::Engine<C>),
+    /// What the other arm is written for. On an architecture with no
+    /// such arm nothing here names `C`, and the parameter would
+    /// otherwise go unused.
+    Generic(core::marker::PhantomData<C>),
+}
+
+/// By hand rather than derived: an engine holds no cipher, only a
+/// pointer to the loop written for one, so it clones whatever `C` is.
+impl<C: BlockCipher> Clone for Engine<C> {
+    fn clone(&self) -> Self {
+        match self {
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            Engine::Native(engine) => Engine::Native(engine.clone()),
+            Engine::Generic(_) => Engine::Generic(core::marker::PhantomData),
+        }
+    }
+}
+
+impl<C: BlockCipher> Engine<C> {
+    /// The best engine for this cipher on this processor.
+    fn new() -> Self {
+        for choice in CHOICES {
+            if let Some(engine) = Self::with(choice) {
+                return engine;
+            }
+        }
+        Engine::Generic(core::marker::PhantomData)
+    }
+
+    /// The engine `choice` names, or `None` where this processor or
+    /// this cipher has no such thing.
+    fn with(choice: Choice) -> Option<Self> {
+        match choice {
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            Choice::Wide => native::Engine::at_width(true).map(Engine::Native),
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            Choice::Narrow => {
+                native::Engine::at_width(false).map(Engine::Native)
+            }
+            Choice::Generic => Some(Engine::Generic(core::marker::PhantomData)),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+}
+
 /// CBC over a block cipher.
 #[derive(Clone)]
 pub struct Cbc<C: BlockCipher> {
     cipher: C,
+    /// What does the work, settled when the mode is built.
+    engine: Engine<C>,
 }
 
 impl<C: BlockCipher> Cbc<C>
@@ -54,9 +140,25 @@ where
     C::Block: ByteArray,
 {
     /// Takes the key the cipher runs under.
+    /// The mode over the implementation `choice` names, or `None`
+    /// where this processor or this cipher has no such thing.
+    ///
+    /// For the tests and the vector suites, which run every
+    /// implementation rather than only the one [`new`](Self::new)
+    /// would take.
+    #[cfg(test)]
+    pub(crate) fn with_choice(key: &C::Key, choice: Choice) -> Option<Self> {
+        Some(Cbc {
+            cipher: C::new(key),
+            engine: Engine::with(choice)?,
+        })
+    }
+
+    /// Takes the key the cipher runs under.
     pub fn new(key: &C::Key) -> Self {
         Cbc {
             cipher: C::new(key),
+            engine: Engine::new(),
         }
     }
 
@@ -78,6 +180,7 @@ where
     pub fn encryptor(&self, iv: &C::Block) -> Encryptor<'_, C> {
         Encryptor {
             cipher: &self.cipher,
+            engine: self.engine.clone(),
             chain: *iv,
         }
     }
@@ -86,6 +189,7 @@ where
     pub fn decryptor(&self, iv: &C::Block) -> Decryptor<'_, C> {
         Decryptor {
             cipher: &self.cipher,
+            engine: self.engine.clone(),
             chain: *iv,
         }
     }
@@ -98,6 +202,12 @@ where
 /// finish: the state can simply be dropped when the message ends.
 pub struct Encryptor<'a, C: BlockCipher> {
     cipher: &'a C,
+    /// Read only where there is a loop written out to reach.
+    #[cfg_attr(
+        not(any(target_arch = "aarch64", target_arch = "x86_64")),
+        allow(dead_code)
+    )]
+    engine: Engine<C>,
     chain: C::Block,
 }
 
@@ -114,6 +224,19 @@ where
         if !rest.is_empty() {
             return Err(Error::NotBlockAligned(data.len()));
         }
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        if let (Engine::Native(engine), Ok(chain)) =
+            (&self.engine, <&mut [u8; 16]>::try_from(self.chain.as_mut()))
+        {
+            {
+                engine.encrypt(
+                    self.cipher,
+                    chain,
+                    <C::Block as ByteArray>::flatten_mut(blocks),
+                );
+                return Ok(());
+            }
+        }
         for block in blocks {
             xor(block.as_mut(), self.chain.as_ref());
             self.cipher.encrypt_one(block);
@@ -129,6 +252,12 @@ where
 /// finish.
 pub struct Decryptor<'a, C: BlockCipher> {
     cipher: &'a C,
+    /// Read only where there is a loop written out to reach.
+    #[cfg_attr(
+        not(any(target_arch = "aarch64", target_arch = "x86_64")),
+        allow(dead_code)
+    )]
+    engine: Engine<C>,
     chain: C::Block,
 }
 
@@ -146,6 +275,19 @@ where
         let (blocks, rest) = <C::Block as ByteArray>::split_mut(data);
         if !rest.is_empty() {
             return Err(Error::NotBlockAligned(data.len()));
+        }
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        if let (Engine::Native(engine), Ok(chain)) =
+            (&self.engine, <&mut [u8; 16]>::try_from(self.chain.as_mut()))
+        {
+            {
+                engine.decrypt(
+                    self.cipher,
+                    chain,
+                    <C::Block as ByteArray>::flatten_mut(blocks),
+                );
+                return Ok(());
+            }
         }
         let mut seen = [C::zero_block(); LANES];
         for group in blocks.chunks_mut(LANES) {
@@ -185,9 +327,12 @@ impl<C: BlockCipher> fmt::Debug for Decryptor<'_, C> {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
     use crate::Key;
-    use crate::cipher::aes::Aes;
+    use crate::cipher::aes::{Aes, Aes128};
+    use std::vec::Vec;
 
     /// Largest buffer any test here uses.
     const MAX: usize = 24 * 16;
@@ -247,6 +392,59 @@ mod tests {
         let mut data = [0u8; 32];
         cbc.encrypt(&[0x22; 16], &mut data).unwrap();
         assert_ne!(data[..16], data[16..]);
+    }
+
+    /// Every implementation this processor has must agree, at every
+    /// length around the group boundaries of both widths and with the
+    /// pieces landing anywhere.
+    #[test]
+    fn the_engines_agree() {
+        const MAX: usize = 5 * 16 * 16;
+        let key = Key::from([0x31u8; 16]);
+        let iv = [0x9au8; 16];
+        let mut message = [0u8; MAX];
+        for (i, b) in message.iter_mut().enumerate() {
+            *b = (i * 7 + 2) as u8;
+        }
+
+        let all: Vec<Cbc<Aes128>> = CHOICES
+            .iter()
+            .filter_map(|&c| Cbc::<Aes128>::with_choice(&key, c))
+            .collect();
+        assert!(!all.is_empty(), "no implementation to test");
+        // The generic one is always to be had.
+        assert!(Cbc::<Aes128>::with_choice(&key, Choice::Generic).is_some());
+
+        for len in (0..MAX).step_by(16) {
+            let mut want = [0u8; MAX];
+            want[..len].copy_from_slice(&message[..len]);
+            all[all.len() - 1].encrypt(&iv, &mut want[..len]).unwrap();
+
+            for (i, cbc) in all.iter().enumerate() {
+                let mut got = [0u8; MAX];
+                got[..len].copy_from_slice(&message[..len]);
+                cbc.encrypt(&iv, &mut got[..len]).unwrap();
+                assert_eq!(got[..len], want[..len], "encrypt {len}, {i}");
+                cbc.decrypt(&iv, &mut got[..len]).unwrap();
+                assert_eq!(got[..len], message[..len], "decrypt {len}, {i}");
+
+                // In pieces, which starts a run part way along.
+                for piece in [16, 128, 256, 272] {
+                    let mut got = [0u8; MAX];
+                    got[..len].copy_from_slice(&message[..len]);
+                    let mut e = cbc.encryptor(&iv);
+                    for part in got[..len].chunks_mut(piece) {
+                        e.update(part).unwrap();
+                    }
+                    assert_eq!(got[..len], want[..len], "{len}, {piece}");
+                    let mut d = cbc.decryptor(&iv);
+                    for part in got[..len].chunks_mut(piece) {
+                        d.update(part).unwrap();
+                    }
+                    assert_eq!(got[..len], message[..len], "{len}, {piece}");
+                }
+            }
+        }
     }
 
     #[test]
