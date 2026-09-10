@@ -357,14 +357,18 @@ wiped when the generator is dropped.
 | riscv64 | vector cryptography (Zvkned) | AES |
 | riscv64 | scalar cryptography (Zkne, Zknd) | AES |
 | riscv64 | vector GHASH (Zvkg) | GHASH |
+| riscv64 | vector carry-less multiply (Zvbc) | GHASH |
+| riscv64 | scalar carry-less multiply (Zbc, Zbkc) | GHASH |
 | x86-64 | SHA-NI | SHA-256 |
 | aarch64 | ARMv8 SHA2 extension | SHA-256 |
 | aarch64 | ARMv8 SHA512 extension | SHA-512 |
+| riscv64 | vector cryptography (Zvknha, Zvknhb) | SHA-256, SHA-512 |
 | riscv64 | scalar cryptography (Zknh) | SHA-256, SHA-512 |
 | aarch64 | ARMv8 SHA3 extension | SHA-3, SHAKE |
 | x86-64 | AVX2 | ChaCha20 |
 | aarch64 | NEON | ChaCha20 |
-| riscv64 | vector extension with Zvbb | ChaCha20 |
+| riscv64 | vector extension with Zvkb | ChaCha20 |
+| riscv64 | scalar rotates (Zbb, Zbkb) | ChaCha20 |
 | any | none needed; portable Rust | all |
 
 Every row is exercised on real silicon: the continuous integration

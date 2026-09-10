@@ -19,10 +19,24 @@ TARGETS="x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
 riscv64gc-unknown-linux-gnu"
 
 # qemu's default RISC-V CPU has no crypto extensions; `max` has them
-# all (VLEN 128). Override to test other configurations, e.g.
+# all (VLEN 128). Setting QEMU_CPU here overrides the sweep below and
+# runs that one configuration instead, e.g.
 # QEMU_CPU=rv64,v=on,vlen=256,zk=on,zvkned=on,zvbb=on.
+QEMU_SWEEP=${QEMU_CPU:+no}
 : "${QEMU_CPU:=max}"
 export QEMU_CPU
+
+# Which RISC-V backend a processor is given is decided from the
+# extension bit set, and the unit tests settle that by handing the
+# deciding functions the bit sets of real profiles, so a second
+# emulated processor would add nothing there. The vector length is the
+# exception: it is a property of the silicon rather than of a bit set,
+# the vector code sizes itself to whatever it finds, and `max` is 128
+# bits. So the fast tests run again at the other widths.
+RISCV_CONFIGS="
+max,vlen=256
+max,vlen=512
+"
 
 cd "$(dirname "$0")/.."
 
@@ -51,6 +65,14 @@ run_target() {
     fi
     cross test --workspace --target "$target" -- \
         --include-ignored --skip bench::speed
+    if [ "$target" = riscv64gc-unknown-linux-gnu ] \
+        && [ -z "$QEMU_SWEEP" ]; then
+        for cpu in $RISCV_CONFIGS; do
+            echo "==> $target QEMU_CPU=$cpu"
+            QEMU_CPU=$cpu cross test --workspace --target "$target" -- \
+                --skip bench::speed
+        done
+    fi
 }
 
 if [ $# -gt 0 ]; then

@@ -17,6 +17,7 @@ use core::arch::x86_64::__cpuid_count;
 use super::engine::{Compress32, Engine32};
 use super::portable::K256;
 use super::variant;
+use crate::align::At16;
 
 /// SHA-224 with SHA-NI.
 pub type Sha224 = Engine32<ShaNi, variant::Sha224>;
@@ -49,11 +50,8 @@ impl Compress32 for ShaNi {
     }
 }
 
-/// Loads message words big-endian: reverses the bytes of each dword.
-#[repr(align(16))]
-struct Aligned([u8; 16]);
-static BYTE_SWAP: Aligned =
-    Aligned([3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12]);
+static BYTE_SWAP: At16<[u8; 16]> =
+    At16([3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12]);
 
 /// Four rounds from constant byte offset `$i`: adds the constants to
 /// the four message words in `$m0`, runs two `sha256rnds2` on them,

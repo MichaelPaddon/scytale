@@ -1,12 +1,12 @@
-//! ChaCha20 with the RISC-V vector extension and Zvbb.
+//! ChaCha20 with the RISC-V vector extension and Zvkb's rotates.
 //!
 //! Each of the sixteen state words is a vector register whose lanes
 //! are consecutive blocks, so one pass computes as many blocks as a
 //! register holds 32-bit lanes: four at a vector length of 128 bits,
-//! more on wider hardware, and the code does not change. Zvbb's
+//! more on wider hardware, and the code does not change. Zvkb's
 //! `vror.vi` is the rotate; without it a rotate is three
-//! instructions and the vector unit gains little, so the portable
-//! code is used instead.
+//! instructions and the vector unit gains little, so the scalar
+//! backend beside this one is used instead.
 //!
 //! Loads and stores are strided: lane `j` of word `i` is at byte
 //! `64 j + 4 i` of the data, which is where the block's word lies,
@@ -15,30 +15,37 @@
 
 #![allow(unsafe_code)]
 
-use super::{BLOCK_SIZE, Backend, Cipher, Sealed};
-use crate::arch::riscv64::{EXT_ZVBB, IMA_V, hwprobe_ima_ext_0, vlenb};
+use super::super::{BLOCK_SIZE, Backend, Cipher, Sealed};
+use crate::arch::riscv64::{
+    EXT_ZVBB, EXT_ZVKB, IMA_V, extensions, vector_bytes,
+};
 
-/// ChaCha20 with the vector extension and Zvbb.
-pub type ChaCha20 = Cipher<Zvbb>;
+/// ChaCha20 with the vector extension and Zvkb.
+pub type ChaCha20 = Cipher<Zvkb>;
 
-/// Whether the vector extension with Zvbb is available, with
-/// registers of at least 128 bits.
-pub(crate) fn has_zvbb() -> bool {
-    let present = cfg!(all(target_feature = "v", target_feature = "zvbb")) || {
-        let want = IMA_V | EXT_ZVBB;
-        hwprobe_ima_ext_0().is_some_and(|ext| ext & want == want)
-    };
-    present && vlenb() >= 16
+/// Whether the vector extension with a vector rotate is available,
+/// with registers of at least 128 bits. `vror.vi` belongs to Zvkb,
+/// the subset of Zvbb that the vector cryptography sets pull in, so
+/// either extension will do.
+pub(crate) fn has_zvkb() -> bool {
+    let ext = extensions();
+    present(ext, vector_bytes(ext))
 }
 
-/// The keystream generator with the vector extension and Zvbb.
-pub struct Zvbb;
+/// Whether `ext` reports a vector rotate, on a processor whose vector
+/// registers are `bytes` wide.
+fn present(ext: u64, bytes: usize) -> bool {
+    ext & IMA_V != 0 && ext & (EXT_ZVBB | EXT_ZVKB) != 0 && bytes >= 16
+}
 
-impl Sealed for Zvbb {}
+/// The keystream generator with the vector extension and Zvkb.
+pub struct Zvkb;
 
-impl Backend for Zvbb {
+impl Sealed for Zvkb {}
+
+impl Backend for Zvkb {
     fn supported() -> bool {
-        has_zvbb()
+        has_zvkb()
     }
 
     unsafe fn xor(
@@ -55,12 +62,12 @@ impl Backend for Zvbb {
 /// blocks.
 ///
 /// # Safety
-/// Requires the vector extension and Zvbb.
+/// Requires the vector extension and Zvkb.
 unsafe fn xor(key: &[u32; 8], nonce: &[u32; 3], counter: u32, data: &mut [u8]) {
     unsafe {
         debug_assert_eq!(data.len() % BLOCK_SIZE, 0);
         let mut state = [0u32; 16];
-        state[..4].copy_from_slice(&super::CONSTANTS);
+        state[..4].copy_from_slice(&super::super::CONSTANTS);
         state[4..12].copy_from_slice(key);
         state[13..].copy_from_slice(nonce);
         let mut counter = counter;
@@ -76,7 +83,8 @@ unsafe fn xor(key: &[u32; 8], nonce: &[u32; 3], counter: u32, data: &mut [u8]) {
 }
 
 /// A quarter round on the state words `$a` to `$d` (vector register
-/// numbers). Zvbb rotates right, so left by n is right by 32 - n.
+/// numbers). The instruction rotates right, so left by n is right by
+/// 32 - n.
 #[rustfmt::skip]
 macro_rules! quarter {
     ($a:literal, $b:literal, $c:literal, $d:literal) => {
@@ -130,14 +138,14 @@ macro_rules! output {
 /// xored into `data`. Returns how many blocks were done.
 ///
 /// # Safety
-/// Requires the vector extension and Zvbb; `data` must point at
+/// Requires the vector extension and Zvkb; `data` must point at
 /// `blocks` whole blocks.
 unsafe fn group(state: &[u32; 16], data: *mut u8, blocks: usize) -> usize {
     unsafe {
         let done: usize;
         core::arch::asm!(
             ".option push",
-            ".option arch, +v,+zvbb",
+            ".option arch, +v,+zvkb",
             "vsetvli {done}, {blocks}, e32, m1, ta, ma",
             load!(0), load!(1), load!(2), load!(3),
             load!(4), load!(5), load!(6), load!(7),
@@ -200,20 +208,36 @@ mod tests {
 
     #[test]
     fn known_answers() {
-        if has_zvbb() {
-            check_known_answers::<Zvbb>();
+        if has_zvkb() {
+            check_known_answers::<Zvkb>();
         }
     }
 
     #[test]
     fn matches_portable() {
-        if has_zvbb() {
-            check_matches_portable::<Zvbb>();
+        if has_zvkb() {
+            check_matches_portable::<Zvkb>();
         }
     }
 
     #[test]
     fn probes_agree_with_constructors() {
-        assert_eq!(ChaCha20::try_new(&[0u8; 32]).is_ok(), has_zvbb());
+        assert_eq!(ChaCha20::try_new(&[0u8; 32]).is_ok(), has_zvkb());
+    }
+
+    /// `vror.vi` is in Zvbb and in Zvkb, and a processor with the
+    /// vector cryptography set has the second without the first.
+    #[test]
+    fn the_rotate_comes_from_either_extension() {
+        use crate::arch::riscv64::profile;
+
+        assert!(present(profile::ZVKN, 16));
+        assert!(present(profile::RVA23, 16));
+        // A vector unit with neither is not enough, and nor is the
+        // extension without one.
+        assert!(!present(IMA_V, 16));
+        assert!(!present(EXT_ZVBB, 16));
+        // Registers too narrow for four lanes of the state.
+        assert!(!present(profile::ZVKN, 8));
     }
 }

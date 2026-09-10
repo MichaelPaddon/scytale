@@ -5,6 +5,8 @@
 //! of carry-less multiplies and a reduction, RISC-V has the whole
 //! operation as one instruction: `vgmul.vv` multiplies two 128-bit
 //! element groups in exactly the field and bit order GHASH uses.
+//! This is the best of the three multiplies here, and the one
+//! [`super::best`] reaches for first.
 //!
 //! # The byte order
 //!
@@ -18,7 +20,7 @@
 
 #![allow(unsafe_code)]
 
-use crate::arch::riscv64::{EXT_ZVKG, IMA_V, hwprobe_ima_ext_0, vlenb};
+use crate::arch::riscv64::{EXT_ZVKG, IMA_V};
 
 /// How many blocks the group multiply takes at once. `vgmul` does a
 /// whole field multiplication in one instruction, so there is no
@@ -31,25 +33,22 @@ pub(super) const GROUP: usize = 1;
 /// Unreachable.
 pub(super) unsafe fn multiply_group(
     _value: &mut [u64; 2],
-    _powers: &[[u64; 2]; super::MAX_GROUP],
+    _powers: &[[u64; 2]; super::super::MAX_GROUP],
     _blocks: &[u8],
 ) {
     unreachable!("no group multiply on this architecture")
 }
 
-/// Whether the vector GHASH instruction is available: the vector
-/// extension, Zvkg, and registers of at least 128 bits, which the
-/// 128-bit element groups need.
-pub(super) fn has_carryless_multiply() -> bool {
-    let present = cfg!(all(target_feature = "v", target_feature = "zvkg")) || {
-        let want = IMA_V | EXT_ZVKG;
-        hwprobe_ima_ext_0().is_some_and(|ext| ext & want == want)
-    };
-    present && vlenb() >= 16
+/// Whether `ext` reports the vector GHASH instruction, on a processor
+/// whose vector registers are `bytes` wide: the vector extension,
+/// Zvkg, and at least 128 bits, which the element groups need.
+pub(super) fn present(ext: u64, bytes: usize) -> bool {
+    let want = IMA_V | EXT_ZVKG;
+    ext & want == want && bytes >= 16
 }
 
 /// Puts the subkey in the byte order [`multiply`] wants.
-pub(super) fn prepare(h: &[u64; 2]) -> [u64; 2] {
+pub(crate) fn prepare(h: &[u64; 2]) -> [u64; 2] {
     [h[0].swap_bytes(), h[1].swap_bytes()]
 }
 
@@ -57,10 +56,11 @@ pub(super) fn prepare(h: &[u64; 2]) -> [u64; 2] {
 ///
 /// # Safety
 /// Requires the vector extension and Zvkg.
-pub(super) unsafe fn multiply(value: &mut [u64; 2], h: &[u64; 2]) {
+pub(crate) unsafe fn multiply(value: &mut [u64; 2], h: &[u64; 2]) {
     unsafe {
         let mut group = prepare(value);
         core::arch::asm!(
+            ".option push",
             ".option arch, +v, +zvkg",
             // Four 32-bit elements make up one 128-bit element group.
             "vsetivli zero, 4, e32, m1, ta, ma",
@@ -68,6 +68,7 @@ pub(super) unsafe fn multiply(value: &mut [u64; 2], h: &[u64; 2]) {
             "vle32.v v1, ({h})",
             "vgmul.vv v0, v1",
             "vse32.v v0, ({group})",
+            ".option pop",
             group = in(reg) group.as_mut_ptr(),
             h = in(reg) h.as_ptr(),
             out("v0") _, out("v1") _,

@@ -17,6 +17,7 @@
 use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
 
 use super::{BLOCK_SIZE, Backend, Cipher, Sealed};
+use crate::align::At32;
 
 /// ChaCha20 with AVX2.
 pub type ChaCha20 = Cipher<Avx2>;
@@ -60,30 +61,21 @@ impl Backend for Avx2 {
 /// Blocks one pass of the assembly handles.
 const GROUP: usize = 4;
 
-/// Sixteen-byte aligned tables the shuffles and the block counters
-/// come from.
-#[repr(align(32))]
-struct Aligned([u8; 32]);
-
 /// Rotate each word left by 16, as a byte shuffle.
-static ROTATE16: Aligned = Aligned([
+static ROTATE16: At32<[u8; 32]> = At32([
     2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13, //
     2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13,
 ]);
 
 /// Rotate each word left by 8, as a byte shuffle.
-static ROTATE8: Aligned = Aligned([
+static ROTATE8: At32<[u8; 32]> = At32([
     3, 0, 1, 2, 7, 4, 5, 6, 11, 8, 9, 10, 15, 12, 13, 14, //
     3, 0, 1, 2, 7, 4, 5, 6, 11, 8, 9, 10, 15, 12, 13, 14,
 ]);
 
-/// The counter row's per-half increments: the second half of a
-/// register is the block after the first.
-#[repr(align(32))]
-struct Counters([u32; 8]);
-static COUNTERS: [Counters; 2] = [
-    Counters([0, 0, 0, 0, 1, 0, 0, 0]),
-    Counters([2, 0, 0, 0, 3, 0, 0, 0]),
+static COUNTERS: [At32<[u32; 8]>; 2] = [
+    At32([0, 0, 0, 0, 1, 0, 0, 0]),
+    At32([2, 0, 0, 0, 3, 0, 0, 0]),
 ];
 
 /// The state rows for a group, laid out for `vbroadcasti128`.

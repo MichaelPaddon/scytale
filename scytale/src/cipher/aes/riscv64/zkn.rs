@@ -23,8 +23,8 @@
 use core::fmt;
 
 use super::has_zkn;
+use crate::cipher::BlockCipher;
 use crate::cipher::aes::{BLOCK_SIZE, KeySize};
-use crate::cipher::{BlockCipher, ByteOrder, counter_blocks_via_ecb};
 use crate::{BlockType, Key, KeyType};
 use zeroize::ZeroizeOnDrop;
 
@@ -152,19 +152,7 @@ impl<const K: usize> Aes<K> {
     }
 }
 
-impl<const K: usize> Aes<K> {
-    /// Counter mode's inner loop, assembled from `encrypt_blocks`:
-    /// the scalar instructions do one block at a time, so there is
-    /// nothing here to fuse.
-    pub(crate) fn xor_counter_blocks(
-        &self,
-        counter: &mut [u8; BLOCK_SIZE],
-        order: ByteOrder,
-        data: &mut [u8],
-    ) {
-        counter_blocks_via_ecb(self, counter, order, data)
-    }
-}
+impl<const K: usize> Aes<K> {}
 
 impl<const K: usize> BlockType for Aes<K> {
     type Block = [u8; BLOCK_SIZE];

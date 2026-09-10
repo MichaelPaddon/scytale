@@ -5,15 +5,19 @@
 //! integer arithmetic. So the portable round loop is reused with
 //! those four functions swapped for the instructions, which is how
 //! the extension is meant to be used.
+//!
+//! The vector backend beside this one does the whole round, and the
+//! message schedule with it, so it is the better choice where there
+//! is a vector unit; this is what a processor without one uses.
 
 #![allow(unsafe_code)]
 
-use super::engine::{Compress32, Compress64, Engine32, Engine64};
-use super::portable::{
+use super::super::engine::{Compress32, Compress64, Engine32, Engine64};
+use super::super::portable::{
     Compress, Functions32, Functions64, compress256, compress512,
 };
-use super::variant;
-use crate::arch::riscv64::{EXT_ZKNH, hwprobe_ima_ext_0};
+use super::super::variant;
+use crate::arch::riscv64::{EXT_ZKNH, extensions};
 
 /// SHA-224 with Zknh.
 pub type Sha224 = Engine32<Zknh, variant::Sha224>;
@@ -30,14 +34,18 @@ pub type Sha512_256 = Engine64<Zknh, variant::Sha512_256>;
 
 /// Whether the Zknh instructions are available.
 pub(crate) fn has_zknh() -> bool {
-    cfg!(target_feature = "zknh")
-        || hwprobe_ima_ext_0().is_some_and(|ext| ext & EXT_ZKNH != 0)
+    present(extensions())
+}
+
+/// Whether `ext` reports the scalar sigma instructions.
+fn present(ext: u64) -> bool {
+    ext & EXT_ZKNH != 0
 }
 
 /// The sigma functions as Zknh instructions.
 pub struct Zknh;
 
-impl super::engine::Sealed for Zknh {}
+impl super::super::engine::Sealed for Zknh {}
 
 /// Defines a one-instruction function.
 macro_rules! sigma {
@@ -143,5 +151,16 @@ mod tests {
     fn probes_agree_with_constructors() {
         assert_eq!(Sha256::try_new().is_ok(), has_zknh());
         assert_eq!(Sha512::try_new().is_ok(), has_zknh());
+    }
+
+    /// Zknh covers both families at once, and comes with the scalar
+    /// set rather than with any vector one.
+    #[test]
+    fn the_scalar_sigmas_come_with_the_scalar_set() {
+        use crate::arch::riscv64::profile;
+
+        assert!(present(profile::ZKN));
+        assert!(!present(profile::ZVKNG));
+        assert!(!present(profile::RVA23));
     }
 }

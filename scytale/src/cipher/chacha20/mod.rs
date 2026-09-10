@@ -43,10 +43,13 @@
 //! Every block is independent, so the processor's vector unit can
 //! compute several at once: eight with AVX2 on x86-64, four with
 //! NEON on AArch64, and as many as the registers hold with the
-//! RISC-V vector extension and Zvbb's rotates. Each is reachable by
-//! name in the module for its architecture; [`ChaCha20`] picks the
-//! best the processor has. The portable code works four blocks at a
-//! time in a form the compiler vectorises where it can.
+//! RISC-V vector extension and Zvkb's rotates. Where RISC-V has no
+//! vector unit, Zbb's scalar rotate is still worth a version of its
+//! own, because a third of the cipher's work is rotating. Each is
+//! reachable by name in the module for its architecture;
+//! [`ChaCha20`] picks the best the processor has. The portable code
+//! works four blocks at a time in a form the compiler vectorises
+//! where it can.
 
 #![allow(unsafe_code)]
 
@@ -60,11 +63,11 @@ pub mod x86_64;
 
 use core::fmt;
 use core::marker::PhantomData;
-use core::sync::atomic::{AtomicU8, Ordering};
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::Error;
+use crate::probe::Probe;
 
 /// The key length, in bytes.
 pub const KEY_SIZE: usize = 32;
@@ -333,37 +336,29 @@ impl<B: Backend> fmt::Debug for Stream<'_, B> {
 enum Choice {
     Avx2,
     Neon,
-    Zvbb,
+    Zvkb,
+    Zbb,
     Portable,
 }
 
 /// Candidates in order of preference; the portable code is last so
 /// the search always ends.
-const CHOICES: [Choice; 4] =
-    [Choice::Avx2, Choice::Neon, Choice::Zvbb, Choice::Portable];
+const CHOICES: [Choice; 5] = [
+    Choice::Avx2,
+    Choice::Neon,
+    Choice::Zvkb,
+    Choice::Zbb,
+    Choice::Portable,
+];
 
-/// The probe result: 0 until probed, then one plus the index into
-/// `CHOICES`. Probing is idempotent, so a race between two first
-/// callers is harmless.
-static PROBED: AtomicU8 = AtomicU8::new(0);
+/// Asked once; see [`crate::probe`].
+static PROBED: Probe = Probe::new();
 
 /// Asks the processor once; afterwards a single atomic load.
 fn probe() -> Choice {
-    match PROBED.load(Ordering::Relaxed) {
-        0 => {
-            let found = CHOICES
-                .into_iter()
-                .enumerate()
-                .find(|&(_, c)| supported(c))
-                .unwrap_or((3, Choice::Portable));
-            PROBED.store(found.0 as u8 + 1, Ordering::Relaxed);
-            found.1
-        }
-        n => CHOICES
-            .get(usize::from(n) - 1)
-            .copied()
-            .unwrap_or(Choice::Portable),
-    }
+    PROBED
+        .first(&CHOICES, supported)
+        .unwrap_or(Choice::Portable)
 }
 
 /// Whether the processor can run `choice`.
@@ -374,7 +369,9 @@ fn supported(choice: Choice) -> bool {
         #[cfg(target_arch = "aarch64")]
         Choice::Neon => <aarch64::Neon as Backend>::supported(),
         #[cfg(target_arch = "riscv64")]
-        Choice::Zvbb => <riscv64::Zvbb as Backend>::supported(),
+        Choice::Zvkb => <riscv64::Zvkb as Backend>::supported(),
+        #[cfg(target_arch = "riscv64")]
+        Choice::Zbb => <riscv64::Zbb as Backend>::supported(),
         Choice::Portable => true,
         #[allow(unreachable_patterns)]
         _ => false,
@@ -390,7 +387,9 @@ macro_rules! dispatch {
             #[cfg(target_arch = "aarch64")]
             $inner::Neon($x) => $body,
             #[cfg(target_arch = "riscv64")]
-            $inner::Zvbb($x) => $body,
+            $inner::Zvkb($x) => $body,
+            #[cfg(target_arch = "riscv64")]
+            $inner::Zbb($x) => $body,
             $inner::Portable($x) => $body,
         }
     };
@@ -411,7 +410,9 @@ enum Inner {
     #[cfg(target_arch = "aarch64")]
     Neon(Cipher<aarch64::Neon>),
     #[cfg(target_arch = "riscv64")]
-    Zvbb(Cipher<riscv64::Zvbb>),
+    Zvkb(Cipher<riscv64::Zvkb>),
+    #[cfg(target_arch = "riscv64")]
+    Zbb(Cipher<riscv64::Zbb>),
     Portable(Cipher<portable::Portable>),
 }
 
@@ -424,7 +425,9 @@ enum InnerStream<'a> {
     #[cfg(target_arch = "aarch64")]
     Neon(Stream<'a, aarch64::Neon>),
     #[cfg(target_arch = "riscv64")]
-    Zvbb(Stream<'a, riscv64::Zvbb>),
+    Zvkb(Stream<'a, riscv64::Zvkb>),
+    #[cfg(target_arch = "riscv64")]
+    Zbb(Stream<'a, riscv64::Zbb>),
     Portable(Stream<'a, portable::Portable>),
 }
 
@@ -444,7 +447,9 @@ impl ChaCha20 {
                 #[cfg(target_arch = "aarch64")]
                 Choice::Neon => Inner::Neon(Cipher::new_unchecked(key)?),
                 #[cfg(target_arch = "riscv64")]
-                Choice::Zvbb => Inner::Zvbb(Cipher::new_unchecked(key)?),
+                Choice::Zvkb => Inner::Zvkb(Cipher::new_unchecked(key)?),
+                #[cfg(target_arch = "riscv64")]
+                Choice::Zbb => Inner::Zbb(Cipher::new_unchecked(key)?),
                 _ => Inner::Portable(Cipher::new_unchecked(key)?),
             }
         };
@@ -485,7 +490,9 @@ impl ChaCha20 {
             #[cfg(target_arch = "aarch64")]
             Inner::Neon(c) => InnerStream::Neon(c.stream(nonce, counter)),
             #[cfg(target_arch = "riscv64")]
-            Inner::Zvbb(c) => InnerStream::Zvbb(c.stream(nonce, counter)),
+            Inner::Zvkb(c) => InnerStream::Zvkb(c.stream(nonce, counter)),
+            #[cfg(target_arch = "riscv64")]
+            Inner::Zbb(c) => InnerStream::Zbb(c.stream(nonce, counter)),
             Inner::Portable(c) => {
                 InnerStream::Portable(c.stream(nonce, counter))
             }
@@ -704,7 +711,9 @@ pub(crate) mod tests {
         #[cfg(target_arch = "aarch64")]
         wipes::<Cipher<aarch64::Neon>>();
         #[cfg(target_arch = "riscv64")]
-        wipes::<Cipher<riscv64::Zvbb>>();
+        wipes::<Cipher<riscv64::Zvkb>>();
+        #[cfg(target_arch = "riscv64")]
+        wipes::<Cipher<riscv64::Zbb>>();
     }
 
     #[test]

@@ -81,13 +81,13 @@ pub(crate) mod riscv64;
 pub(crate) mod x86_64;
 
 use core::fmt;
-use core::sync::atomic::{AtomicU8, Ordering};
 
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use engine::Compress64;
 use engine::{Compress32, Engine32, Engine64, Variant32, Variant64};
 
 use crate::hash::{BitHash, Hash};
+use crate::probe::Probe;
 use crate::{BlockType, Error};
 
 /// The members of the family, as markers the engines are generic
@@ -237,39 +237,31 @@ pub(crate) mod variant {
 enum Choice {
     ShaNi,
     Armv8,
+    Zvknh,
     Zknh,
     Portable,
 }
 
 /// Candidates in order of preference: hardware first, then the
 /// portable code, which is always last so the search always ends.
-const CHOICES: [Choice; 4] =
-    [Choice::ShaNi, Choice::Armv8, Choice::Zknh, Choice::Portable];
+const CHOICES: [Choice; 5] = [
+    Choice::ShaNi,
+    Choice::Armv8,
+    Choice::Zvknh,
+    Choice::Zknh,
+    Choice::Portable,
+];
 
-/// One probe result per family, since the processor may have an
-/// instruction for one and not the other: 0 until probed, then one
-/// plus the index into `CHOICES`. Probing is idempotent, so a race
-/// between two first callers is harmless.
-static PROBED32: AtomicU8 = AtomicU8::new(0);
-static PROBED64: AtomicU8 = AtomicU8::new(0);
+/// One probe per family, since the processor may have an
+/// instruction for one and not the other; see [`crate::probe`].
+static PROBED32: Probe = Probe::new();
+static PROBED64: Probe = Probe::new();
 
 /// Asks the processor once; afterwards a single atomic load.
-fn probe(probed: &AtomicU8, supported: fn(Choice) -> bool) -> Choice {
-    match probed.load(Ordering::Relaxed) {
-        0 => {
-            let found = CHOICES
-                .into_iter()
-                .enumerate()
-                .find(|&(_, c)| supported(c))
-                .unwrap_or((3, Choice::Portable));
-            probed.store(found.0 as u8 + 1, Ordering::Relaxed);
-            found.1
-        }
-        n => CHOICES
-            .get(usize::from(n) - 1)
-            .copied()
-            .unwrap_or(Choice::Portable),
-    }
+fn probe(probed: &Probe, supported: fn(Choice) -> bool) -> Choice {
+    probed
+        .first(&CHOICES, supported)
+        .unwrap_or(Choice::Portable)
 }
 
 /// Whether the processor can run `choice`'s SHA-256.
@@ -279,6 +271,8 @@ fn supported32(choice: Choice) -> bool {
         Choice::ShaNi => <x86_64::ShaNi as Compress32>::supported(),
         #[cfg(target_arch = "aarch64")]
         Choice::Armv8 => <aarch64::Armv8 as Compress32>::supported(),
+        #[cfg(target_arch = "riscv64")]
+        Choice::Zvknh => <riscv64::Zvknh as Compress32>::supported(),
         #[cfg(target_arch = "riscv64")]
         Choice::Zknh => <riscv64::Zknh as Compress32>::supported(),
         Choice::Portable => true,
@@ -292,6 +286,8 @@ fn supported64(choice: Choice) -> bool {
     match choice {
         #[cfg(target_arch = "aarch64")]
         Choice::Armv8 => <aarch64::Armv8 as Compress64>::supported(),
+        #[cfg(target_arch = "riscv64")]
+        Choice::Zvknh => <riscv64::Zvknh as Compress64>::supported(),
         #[cfg(target_arch = "riscv64")]
         Choice::Zknh => <riscv64::Zknh as Compress64>::supported(),
         Choice::Portable => true,
@@ -445,6 +441,7 @@ automatic!(
     [
         ("x86_64", ShaNi, x86_64::ShaNi),
         ("aarch64", Armv8, aarch64::Armv8),
+        ("riscv64", Zvknh, riscv64::Zvknh),
         ("riscv64", Zknh, riscv64::Zknh)
     ]
 );
@@ -456,6 +453,7 @@ automatic!(
     supported64, 128,
     [
         ("aarch64", Armv8, aarch64::Armv8),
+        ("riscv64", Zvknh, riscv64::Zvknh),
         ("riscv64", Zknh, riscv64::Zknh)
     ]
 );
@@ -777,10 +775,14 @@ pub(crate) mod tests {
         }
         #[cfg(target_arch = "riscv64")]
         {
-            wipes::<riscv64::Sha224>();
-            wipes::<riscv64::Sha256>();
-            wipes::<riscv64::Sha384>();
-            wipes::<riscv64::Sha512>();
+            wipes::<riscv64::zknh::Sha224>();
+            wipes::<riscv64::zknh::Sha256>();
+            wipes::<riscv64::zknh::Sha384>();
+            wipes::<riscv64::zknh::Sha512>();
+            wipes::<riscv64::zvknh::Sha224>();
+            wipes::<riscv64::zvknh::Sha256>();
+            wipes::<riscv64::zvknh::Sha384>();
+            wipes::<riscv64::zvknh::Sha512>();
         }
     }
 

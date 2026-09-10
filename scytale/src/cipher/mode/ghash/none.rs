@@ -11,6 +11,12 @@
 /// is no group multiply.
 pub(super) const GROUP: usize = 1;
 
+/// How many blocks the group multiply takes at once, asked as a
+/// call because one architecture decides it at run time.
+pub(super) fn group() -> usize {
+    GROUP
+}
+
 /// There is no carry-less multiply here.
 pub(super) fn has_carryless_multiply() -> bool {
     false

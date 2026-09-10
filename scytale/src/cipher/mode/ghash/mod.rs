@@ -28,8 +28,7 @@
 //! which the processor can run at once, and needs only one reduction
 //! at the end rather than eight.
 
-use core::sync::atomic::{AtomicU8, Ordering};
-
+use crate::probe::Probe;
 /// GHASH works only on 128-bit blocks, whatever the cipher's block.
 pub(crate) const BLOCK: usize = 16;
 
@@ -43,13 +42,13 @@ const REDUCE: u64 = 0xe100_0000_0000_0000;
 /// Visible to the rest of the modes so that a caller which has to
 /// transform blocks on their way in, as POLYVAL does, can work in
 /// batches that reach the group multiply rather than block by block.
-pub(super) const MAX_GROUP: usize = 8;
+pub(crate) const MAX_GROUP: usize = 8;
 
 // The accelerated multiply for whichever architecture this is. Each
 // offers the same set of items, so the code below needs no
 // conditionals; `none` stands in where there is nothing to use.
 #[cfg(target_arch = "aarch64")]
-mod aarch64;
+pub(crate) mod aarch64;
 #[cfg(not(any(
     target_arch = "aarch64",
     target_arch = "riscv64",
@@ -57,7 +56,7 @@ mod aarch64;
 )))]
 mod none;
 #[cfg(target_arch = "riscv64")]
-mod riscv64;
+pub(crate) mod riscv64;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
@@ -74,21 +73,13 @@ use self::riscv64 as arch;
 #[cfg(target_arch = "x86_64")]
 use self::x86_64 as arch;
 
-/// Whether the processor's carry-less multiply is available. Probed
-/// once: 0 unknown, 1 no, 2 yes.
-static PROBED: AtomicU8 = AtomicU8::new(0);
+/// Asked once; see [`crate::probe`].
+static PROBED: Probe = Probe::new();
 
 /// The subkey ready for the processor's carry-less multiply, or
 /// nothing if there is no such instruction here.
 fn prepared(h: &[u64; 2]) -> Option<[u64; 2]> {
-    let known = match PROBED.load(Ordering::Relaxed) {
-        0 => {
-            let yes = arch::has_carryless_multiply();
-            PROBED.store(1 + u8::from(yes), Ordering::Relaxed);
-            yes
-        }
-        n => n == 2,
-    };
+    let known = PROBED.yes(arch::has_carryless_multiply);
     known.then(|| arch::prepare(h))
 }
 
@@ -100,7 +91,11 @@ fn prepared(h: &[u64; 2]) -> Option<[u64; 2]> {
 /// reverse of multiplication by it: the top bit says whether the
 /// polynomial was folded in on the way, so it both selects the term
 /// to undo and supplies the bit that comes back at the bottom.
-#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "riscv64",
+    target_arch = "x86_64"
+))]
 fn divide_by_x(h: &[u64; 2]) -> [u64; 2] {
     let bit = h[0] >> 63;
     // A mask rather than a branch: the subkey is secret.
@@ -201,15 +196,16 @@ impl Ghash {
     /// has no group multiply.
     #[allow(unsafe_code)]
     fn absorb_groups<'a>(&mut self, data: &'a [u8]) -> &'a [u8] {
-        let span = arch::GROUP * BLOCK;
+        let group = arch::group();
         let Some(h) = self.fast else { return data };
-        if arch::GROUP == 1 || data.len() < span {
+        if group == 1 || data.len() < group * BLOCK {
             return data;
         }
+        let span = group * BLOCK;
         // A copy, so that the loop below can borrow the hash itself.
         let powers = match self.powers {
             Some(powers) => powers,
-            None => *self.powers.insert(powers_of(&h)),
+            None => *self.powers.insert(unsafe { powers_of(&h) }),
         };
         let mut groups = data.chunks_exact(span);
         for group in &mut groups {
@@ -239,7 +235,7 @@ impl Ghash {
 /// The first [`MAX_GROUP`] powers of the subkey, each prepared for
 /// the architecture's multiply, given the subkey already prepared.
 #[allow(unsafe_code)]
-fn powers_of(h: &[u64; 2]) -> [[u64; 2]; MAX_GROUP] {
+pub(crate) unsafe fn powers_of(h: &[u64; 2]) -> [[u64; 2]; MAX_GROUP] {
     // The powers are built with the accelerated multiply rather than
     // the portable one: this runs once per hash that sees a whole
     // group, and the portable version would cost more than the group
@@ -270,7 +266,7 @@ pub(crate) fn multiply_by_x(block: &mut [u8; BLOCK]) {
 
 /// Reads eight bytes as a big-endian word, which is how GHASH's bit
 /// order maps onto integers.
-fn halve(bytes: &[u8]) -> u64 {
+pub(crate) fn halve(bytes: &[u8]) -> u64 {
     let mut word = [0u8; 8];
     word.copy_from_slice(bytes);
     u64::from_be_bytes(word)
