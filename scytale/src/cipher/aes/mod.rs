@@ -590,15 +590,44 @@ mod tests {
         assert_eq!(block, [7u8; BLOCK_SIZE]);
     }
 
-    /// The three public widths are the same cipher as the generic
-    /// one they wrap.
+    /// The three public widths are the same cipher as the generic one
+    /// they wrap, both ways round and over a run of blocks.
+    ///
+    /// The vector suites validate each implementation and the generic
+    /// type's agreement with the table-driven one; these wrappers sit
+    /// above all of that and are covered here.
     #[test]
     fn widths_match() {
-        let mut a = [[3u8; BLOCK_SIZE]];
-        let mut b = a;
-        Aes128::new(&Key::from([9u8; 16])).encrypt(&mut a);
-        Aes::<16>::new(&[9u8; 16]).encrypt_blocks(&mut b);
-        assert_eq!(a, b);
+        fn same<W, const K: usize>(wrapped: W, key: [u8; K])
+        where
+            W: BlockCipher<Block = [u8; BLOCK_SIZE], Key = Key<[u8; K]>>,
+        {
+            let generic = Aes::<K>::new(&key);
+            // Enough blocks to pass through a group loop and leave a
+            // tail, which is where the two could differ.
+            let mut mine = [[0u8; BLOCK_SIZE]; 19];
+            for (i, x) in mine.as_flattened_mut().iter_mut().enumerate() {
+                *x = (i * 7) as u8;
+            }
+            let plain = mine;
+            let mut theirs = mine;
+
+            wrapped.encrypt(&mut mine);
+            generic.encrypt_blocks(&mut theirs);
+            assert_eq!(mine, theirs, "encrypting under a {K} byte key");
+            assert_ne!(mine, plain, "encrypting changed nothing");
+
+            wrapped.decrypt(&mut mine);
+            generic.decrypt_blocks(&mut theirs);
+            assert_eq!(mine, theirs, "decrypting under a {K} byte key");
+            assert_eq!(mine, plain, "decrypting did not undo encrypting");
+        }
+
+        same(Aes128::new(&Key::from([9u8; 16])), [9u8; 16]);
+        same(Aes192::new(&Key::from([9u8; 24])), [9u8; 24]);
+        same(Aes256::new(&Key::from([9u8; 32])), [9u8; 32]);
+
+        assert_eq!(Aes128::new(&Key::from([0u8; 16])).rounds(), 10);
         assert_eq!(Aes192::new(&Key::from([0u8; 24])).rounds(), 12);
         assert_eq!(Aes256::new(&Key::from([0u8; 32])).rounds(), 14);
     }

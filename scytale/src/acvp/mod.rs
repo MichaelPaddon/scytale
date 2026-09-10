@@ -208,14 +208,13 @@ macro_rules! every_aes {
         use super::*;
         use crate::cipher::aes;
 
-        widths!(
-            automatic_128,
-            automatic_192,
-            automatic_256,
-            aes::Aes,
-            $suite,
-            $kind
-        );
+        // The dispatching type is not here. On any one processor it
+        // is one of the implementations below, so its cases are theirs
+        // run twice -- and a Monte Carlo run is 600,000 chained calls
+        // a width. What it alone covers is the dispatch, and
+        // `aes::tests::matches_ttable` covers that against the
+        // table-driven code at every width, both directions, a block
+        // at a time and in bulk.
         widths!(
             bitsliced_128,
             bitsliced_192,
