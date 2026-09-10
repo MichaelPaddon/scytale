@@ -33,11 +33,9 @@ pub(crate) mod riscv64;
 pub(crate) mod x86_64;
 
 use core::fmt;
-use core::sync::atomic::{AtomicU8, Ordering};
 
-use crate::cipher::{
-    BlockCipher, ByteOrder, CounterBlocks, CounterFn, counter_blocks_of, is,
-};
+use crate::cipher::BlockCipher;
+use crate::probe::Probe;
 use crate::{BlockType, Key, KeyType};
 
 /// AES block size in bytes.
@@ -134,28 +132,14 @@ const CHOICES: [Choice; 6] = [
     Choice::Bitsliced,
 ];
 
-/// The probe result: 0 until probed, then one plus the index into
-/// `CHOICES`. Probing is idempotent, so a race between two first
-/// callers is harmless.
-static PROBED: AtomicU8 = AtomicU8::new(0);
+/// Asked once; see [`crate::probe`].
+static PROBED: Probe = Probe::new();
 
 /// Asks the processor once; afterwards a single atomic load.
 fn probe() -> Choice {
-    match PROBED.load(Ordering::Relaxed) {
-        0 => {
-            let found = CHOICES
-                .into_iter()
-                .enumerate()
-                .find(|&(_, c)| supported(c))
-                .unwrap_or((5, Choice::Bitsliced));
-            PROBED.store(found.0 as u8 + 1, Ordering::Relaxed);
-            found.1
-        }
-        n => CHOICES
-            .get(usize::from(n) - 1)
-            .copied()
-            .unwrap_or(Choice::Bitsliced),
-    }
+    PROBED
+        .first(&CHOICES, supported)
+        .unwrap_or(Choice::Bitsliced)
 }
 
 /// Asks the processor directly whether it supports `choice`.
@@ -296,29 +280,53 @@ impl<const K: usize> Aes<K> {
     pub(crate) fn decrypt_blocks(&self, blocks: &mut [[u8; BLOCK_SIZE]]) {
         dispatch!(self, aes => aes.decrypt_blocks(blocks))
     }
-
-    /// Counter mode's inner loop, run by whichever implementation is
-    /// in use; see [`crate::cipher::CounterFn`].
-    pub(crate) fn xor_counter_blocks(
-        &self,
-        counter: &mut [u8; BLOCK_SIZE],
-        order: ByteOrder,
-        data: &mut [u8],
-    ) {
-        dispatch!(self, aes => aes.xor_counter_blocks(counter, order, data))
-    }
 }
 
 /// The expanded key as the AES instructions want it, where the
 /// implementation the processor chose is one of theirs, and `None`
 /// for the portable ones, whose key schedules are nothing those
 /// instructions could read.
+#[cfg(target_arch = "aarch64")]
+impl<const K: usize> aarch64::Keyed for Aes<K> {
+    fn schedule(&self) -> Option<aarch64::Schedule<'_>> {
+        match &self.0 {
+            Inner::Armv8(aes) => aes.schedule(),
+            _ => None,
+        }
+    }
+
+    fn decryption(&self) -> Option<aarch64::Schedule<'_>> {
+        match &self.0 {
+            Inner::Armv8(aes) => aes.decryption(),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 impl<const K: usize> x86_64::Keyed for Aes<K> {
     fn schedule(&self) -> Option<x86_64::Schedule<'_>> {
         match &self.0 {
             Inner::Vaes(aes) => aes.schedule(),
             Inner::AesNi(aes) => aes.schedule(),
+            _ => None,
+        }
+    }
+
+    fn decryption(&self) -> Option<x86_64::Schedule<'_>> {
+        match &self.0 {
+            Inner::Vaes(aes) => aes.decryption(),
+            Inner::AesNi(aes) => aes.decryption(),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+impl<const K: usize> riscv64::Keyed for Aes<K> {
+    fn schedule(&self) -> Option<riscv64::Schedule<'_>> {
+        match &self.0 {
+            Inner::Zvkned(aes) => aes.schedule(),
             _ => None,
         }
     }
@@ -381,17 +389,6 @@ macro_rules! width {
             pub fn decrypt(&self, blocks: &mut [[u8; BLOCK_SIZE]]) {
                 self.0.decrypt_blocks(blocks)
             }
-
-            /// Counter mode's inner loop; see
-            /// [`crate::cipher::CounterFn`].
-            pub(crate) fn xor_counter_blocks(
-                &self,
-                counter: &mut [u8; BLOCK_SIZE],
-                order: ByteOrder,
-                data: &mut [u8],
-            ) {
-                self.0.xor_counter_blocks(counter, order, data)
-            }
         }
 
         impl fmt::Debug for $name {
@@ -404,10 +401,34 @@ macro_rules! width {
         }
 
         /// The expanded key; see the implementation over [`Aes`].
+        #[cfg(target_arch = "aarch64")]
+        impl aarch64::Keyed for $name {
+            fn schedule(&self) -> Option<aarch64::Schedule<'_>> {
+                aarch64::Keyed::schedule(&self.0)
+            }
+
+            fn decryption(&self) -> Option<aarch64::Schedule<'_>> {
+                aarch64::Keyed::decryption(&self.0)
+            }
+        }
+
+        /// The expanded key; see the implementation over [`Aes`].
+        #[cfg(target_arch = "riscv64")]
+        impl riscv64::Keyed for $name {
+            fn schedule(&self) -> Option<riscv64::Schedule<'_>> {
+                riscv64::Keyed::schedule(&self.0)
+            }
+        }
+
+        /// The expanded key; see the implementation over [`Aes`].
         #[cfg(target_arch = "x86_64")]
         impl x86_64::Keyed for $name {
             fn schedule(&self) -> Option<x86_64::Schedule<'_>> {
                 x86_64::Keyed::schedule(&self.0)
+            }
+
+            fn decryption(&self) -> Option<x86_64::Schedule<'_>> {
+                x86_64::Keyed::decryption(&self.0)
             }
         }
 
@@ -515,7 +536,7 @@ mod tests {
     fn picks_best_supported() {
         let aes = Aes::<16>::new(&[0; 16]);
         let chosen = probe();
-        assert_ne!(PROBED.load(Ordering::Relaxed), 0);
+        assert!(PROBED.asked());
         assert_eq!(probe(), chosen);
         assert!(supported(chosen));
         let faster = CHOICES.iter().take_while(|&&c| c != chosen);
@@ -581,94 +602,4 @@ mod tests {
         assert_eq!(Aes192::new(&Key::from([0u8; 24])).rounds(), 12);
         assert_eq!(Aes256::new(&Key::from([0u8; 32])).rounds(), 14);
     }
-}
-
-/// Implements [`CounterBlocks`] for a type whose inherent
-/// `xor_counter_blocks` is the loop.
-macro_rules! counter_blocks {
-    ($($ty:ty),* $(,)?) => {
-        $(
-            impl CounterBlocks for $ty {
-                fn counter_blocks(
-                    &self,
-                    counter: &mut [u8; BLOCK_SIZE],
-                    order: ByteOrder,
-                    data: &mut [u8],
-                ) {
-                    self.xor_counter_blocks(counter, order, data)
-                }
-            }
-        )*
-    };
-}
-
-/// Expands `$body` once for every AES type in the crate, with `$ty`
-/// bound to each. The public widths, the generic type behind them,
-/// and each implementation at each width: a mode built on any of
-/// them gets the counter loop that one carries. The last two groups
-/// are named only by this crate's own tests and its benchmark, which
-/// measure an implementation rather than what the processor picks.
-macro_rules! every_aes {
-    ($mac:ident) => {
-        $mac!(
-            Aes128,
-            Aes192,
-            Aes256,
-            Aes<16>,
-            Aes<24>,
-            Aes<32>,
-            portable::bitsliced::Aes<16>,
-            portable::bitsliced::Aes<24>,
-            portable::bitsliced::Aes<32>,
-            portable::ttable::Aes<16>,
-            portable::ttable::Aes<24>,
-            portable::ttable::Aes<32>,
-        );
-        #[cfg(target_arch = "x86_64")]
-        $mac!(
-            x86_64::aesni::Aes<16>,
-            x86_64::aesni::Aes<24>,
-            x86_64::aesni::Aes<32>,
-            x86_64::vaes::Aes<16>,
-            x86_64::vaes::Aes<24>,
-            x86_64::vaes::Aes<32>,
-        );
-        #[cfg(target_arch = "aarch64")]
-        $mac!(
-            aarch64::armv8::Aes<16>,
-            aarch64::armv8::Aes<24>,
-            aarch64::armv8::Aes<32>,
-        );
-        #[cfg(target_arch = "riscv64")]
-        $mac!(
-            riscv64::zkn::Aes<16>,
-            riscv64::zkn::Aes<24>,
-            riscv64::zkn::Aes<32>,
-            riscv64::zvkned::Aes<16>,
-            riscv64::zvkned::Aes<24>,
-            riscv64::zvkned::Aes<32>,
-        );
-    };
-}
-
-every_aes!(counter_blocks);
-
-/// Answers [`crate::cipher::counter_fn`] for one group of types.
-macro_rules! counter_arms {
-    ($($ty:ty),* $(,)?) => {
-        $(
-            if is::<$ty, C>() {
-                return Some(counter_blocks_of::<$ty, C>);
-            }
-        )*
-    };
-}
-
-/// The counter loop for `C` if `C` is one of ours, or `None`.
-///
-/// Asked once, when a mode is built. `C` is a type parameter, so
-/// every comparison is a constant and all but one fold away.
-pub(crate) fn counter_fn<C: BlockCipher>() -> Option<CounterFn<C>> {
-    every_aes!(counter_arms);
-    None
 }

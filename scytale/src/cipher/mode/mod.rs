@@ -89,6 +89,8 @@ pub use ofb::Ofb;
 pub use xpn::Xpn;
 pub use xts::Xts;
 
+use crate::cipher::BlockCipher;
+
 /// Blocks handed to the cipher in one bulk call.
 ///
 /// The implementations interleave eight blocks, so anything from
@@ -106,6 +108,79 @@ pub(crate) const LANES: usize = 16;
 pub(crate) fn xor(dst: &mut [u8], src: &[u8]) {
     for (d, s) in dst.iter_mut().zip(src) {
         *d ^= s;
+    }
+}
+
+/// Which four bytes of a block hold a counter, and which way round.
+///
+/// GCM counts in the last four, most significant first; GCM-SIV, as
+/// RFC 8452 defines it, counts in the first four, least significant
+/// first. Read the matching way, both are the low thirty-two bits of
+/// the block, which is why one loop serves them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ByteOrder {
+    /// The last four bytes, most significant first.
+    Big,
+    /// The first four bytes, least significant first.
+    Little,
+}
+
+/// Adds `count` to the counter field `order` names, wrapping inside
+/// those four bytes rather than carrying out.
+#[inline]
+pub(crate) fn add_counter(block: &mut [u8], order: ByteOrder, count: u32) {
+    debug_assert!(block.len() >= 4);
+    match order {
+        ByteOrder::Big => {
+            let start = block.len() - 4;
+            let f = &mut block[start..];
+            let n = u32::from_be_bytes([f[0], f[1], f[2], f[3]]);
+            f.copy_from_slice(&n.wrapping_add(count).to_be_bytes());
+        }
+        ByteOrder::Little => {
+            let f = &mut block[..4];
+            let n = u32::from_le_bytes([f[0], f[1], f[2], f[3]]);
+            f.copy_from_slice(&n.wrapping_add(count).to_le_bytes());
+        }
+    }
+}
+
+/// Counter mode's inner loop over a cipher's bulk encrypt: encrypts
+/// the run of blocks made from `counter` by adding 0, 1, 2 and so on
+/// to the field `order` names, and XORs each result into `data`,
+/// leaving `counter` on the block after the last.
+///
+/// This is what a mode uses where there is no assembly written for the
+/// pair of it and the cipher: the counters go into a buffer, the
+/// cipher encrypts them in bulk, and the results are XORed over the
+/// data. A mode with its own assembly keeps the counters in registers
+/// and encrypts them where they lie, which saves the buffer and a pass
+/// over it; that is the difference between the two, and the only one.
+///
+/// `data` must be a whole number of blocks, and the four-byte field
+/// must not carry out of itself over the run; a caller counting in the
+/// whole block splits its run at that boundary.
+pub(crate) fn counter_blocks<C: BlockCipher>(
+    cipher: &C,
+    counter: &mut C::Block,
+    order: ByteOrder,
+    data: &mut [u8],
+) {
+    let size = counter.as_ref().len();
+    debug_assert_eq!(data.len() % size, 0);
+    // `*counter` rather than `zero_block`, which an object has no way
+    // to call; the values are overwritten below.
+    let mut keystream = [*counter; LANES];
+    for group in data.chunks_mut(size * LANES) {
+        let keystream = &mut keystream[..group.len() / size];
+        for block in keystream.iter_mut() {
+            *block = *counter;
+            add_counter(counter.as_mut(), order, 1);
+        }
+        cipher.encrypt(keystream);
+        for (chunk, key) in group.chunks_mut(size).zip(&*keystream) {
+            xor(chunk, key.as_ref());
+        }
     }
 }
 

@@ -163,12 +163,19 @@ macro_rules! hardware_widths {
 }
 
 /// Runs one mode's suite against the dispatching AES, at every key
-/// width. A mode's logic does not vary with the implementation
-/// beneath it, and `aes_ecb` validates each implementation in turn
-/// against the vectors for it; running the mode on the dispatched
-/// cipher covers the selector as well, and takes the fastest code
-/// the processor has. Suites with a Monte Carlo test take no second
-/// argument.
+/// width. A mode built out of the cipher's own operations does not
+/// vary with the implementation beneath it, and `aes_ecb` validates
+/// each implementation in turn against the vectors for it; running
+/// the mode on the dispatched cipher covers the selector as well, and
+/// takes the fastest code the processor has. Suites with a Monte
+/// Carlo test take no second argument.
+///
+/// A mode that is written out for the processor rather than built out
+/// of the cipher is a different matter: there the mode is the
+/// implementation, and which one runs depends on the machine. Those
+/// suites run every implementation the processor has, one after
+/// another, so that none goes unvalidated for want of the right
+/// hardware under the test. See `aes_ctr` and `aes_gcm`.
 macro_rules! modes {
     ($suite:ident) => {
         modes!($suite, both);
@@ -466,11 +473,21 @@ macro_rules! every_sha2 {
         #[cfg(target_arch = "riscv64")]
         sha2_suites!(
             zknh,
-            sha2::riscv64::$variant,
+            sha2::riscv64::zknh::$variant,
             $file,
             $algorithm,
             Family::Sha2,
             "RISC-V Zknh"
+        );
+
+        #[cfg(target_arch = "riscv64")]
+        sha2_suites!(
+            zvknh,
+            sha2::riscv64::zvknh::$variant,
+            $file,
+            $algorithm,
+            Family::Sha2,
+            "RISC-V Zvknh"
         );
     };
 }
@@ -959,7 +976,10 @@ mod chacha20_poly1305 {
     chacha20_backend!(neon, chacha20::aarch64::Neon, "NEON");
 
     #[cfg(target_arch = "riscv64")]
-    chacha20_backend!(zvbb, chacha20::riscv64::Zvbb, "RISC-V vectors");
+    chacha20_backend!(zvkb, chacha20::riscv64::Zvkb, "RISC-V vectors");
+
+    #[cfg(target_arch = "riscv64")]
+    chacha20_backend!(zbb, chacha20::riscv64::Zbb, "RISC-V rotates");
 }
 
 /// Key agreement: X25519, through ACVP's shared-secret and key
@@ -1269,8 +1289,22 @@ mod inventory {
         }
         #[cfg(target_arch = "riscv64")]
         {
-            report("sha2::riscv64::Sha256", hash::<sha2::riscv64::Sha256>());
-            report("sha2::riscv64::Sha512", hash::<sha2::riscv64::Sha512>());
+            report(
+                "sha2::riscv64::zknh::Sha256",
+                hash::<sha2::riscv64::zknh::Sha256>(),
+            );
+            report(
+                "sha2::riscv64::zknh::Sha512",
+                hash::<sha2::riscv64::zknh::Sha512>(),
+            );
+            report(
+                "sha2::riscv64::zvknh::Sha256",
+                hash::<sha2::riscv64::zvknh::Sha256>(),
+            );
+            report(
+                "sha2::riscv64::zvknh::Sha512",
+                hash::<sha2::riscv64::zvknh::Sha512>(),
+            );
         }
 
         println!("SHA-3");
@@ -1299,8 +1333,13 @@ mod inventory {
         );
         #[cfg(target_arch = "riscv64")]
         report(
-            "chacha20::riscv64::Zvbb",
-            chacha20::riscv64::Zvbb::supported(),
+            "chacha20::riscv64::Zvkb",
+            chacha20::riscv64::Zvkb::supported(),
+        );
+        #[cfg(target_arch = "riscv64")]
+        report(
+            "chacha20::riscv64::Zbb",
+            chacha20::riscv64::Zbb::supported(),
         );
         println!();
     }

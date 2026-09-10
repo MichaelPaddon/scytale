@@ -309,9 +309,14 @@ fn report(options: &Options) -> bool {
     }
     #[cfg(target_arch = "riscv64")]
     {
-        ran |= hash_section::<sha2::riscv64::Sha256, sha2::riscv64::Sha512>(
-            "zknh", options,
-        );
+        ran |= hash_section::<
+            sha2::riscv64::zvknh::Sha256,
+            sha2::riscv64::zvknh::Sha512,
+        >("zvknh", options);
+        ran |= hash_section::<
+            sha2::riscv64::zknh::Sha256,
+            sha2::riscv64::zknh::Sha512,
+        >("zknh", options);
     }
     ran |= hash_section::<sha2::portable::Sha256, sha2::portable::Sha512>(
         "portable", options,
@@ -336,8 +341,11 @@ fn report(options: &Options) -> bool {
     }
     #[cfg(target_arch = "riscv64")]
     {
-        ran |= chacha_section::<chacha20::riscv64::ChaCha20>(
-            "zvbb", options, false,
+        ran |= chacha_section::<chacha20::riscv64::zvkb::ChaCha20>(
+            "zvkb", options, false,
+        );
+        ran |= chacha_section::<chacha20::riscv64::zbb::ChaCha20>(
+            "zbb", options, false,
         );
     }
     ran |= chacha_section::<chacha20::portable::ChaCha20>(

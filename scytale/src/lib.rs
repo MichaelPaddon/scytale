@@ -122,6 +122,7 @@ mod acvp;
 #[cfg(test)]
 mod bench;
 
+mod align;
 mod arch;
 pub mod cipher;
 mod der;
@@ -134,6 +135,7 @@ pub mod mac;
 mod math;
 mod pem;
 pub mod pke;
+mod probe;
 pub mod random;
 pub mod sig;
 

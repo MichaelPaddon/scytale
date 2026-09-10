@@ -71,11 +71,11 @@ pub(crate) mod engine;
 pub(crate) mod portable;
 
 use core::fmt;
-use core::sync::atomic::{AtomicU8, Ordering};
 
 use engine::{DigestVariant, Reader, Sponge, XofVariant};
 
 use crate::hash::{BitHash, BitXof, Hash, Xof, XofReader};
+use crate::probe::Probe;
 use crate::{BlockType, Error};
 
 /// The six functions, as markers the sponge is generic over.
@@ -152,28 +152,14 @@ enum Choice {
 /// the search always ends.
 const CHOICES: [Choice; 2] = [Choice::Armv8, Choice::Portable];
 
-/// The probe result: 0 until probed, then one plus the index into
-/// `CHOICES`. Probing is idempotent, so a race between two first
-/// callers is harmless.
-static PROBED: AtomicU8 = AtomicU8::new(0);
+/// Asked once; see [`crate::probe`].
+static PROBED: Probe = Probe::new();
 
 /// Asks the processor once; afterwards a single atomic load.
 fn probe() -> Choice {
-    match PROBED.load(Ordering::Relaxed) {
-        0 => {
-            let found = CHOICES
-                .into_iter()
-                .enumerate()
-                .find(|&(_, c)| supported(c))
-                .unwrap_or((1, Choice::Portable));
-            PROBED.store(found.0 as u8 + 1, Ordering::Relaxed);
-            found.1
-        }
-        n => CHOICES
-            .get(usize::from(n) - 1)
-            .copied()
-            .unwrap_or(Choice::Portable),
-    }
+    PROBED
+        .first(&CHOICES, supported)
+        .unwrap_or(Choice::Portable)
 }
 
 /// Whether the processor can run `choice`.
