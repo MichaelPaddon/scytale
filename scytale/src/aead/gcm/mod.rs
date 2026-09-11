@@ -25,7 +25,7 @@
 //! bits per block, which leaks nothing but is slow enough to dominate
 //! everything else here; on such a processor
 //! [`ChaCha20Poly1305`](super::ChaCha20Poly1305) is the faster
-//! choice.
+//! implementation.
 //!
 //! # Using it safely
 //!
@@ -39,7 +39,7 @@
 //!   repeat impossible. A nonce drawn at random is allowed, but then
 //!   the standard caps one key at 2^32 messages, and counting those
 //!   messages is the caller's job.
-//! - A 96-bit nonce is the usual choice and the one the standard
+//! - A 96-bit nonce is the usual implementation and the one the standard
 //!   treats specially. Any other length is allowed and supported, but
 //!   is hashed down to a counter block first, which costs a little
 //!   and gains nothing.
@@ -99,8 +99,8 @@ use super::ghash::{BLOCK, Ghash};
 use crate::aead::Aead;
 use crate::cipher::mode::{ByteOrder, counter_blocks, xor};
 use crate::cipher::{BlockCipher, OneBlock};
+use crate::constant_time;
 use crate::implementation::Implementation;
-use crate::util;
 use crate::{Error, KeyType};
 
 /// The most message bytes GCM may protect under one key and nonce:
@@ -194,19 +194,19 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
     /// The best engine for this cipher on this processor, under hash
     /// subkey `h`.
     fn new(h: &[u8; BLOCK]) -> Self {
-        for &choice in CHOICES {
-            if let Some(engine) = Self::with(h, choice) {
+        for &implementation in CHOICES {
+            if let Some(engine) = Self::with(h, implementation) {
                 return engine;
             }
         }
         Engine::Generic
     }
 
-    /// The engine `choice` names, or `None` where this processor or
+    /// The engine `implementation` names, or `None` where this processor or
     /// this cipher has no such thing.
-    fn with(h: &[u8; BLOCK], choice: Implementation) -> Option<Self> {
+    fn with(h: &[u8; BLOCK], implementation: Implementation) -> Option<Self> {
         let _ = h;
-        match choice {
+        match implementation {
             Implementation::Portable => Some(Engine::Generic),
             #[cfg(any(
                 target_arch = "aarch64",
@@ -362,22 +362,22 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
         }
     }
 
-    /// The mode over the implementation `choice` names, or `None`
+    /// The mode over the implementation `implementation` names, or `None`
     /// where this processor or this cipher has no such thing.
     ///
     /// For the tests and the vector suites, which run every
     /// implementation rather than only the one [`new`](Self::new)
     /// would take.
     #[cfg(test)]
-    pub(crate) fn with_choice(
+    pub(crate) fn with_implementation(
         key: &C::Key,
-        choice: Implementation,
+        implementation: Implementation,
     ) -> Option<Self> {
         let cipher = C::new(key);
         let mut h = [0u8; BLOCK];
         cipher.encrypt_one(&mut h);
         Some(Gcm {
-            engine: Engine::<C>::with(&h, choice)?,
+            engine: Engine::<C>::with(&h, implementation)?,
             cipher,
             h,
         })
@@ -420,8 +420,9 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Aead for Gcm<C> {
     type Nonce = [u8; SHORT_NONCE];
     type Tag = [u8; TAG];
 
-    fn try_new(key: &Self::Key) -> Result<Self, Error> {
-        Ok(Gcm::new(key))
+    fn new(key: &Self::Key) -> Self {
+        // The inherent constructor, which takes precedence here.
+        Gcm::new(key)
     }
 
     fn encrypt(
@@ -753,7 +754,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Decryptor<'_, C> {
             return Err(Error::InvalidTagLength(tag.len()));
         }
         let full = self.core.tag()?;
-        if util::equal(&full[..tag.len()], tag) {
+        if constant_time::equal(&full[..tag.len()], tag) {
             Ok(())
         } else {
             Err(Error::AuthenticationFailed)
@@ -1116,7 +1117,9 @@ mod tests {
         // the mode would pick.
         let all: Vec<Gcm<Aes128>> = CHOICES
             .iter()
-            .filter_map(|&c| Gcm::<Aes128>::with_choice(&Key::from(key), c))
+            .filter_map(|&c| {
+                Gcm::<Aes128>::with_implementation(&Key::from(key), c)
+            })
             .collect();
         assert!(!all.is_empty(), "no implementation to test");
         let nonce = [0x33u8; 12];
@@ -1237,11 +1240,15 @@ mod tests {
             // both are validated and not just the one this machine
             // would take.
             let portable = Implementation::Portable;
-            assert!(Gcm::<Aes128>::with_choice(&key, portable).is_some());
+            assert!(
+                Gcm::<Aes128>::with_implementation(&key, portable).is_some()
+            );
             #[cfg(target_arch = "x86_64")]
             {
                 let aesni = Implementation::Aesni;
-                assert!(Gcm::<Aes128>::with_choice(&key, aesni).is_some());
+                assert!(
+                    Gcm::<Aes128>::with_implementation(&key, aesni).is_some()
+                );
             }
         }
     }

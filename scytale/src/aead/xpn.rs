@@ -88,20 +88,20 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xpn<C> {
         Xpn { gcm: Gcm::new(key) }
     }
 
-    /// The same over the implementation `choice` names, or `None`
+    /// The same over the implementation `implementation` names, or `None`
     /// where this processor or this cipher has no such thing.
     ///
     /// For the tests and the benchmark, which name an implementation
     /// rather than take whichever this processor would pick. There is
     /// nothing of XPN's own to choose: it is [`Gcm`] with the nonce
-    /// assembled differently, so the choice is GCM's.
+    /// assembled differently, so the implementation is GCM's.
     #[cfg(test)]
-    pub(crate) fn with_choice(
+    pub(crate) fn with_implementation(
         key: &C::Key,
-        choice: crate::implementation::Implementation,
+        implementation: crate::implementation::Implementation,
     ) -> Option<Self> {
         Some(Xpn {
-            gcm: Gcm::with_choice(key, choice)?,
+            gcm: Gcm::with_implementation(key, implementation)?,
         })
     }
 

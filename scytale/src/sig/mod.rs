@@ -9,24 +9,22 @@
 //! on hashes alone at the price of signatures ten times larger.
 //!
 //! ```
-//! use scytale::Random;
 //! use scytale::random::CtrDrbg;
-//! use scytale::sig::ed25519;
+//! use scytale::sig::ed25519::{PrivateKey, PublicKey};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let mut rng = CtrDrbg::from_system()?;
-//! let mut secret = [0u8; ed25519::KEY_SIZE];
-//! rng.fill(&mut secret)?;
+//! let key = PrivateKey::generate(&mut rng)?;
 //!
 //! // Made with the secret, checked with the public.
-//! let public = ed25519::public_key(&secret)?;
-//! let signature = ed25519::sign(&secret, b"release v1.2")?;
-//! ed25519::verify(&public, b"release v1.2", &signature)?;
-//! assert!(ed25519::verify(&public, b"release v1.3", &signature).is_err());
+//! let signature = key.sign(b"release v1.2")?;
+//! let public = key.public_key();
+//! public.verify(b"release v1.2", &signature)?;
+//! assert!(public.verify(b"release v1.3", &signature).is_err());
 //!
 //! // The public key in the form other software reads.
-//! let pem = ed25519::public_key_pem(&public);
-//! assert_eq!(ed25519::public_key_from_pem(&pem)?, public);
+//! let pem = public.pem_bytes();
+//! assert_eq!(&PublicKey::try_from_pem(&pem)?, public);
 //! # Ok(())
 //! # }
 //! ```

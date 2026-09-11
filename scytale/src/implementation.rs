@@ -40,6 +40,24 @@ pub(crate) enum Implementation {
     Portable,
 }
 
+impl Implementation {
+    /// What it is called, in a benchmark row or a suite's log.
+    #[cfg(test)]
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            Implementation::Aesni => "aesni",
+            #[cfg(target_arch = "x86_64")]
+            Implementation::Vaes => "vaes",
+            #[cfg(target_arch = "aarch64")]
+            Implementation::Armv8 => "armv8",
+            #[cfg(target_arch = "riscv64")]
+            Implementation::Zvkned => "zvkned",
+            Implementation::Portable => "portable",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -592,7 +592,7 @@ const CHACHA: [&str; 1] = ["chacha20"];
 /// type and the per-backend types have the same methods but no
 /// shared trait, since only the bench wants one.
 trait StreamCipher: Sized {
-    fn try_new(key: &[u8]) -> Result<Self, Error>;
+    fn try_new(key: &Key<[u8; 32]>) -> Result<Self, Error>;
     fn encrypt(
         &self,
         nonce: &[u8; 12],
@@ -602,8 +602,8 @@ trait StreamCipher: Sized {
 }
 
 impl StreamCipher for chacha20::ChaCha20 {
-    fn try_new(key: &[u8]) -> Result<Self, Error> {
-        chacha20::ChaCha20::try_new(key)
+    fn try_new(key: &Key<[u8; 32]>) -> Result<Self, Error> {
+        Ok(chacha20::ChaCha20::new(key))
     }
     fn encrypt(
         &self,
@@ -616,7 +616,7 @@ impl StreamCipher for chacha20::ChaCha20 {
 }
 
 impl<B: chacha20::Backend> StreamCipher for chacha20::Cipher<B> {
-    fn try_new(key: &[u8]) -> Result<Self, Error> {
+    fn try_new(key: &Key<[u8; 32]>) -> Result<Self, Error> {
         chacha20::Cipher::try_new(key)
     }
     fn encrypt(
@@ -644,7 +644,7 @@ fn chacha_section<C: StreamCipher>(
     if wanted.is_empty() {
         return false;
     }
-    let cipher = match C::try_new(&KEY256) {
+    let cipher = match C::try_new(&Key::from(KEY256)) {
         Ok(cipher) => cipher,
         Err(Error::NotSupported) => return false,
         Err(e) => {
@@ -791,7 +791,7 @@ fn single_section(options: &Options) -> bool {
     // Neither of these can fail to build: the key is the right width
     // and the automatic ChaCha20 always exists.
     let mut mac = Poly1305::try_new(&Key::from(KEY256)).expect("poly1305");
-    let aead = ChaCha20Poly1305::try_new(&Key::from(KEY256)).expect("aead");
+    let aead = ChaCha20Poly1305::new(&Key::from(KEY256));
     let mut tags = [[0u8; 16]; 2];
     let (enc_tag, dec_tag) = tags.split_at_mut(1);
     let mut tasks: Vec<Task<'_>> = vec![
@@ -1680,18 +1680,18 @@ where
         Ok(Keys {
             ecb128: A::new(&k128),
             ecb256: B::new(&k256),
-            cbc: Cbc::with_choice(&k128, implementation),
+            cbc: Cbc::with_implementation(&k128, implementation),
             cfb1: Cfb1::new(&k128),
             cfb8: Cfb8::new(&k128),
             cfb128: Cfb128::new(&k128),
             ofb: Ofb::new(&k128),
-            ctr: Ctr::with_choice(&k128, implementation),
-            ctr256: Ctr::with_choice(&k256, implementation),
-            gcm128: Gcm::with_choice(&k128, implementation),
-            gcm256: Gcm::with_choice(&k256, implementation),
-            siv: GcmSiv::with_choice(&k128, implementation),
-            xpn: Xpn::with_choice(&k128, implementation),
-            xts: Xts::with_choice(
+            ctr: Ctr::with_implementation(&k128, implementation),
+            ctr256: Ctr::with_implementation(&k256, implementation),
+            gcm128: Gcm::with_implementation(&k128, implementation),
+            gcm256: Gcm::with_implementation(&k256, implementation),
+            siv: GcmSiv::with_implementation(&k128, implementation),
+            xpn: Xpn::with_implementation(&k128, implementation),
+            xts: Xts::with_implementation(
                 &Key::from(KEY_XTS_DATA),
                 &Key::from(KEY_XTS_TWEAK),
                 implementation,

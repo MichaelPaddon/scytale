@@ -42,8 +42,9 @@ use core::fmt;
 
 use super::kw::{SEMIBLOCK, apply, unwrap_body, wrap_body};
 use crate::Error;
+use crate::KeyType;
 use crate::cipher::BlockCipher;
-use crate::util;
+use crate::constant_time;
 
 /// The cipher block this is defined for.
 const BLOCK: usize = 16;
@@ -51,6 +52,16 @@ const BLOCK: usize = 16;
 /// The check value for the padded form, from SP 800-38F. The length
 /// of the message follows it, filling out the semiblock.
 const ICV2: [u8; 4] = [0xa6, 0x59, 0x59, 0xa6];
+
+/// The key is the cipher's own, so generic code can draw one
+/// without naming the cipher.
+impl<C: BlockCipher<Block = [u8; BLOCK]>> KeyType for Kwp<C> {
+    type Key = C::Key;
+
+    fn zero_key() -> Self::Key {
+        C::zero_key()
+    }
+}
 
 /// Key wrapping with padding, over a block cipher.
 #[derive(Clone)]
@@ -167,7 +178,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Kwp<C> {
         // Every check is folded into one answer before anything is
         // decided on it, so that a forgery learns nothing from how
         // long the refusal took.
-        let mut bad = !util::equal(&a[..4], &ICV2);
+        let mut bad = !constant_time::equal(&a[..4], &ICV2);
         let mut length = [0u8; 4];
         length.copy_from_slice(&a[4..]);
         let claimed = u32::from_be_bytes(length) as usize;

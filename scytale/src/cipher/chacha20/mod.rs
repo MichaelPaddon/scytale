@@ -9,10 +9,11 @@
 //! that depends on the key.
 //!
 //! ```
+//! use scytale::Key;
 //! use scytale::cipher::chacha20::ChaCha20;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let cipher = ChaCha20::try_new(&[0x42; 32])?;
+//! let cipher = ChaCha20::new(&Key::from([0x42u8; 32]));
 //! let nonce = [0u8; 12];
 //! let mut message = *b"attack at dawn";
 //! cipher.encrypt(&nonce, 1, &mut message)?;
@@ -66,8 +67,8 @@ use core::marker::PhantomData;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::Error;
 use crate::probe::Probe;
+use crate::{Error, Key, KeyType};
 
 /// The key length, in bytes.
 pub const KEY_SIZE: usize = 32;
@@ -113,18 +114,23 @@ pub trait Backend: Sealed {
 
 /// The key as the words the block function takes.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
-struct Key([u32; 8]);
+struct Words([u32; 8]);
 
-impl Key {
-    fn try_new(key: &[u8]) -> Result<Self, Error> {
-        if key.len() != KEY_SIZE {
-            return Err(Error::InvalidKeyLength(key.len()));
-        }
+impl Words {
+    fn new(key: &[u8; KEY_SIZE]) -> Self {
         let mut words = [0u32; 8];
         for (w, bytes) in words.iter_mut().zip(key.chunks_exact(4)) {
             *w = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         }
-        Ok(Key(words))
+        Words(words)
+    }
+}
+
+impl<B: Backend> KeyType for Cipher<B> {
+    type Key = Key<[u8; KEY_SIZE]>;
+
+    fn zero_key() -> Self::Key {
+        Key::zeroed()
     }
 }
 
@@ -141,29 +147,31 @@ fn nonce_words(nonce: &[u8; NONCE_SIZE]) -> [u32; 3] {
 /// is [`ChaCha20`], which picks `B`; the per-architecture modules
 /// name the others.
 pub struct Cipher<B: Backend> {
-    key: Key,
+    key: Words,
     _marker: PhantomData<B>,
 }
 
 impl<B: Backend> Cipher<B> {
-    /// Takes `key`, which must be 32 bytes.
-    pub fn try_new(key: &[u8]) -> Result<Self, Error> {
+    /// Takes the key.
+    ///
+    /// [`Error::NotSupported`] where this processor cannot run `B`.
+    pub fn try_new(key: &Key<[u8; KEY_SIZE]>) -> Result<Self, Error> {
         if !B::supported() {
             return Err(Error::NotSupported);
         }
         // SAFETY: just confirmed.
-        unsafe { Self::new_unchecked(key) }
+        Ok(unsafe { Self::new_unchecked(key) })
     }
 
     /// Takes `key` without asking the processor.
     ///
     /// # Safety
     /// The caller must have confirmed `B::supported()`.
-    pub(crate) unsafe fn new_unchecked(key: &[u8]) -> Result<Self, Error> {
-        Ok(Cipher {
-            key: Key::try_new(key)?,
+    pub(crate) unsafe fn new_unchecked(key: &Key<[u8; KEY_SIZE]>) -> Self {
+        Cipher {
+            key: Words::new(key.array()),
             _marker: PhantomData,
-        })
+        }
     }
 
     /// Encrypts `data` in place, its first byte at the start of
@@ -402,7 +410,7 @@ macro_rules! dispatch {
 /// ChaCha20 using the best implementation the processor supports.
 ///
 /// The processor is probed once, the first time a key is taken;
-/// every later [`ChaCha20::try_new`] reads the cached answer, and
+/// every later [`ChaCha20::new`] reads the cached answer, and
 /// each call then dispatches with a single predictable branch.
 #[derive(Clone)]
 pub struct ChaCha20(Inner);
@@ -436,28 +444,29 @@ enum InnerStream<'a> {
 }
 
 impl ChaCha20 {
-    /// Takes `key`, which must be 32 bytes, with the best
-    /// implementation the processor supports.
+    /// Takes the key, with the best implementation the processor
+    /// supports. The portable one is always there, so this cannot
+    /// fail.
     // The hardware constructors skip their own processor check
     // because the probe has already made it.
     #[allow(unsafe_code)]
-    pub fn try_new(key: &[u8]) -> Result<Self, Error> {
+    pub fn new(key: &Key<[u8; KEY_SIZE]>) -> Self {
         // SAFETY: `probe` only names hardware after confirming the
         // processor supports it.
         let inner = unsafe {
             match probe() {
                 #[cfg(target_arch = "x86_64")]
-                Choice::Avx2 => Inner::Avx2(Cipher::new_unchecked(key)?),
+                Choice::Avx2 => Inner::Avx2(Cipher::new_unchecked(key)),
                 #[cfg(target_arch = "aarch64")]
-                Choice::Neon => Inner::Neon(Cipher::new_unchecked(key)?),
+                Choice::Neon => Inner::Neon(Cipher::new_unchecked(key)),
                 #[cfg(target_arch = "riscv64")]
-                Choice::Zvkb => Inner::Zvkb(Cipher::new_unchecked(key)?),
+                Choice::Zvkb => Inner::Zvkb(Cipher::new_unchecked(key)),
                 #[cfg(target_arch = "riscv64")]
-                Choice::Zbb => Inner::Zbb(Cipher::new_unchecked(key)?),
-                _ => Inner::Portable(Cipher::new_unchecked(key)?),
+                Choice::Zbb => Inner::Zbb(Cipher::new_unchecked(key)),
+                _ => Inner::Portable(Cipher::new_unchecked(key)),
             }
         };
-        Ok(ChaCha20(inner))
+        ChaCha20(inner)
     }
 
     /// Encrypts `data` in place, its first byte at the start of
@@ -563,7 +572,7 @@ pub(crate) mod tests {
 
     /// Checks one implementation against the RFC's worked examples.
     pub(crate) fn check_known_answers<B: Backend>() {
-        let cipher = Cipher::<B>::try_new(&KEY).unwrap();
+        let cipher = Cipher::<B>::try_new(&Key::from(KEY)).unwrap();
         let mut data = *PLAIN;
         cipher.encrypt(&NONCE, 1, &mut data).unwrap();
         assert_eq!(data, hex::<114>(CIPHER));
@@ -571,7 +580,7 @@ pub(crate) mod tests {
         assert_eq!(&data, PLAIN);
 
         // Section 2.3.2: the block function on its own.
-        let cipher = Cipher::<B>::try_new(&KEY).unwrap();
+        let cipher = Cipher::<B>::try_new(&Key::from(KEY)).unwrap();
         let nonce = [0, 0, 0, 0x09, 0, 0, 0, 0x4a, 0, 0, 0, 0];
         let block = cipher.keystream_block(&nonce, 1);
         assert_eq!(block[..16], hex::<16>("10f1e7e4d13b5915500fdd1fa32071c4"));
@@ -582,7 +591,7 @@ pub(crate) mod tests {
             "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e\
              9f",
         );
-        let cipher = Cipher::<B>::try_new(&key).unwrap();
+        let cipher = Cipher::<B>::try_new(&Key::from(key)).unwrap();
         let nonce = hex::<12>("000000000001020304050607");
         assert_eq!(
             cipher.keystream_block(&nonce, 0)[..32],
@@ -596,8 +605,9 @@ pub(crate) mod tests {
     /// Checks one implementation against the portable one over many
     /// lengths, counters and chunkings.
     pub(crate) fn check_matches_portable<B: Backend>() {
-        let cipher = Cipher::<B>::try_new(&KEY).unwrap();
-        let reference = Cipher::<portable::Portable>::try_new(&KEY).unwrap();
+        let cipher = Cipher::<B>::try_new(&Key::from(KEY)).unwrap();
+        let reference =
+            Cipher::<portable::Portable>::try_new(&Key::from(KEY)).unwrap();
         let data: [u8; 1100] = core::array::from_fn(|i| (i * 13 + 7) as u8);
         for len in [
             0usize, 1, 63, 64, 65, 127, 128, 255, 256, 257, 511, 512, 513,
@@ -639,7 +649,7 @@ pub(crate) mod tests {
 
     #[test]
     fn known_answers() {
-        let cipher = ChaCha20::try_new(&KEY).unwrap();
+        let cipher = ChaCha20::new(&Key::from(KEY));
         let mut data = *PLAIN;
         cipher.encrypt(&NONCE, 1, &mut data).unwrap();
         assert_eq!(data, hex::<114>(CIPHER));
@@ -647,8 +657,9 @@ pub(crate) mod tests {
 
     #[test]
     fn matches_portable() {
-        let cipher = ChaCha20::try_new(&KEY).unwrap();
-        let reference = Cipher::<portable::Portable>::try_new(&KEY).unwrap();
+        let cipher = ChaCha20::new(&Key::from(KEY));
+        let reference =
+            Cipher::<portable::Portable>::try_new(&Key::from(KEY)).unwrap();
         let mut a = [0x5au8; 1000];
         let mut b = a;
         cipher.encrypt(&NONCE, 3, &mut a).unwrap();
@@ -658,7 +669,7 @@ pub(crate) mod tests {
 
     #[test]
     fn pieces_match_whole() {
-        let cipher = ChaCha20::try_new(&KEY).unwrap();
+        let cipher = ChaCha20::new(&Key::from(KEY));
         let data: [u8; 517] = core::array::from_fn(|i| (i * 31) as u8);
         let mut whole = data;
         cipher.encrypt(&NONCE, 5, &mut whole).unwrap();
@@ -673,18 +684,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn rejects_wrong_key_length() {
-        for n in [0, 16, 31, 33, 64] {
-            assert_eq!(
-                ChaCha20::try_new(&[0u8; 64][..n]).err(),
-                Some(Error::InvalidKeyLength(n))
-            );
-        }
-    }
-
-    #[test]
     fn refuses_to_wrap_the_counter() {
-        let cipher = ChaCha20::try_new(&KEY).unwrap();
+        let cipher = ChaCha20::new(&Key::from(KEY));
         let mut data = [0u8; 129];
         // Two blocks and a byte from the last block: the third block
         // does not exist.
@@ -743,7 +744,7 @@ pub(crate) mod tests {
                 Ok(())
             }
         }
-        let cipher = ChaCha20::try_new(&[0x5a; 32]).unwrap();
+        let cipher = ChaCha20::new(&Key::from([0x5au8; 32]));
         let mut buffer = Buffer([0; 128], 0);
         core::fmt::write(&mut buffer, format_args!("{cipher:?}")).unwrap();
         let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();

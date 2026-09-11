@@ -42,13 +42,15 @@ pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
     };
     let mut count = 0;
     let mut engines = 0;
-    for &choice in ctr::CHOICES {
-        if Ctr::<C>::with_choice(&C::zero_key(), choice).is_none() {
+    for &implementation in ctr::CHOICES {
+        if Ctr::<C>::with_implementation(&C::zero_key(), implementation)
+            .is_none()
+        {
             continue;
         }
         engines += 1;
         for (group, encrypt) in &groups {
-            count += aft::<C>(group, *encrypt, choice);
+            count += aft::<C>(group, *encrypt, implementation);
         }
     }
     assert!(engines >= 1, "no implementation to test");
@@ -71,14 +73,15 @@ fn truncate(data: &mut [u8], bits: usize) {
 fn aft<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
-    choice: crate::implementation::Implementation,
+    implementation: crate::implementation::Implementation,
 ) -> usize {
     let mut count = 0;
     for t in group["tests"].as_array().expect("tests") {
         let Some(key) = key_of::<C>(&hex(&t["key"])) else {
             continue;
         };
-        let ctr = Ctr::<C>::with_choice(&key, choice).expect("implementation");
+        let ctr = Ctr::<C>::with_implementation(&key, implementation)
+            .expect("implementation");
         let counter = hex(&t["iv"]);
         let bits = t["payloadLen"].as_u64().expect("payloadLen") as usize;
         let (input, expected) = if encrypt {

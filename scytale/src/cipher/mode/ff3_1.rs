@@ -56,6 +56,7 @@
 use core::fmt;
 
 use crate::Error;
+use crate::KeyType;
 use crate::cipher::BLOCK;
 use crate::cipher::{BlockCipher, OneBlock};
 use crate::math::natural::Natural;
@@ -75,6 +76,16 @@ const HALF_BITS: u32 = 96;
 
 /// The longest message, in symbols: two halves at the smallest radix.
 pub const MAX_SYMBOLS: usize = 2 * HALF_BITS as usize;
+
+/// The key is the cipher's own, so generic code can draw one
+/// without naming the cipher.
+impl<C: BlockCipher<Block = [u8; BLOCK]>> KeyType for Ff3_1<C> {
+    type Key = C::Key;
+
+    fn zero_key() -> Self::Key {
+        C::zero_key()
+    }
+}
 
 /// FF3-1 over a block cipher, for one radix.
 ///

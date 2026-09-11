@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn probe_agrees_with_constructor() {
-        let result = ChaCha20::try_new(&[0u8; 32]);
+        let result = ChaCha20::try_new(&crate::Key::from([0u8; 32]));
         assert_eq!(result.is_ok(), has_avx2());
         if !has_avx2() {
             assert_eq!(result.err(), Some(Error::NotSupported));

@@ -209,6 +209,11 @@ pub type Rsa3072PrivateKey = PrivateKey<48, 384, 24>;
 pub type Rsa4096PublicKey = PublicKey<64, 512>;
 /// A 4096-bit signing key.
 pub type Rsa4096PrivateKey = PrivateKey<64, 512, 32>;
+/// An 8192-bit verification key: slow, and rare outside long-lived
+/// roots.
+pub type Rsa8192PublicKey = PublicKey<128, 1024>;
+/// An 8192-bit signing key.
+pub type Rsa8192PrivateKey = PrivateKey<128, 1024, 64>;
 /// A 1024-bit verification key: legacy interoperation only, too
 /// small for new uses.
 pub type Rsa1024PublicKey = PublicKey<16, 128>;
@@ -860,6 +865,29 @@ mod tests {
             public.verify_pss::<Sha256>(MSG, &too_big, 16),
             Err(Error::InvalidSignature),
         );
+    }
+
+    /// The widest alias is a type like the others: a key of that
+    /// width builds, and a signature that is not one is refused
+    /// rather than overrunning anything.
+    #[test]
+    fn the_widest_width_is_a_key_like_the_rest() {
+        // A modulus of the right width: top bit set, odd, and not a
+        // real key, which verification never needs it to be.
+        let mut n = [0xa5u8; 1024];
+        n[0] |= 0x80;
+        n[1023] |= 1;
+        let key = Rsa8192PublicKey::try_new(&n, &[1, 0, 1]).expect("key");
+        assert_eq!(key.modulus_bytes(), n);
+
+        let signature = [0x5au8; 1024];
+        assert_eq!(
+            key.verify_pkcs1::<Sha256>(b"message", &signature),
+            Err(Error::InvalidSignature)
+        );
+
+        // One byte short of the width is refused as a key at all.
+        assert!(Rsa8192PublicKey::try_new(&n[1..], &[1, 0, 1]).is_err());
     }
 
     #[test]

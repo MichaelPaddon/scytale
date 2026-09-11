@@ -126,9 +126,8 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
     /// processor lacks the instructions or `C` is not a cipher this is
     /// written for.
     ///
-    /// The extension works on a register of one block, so unlike
-    /// x86-64 there is no wider form: `wide` is answered with
-    /// nothing.
+    /// There is one implementation here, so anything but
+    /// [`Implementation::Armv8`] is answered with nothing.
     pub(crate) fn of(
         h: &[u8; BLOCK],
         implementation: Implementation,

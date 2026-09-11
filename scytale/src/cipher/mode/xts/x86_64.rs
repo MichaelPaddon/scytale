@@ -93,9 +93,9 @@ impl<C> Clone for Engine<C> {
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
-    /// The engine for this cipher at the width asked for, or `None`
-    /// where this processor lacks the instructions for it or `C` is
-    /// not a cipher this is written for.
+    /// The engine `implementation` names, or `None` where this
+    /// processor lacks its instructions or `C` is not a cipher this is
+    /// written for.
     pub(crate) fn of(implementation: Implementation) -> Option<Self> {
         let wide = match implementation {
             Implementation::Vaes if has_vaes() => true,

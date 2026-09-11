@@ -45,7 +45,7 @@ pub fn run() {
             let Ok(key) = Key::try_from(&hex(&t["key"])[..]) else {
                 continue;
             };
-            let aead = ChaCha20Poly1305::try_new(&key).expect("key");
+            let aead = ChaCha20Poly1305::new(&key);
             let nonce: [u8; 12] = hex(&t["iv"]).try_into().expect("nonce");
             let aad = hex(&t["aad"]);
             let msg = hex(&t["msg"]);
@@ -103,7 +103,7 @@ pub fn run_cipher<B: Backend>(what: &str) {
     };
     // Asked once rather than per case, and reported: a silent skip
     // would look like a pass.
-    match Cipher::<B>::try_new(&[0u8; 32]) {
+    match Cipher::<B>::try_new(&Key::from([0u8; 32])) {
         Ok(_) => {}
         Err(Error::NotSupported) => {
             eprintln!("{what} not available; skipping");
@@ -125,7 +125,10 @@ pub fn run_cipher<B: Backend>(what: &str) {
                 continue;
             }
             let tag = format!("tcId {}: {}", t["tcId"], t["comment"]);
-            let cipher = Cipher::<B>::try_new(&hex(&t["key"])).expect("key");
+            let Ok(key) = Key::try_from(&hex(&t["key"])[..]) else {
+                continue;
+            };
+            let cipher = Cipher::<B>::try_new(&key).expect("key");
             let nonce: [u8; 12] = hex(&t["iv"]).try_into().expect("nonce");
             let msg = hex(&t["msg"]);
 

@@ -70,6 +70,7 @@ use self::x86_64 as native;
 use core::fmt;
 
 use super::{ByteOrder, counter_blocks, xor};
+use crate::KeyType;
 use crate::cipher::{BlockCipher, OneBlock};
 use crate::implementation::Implementation;
 use crate::{ByteArray, Error};
@@ -130,18 +131,18 @@ pub(crate) const CHOICES: &[Implementation] = &[
 impl<C: BlockCipher> Engine<C> {
     /// The best engine for this cipher on this processor.
     fn new() -> Self {
-        for &choice in CHOICES {
-            if let Some(engine) = Self::with(choice) {
+        for &implementation in CHOICES {
+            if let Some(engine) = Self::with(implementation) {
                 return engine;
             }
         }
         Engine::Generic
     }
 
-    /// The engine `choice` names, or `None` where this processor or
+    /// The engine `implementation` names, or `None` where this processor or
     /// this cipher has no such thing.
-    fn with(choice: Implementation) -> Option<Self> {
-        match choice {
+    fn with(implementation: Implementation) -> Option<Self> {
+        match implementation {
             Implementation::Portable => Some(Engine::Generic),
             #[cfg(any(
                 target_arch = "aarch64",
@@ -181,6 +182,16 @@ impl<C: BlockCipher> Engine<C> {
     }
 }
 
+/// The key is the cipher's own, so generic code can draw one
+/// without naming the cipher.
+impl<C: BlockCipher> KeyType for Ctr<C> {
+    type Key = C::Key;
+
+    fn zero_key() -> Self::Key {
+        C::zero_key()
+    }
+}
+
 /// Counter mode over a block cipher.
 #[derive(Clone)]
 pub struct Ctr<C: BlockCipher> {
@@ -201,20 +212,20 @@ where
         }
     }
 
-    /// The mode over the implementation `choice` names, or `None`
+    /// The mode over the implementation `implementation` names, or `None`
     /// where this processor or this cipher has no such thing.
     ///
     /// For the tests and the vector suites, which run every
     /// implementation rather than only the one [`new`](Self::new)
     /// would take.
     #[cfg(test)]
-    pub(crate) fn with_choice(
+    pub(crate) fn with_implementation(
         key: &C::Key,
-        choice: Implementation,
+        implementation: Implementation,
     ) -> Option<Self> {
         Some(Ctr {
             cipher: C::new(key),
-            engine: Engine::with(choice)?,
+            engine: Engine::with(implementation)?,
         })
     }
 
@@ -457,22 +468,28 @@ mod tests {
 
         let key = Key::from(key);
         let mut engines = 0;
-        for &choice in CHOICES {
-            let Some(ctr) = Ctr::<Aes128>::with_choice(&key, choice) else {
+        for &implementation in CHOICES {
+            let Some(ctr) =
+                Ctr::<Aes128>::with_implementation(&key, implementation)
+            else {
                 continue;
             };
             engines += 1;
             for n in 0..=N {
                 let mut got = [0u8; N];
                 ctr.encrypt(&start, &mut got[..n]).unwrap();
-                assert_eq!(got[..n], want[..n], "{n} bytes, {choice:?}");
+                assert_eq!(
+                    got[..n],
+                    want[..n],
+                    "{n} bytes, {implementation:?}"
+                );
             }
         }
         assert!(engines >= 1, "no implementation to test");
         // The generic one is always to be had, and on a processor
         // with the instructions the narrower written-out one is too.
         let portable = Implementation::Portable;
-        assert!(Ctr::<Aes128>::with_choice(&key, portable).is_some());
+        assert!(Ctr::<Aes128>::with_implementation(&key, portable).is_some());
     }
 
     /// The loops add to the last byte of the block without carrying

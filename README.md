@@ -122,15 +122,24 @@ The API documentation is on [docs.rs](https://docs.rs/scytale), and
 **Correct.** Every implementation is checked against the standard
 test vectors, against the NIST Automated Cryptographic Validation
 Program (ACVP) vectors, and against Project Wycheproof, whose cases
-are chosen to break implementations rather than to exercise them:
-56,078 one-shot cases and 3600 Monte Carlo steps, the latter being
-3.6 million chained cipher calls with the key re-derived at each
-step. Every implementation of a primitive is put through the whole
-vector set for it, at every key size; the modes and constructions
-built on top run once each, on the implementation the processor
-picks. Every implementation is also compared byte for byte against
-the portable one across a range of buffer lengths, so the paths that
-only some processors take get the same scrutiny as the rest.
+are chosen to break implementations rather than to exercise them.
+The corpus is 109 files holding 74,433 cases, and every case this
+build can run is run; the Monte Carlo groups chain a thousand cipher
+calls per case, with the key re-derived at each step. Every
+implementation is put through the whole vector set for its primitive,
+at every key size, the modes and the AEADs included: each engine
+written for a particular instruction set is validated as itself
+rather than only the one this processor would pick. Every
+implementation is also compared byte for byte against the portable
+one across a range of buffer lengths, so the paths that only some
+processors take get the same scrutiny as the rest.
+
+What a given machine actually ran, and what it skipped for want of
+instructions, is a command away:
+
+```sh
+cargo test --lib acvp::inventory -- --nocapture
+```
 
 **Fast.** Where a processor has instructions for a primitive, scytale
 uses them, through hand-written assembly rather than compiler
@@ -169,6 +178,7 @@ the machinery behind it:
 | `pke` | public-key encryption | RSA-OAEP |
 | `sig` | signatures | Ed25519, ECDSA over P-256 and P-384, ML-DSA, SLH-DSA, RSA-PSS, RSA PKCS#1 v1.5 |
 | `random` | random numbers | CTR_DRBG over AES-256, and what seeds it |
+| `constant_time` | comparing secrets | equality whose timing says nothing |
 
 ### Ciphers
 
@@ -390,10 +400,14 @@ wiped when the generator is dropped.
 | riscv64 | scalar rotates (Zbb, Zbkb) | ChaCha20 |
 | any | none needed; portable Rust | all |
 
-Every row is exercised on real silicon: the continuous integration
-matrix runs the whole test suite natively on x86-64, arm64 and
-riscv64 runners, with no emulation, so the assembly for each is run
-by the processor it was written for.
+The x86-64 and arm64 rows are exercised on real silicon: the
+continuous integration matrix runs the whole test suite natively on
+runners of both, so the assembly is run by the processor it was
+written for. The RISC-V rows are not. The riscv64 runner is a plain
+`rv64imafdcsu` machine with none of the extensions below, so it
+reports every one of those rows as unavailable, and they are covered
+under qemu instead -- at two vector lengths, which is more than one
+machine would give, but it is emulation and not silicon.
 
 GHASH is the hash inside GCM, GCM-SIV and XPN. Without a carry-less
 multiply instruction it costs more than the cipher does. SHA-224 and

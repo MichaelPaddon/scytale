@@ -17,7 +17,7 @@
 //! let shared_secret = [0x5a; 32];
 //! let mut keys = [0u8; 64];
 //! let salt = b"session salt";
-//! hkdf::derive::<Sha256>(salt, &shared_secret, b"app v1", &mut keys)?;
+//! hkdf::derive::<Sha256>(salt, &shared_secret, &[b"app v1"], &mut keys)?;
 //! let (encrypt_key, mac_key) = keys.split_at(32);
 //!
 //! // A password: guessable, so every guess must be made expensive.

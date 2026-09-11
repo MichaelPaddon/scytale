@@ -34,13 +34,15 @@ pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
     };
     let mut count = 0;
     let mut engines = 0;
-    for &choice in cbc::CHOICES {
-        if Cbc::<C>::with_choice(&C::zero_key(), choice).is_none() {
+    for &implementation in cbc::CHOICES {
+        if Cbc::<C>::with_implementation(&C::zero_key(), implementation)
+            .is_none()
+        {
             continue;
         }
         engines += 1;
         for (group, encrypt) in &groups {
-            count += aft::<C>(group, *encrypt, choice);
+            count += aft::<C>(group, *encrypt, implementation);
         }
     }
     assert!(engines >= 1, "no implementation to test");
@@ -55,12 +57,14 @@ pub fn run_mct<C: BlockCipher<Block = [u8; 16]>>() {
         return;
     };
     let mut count = 0;
-    for &choice in cbc::CHOICES {
-        if Cbc::<C>::with_choice(&C::zero_key(), choice).is_none() {
+    for &implementation in cbc::CHOICES {
+        if Cbc::<C>::with_implementation(&C::zero_key(), implementation)
+            .is_none()
+        {
             continue;
         }
         for (group, encrypt) in &groups {
-            count += mct::<C>(group, *encrypt, choice);
+            count += mct::<C>(group, *encrypt, implementation);
         }
     }
     assert!(count >= 200, "only {count} MCT steps");
@@ -73,20 +77,20 @@ fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
 
 fn cbc<C: BlockCipher<Block = [u8; 16]>>(
     key: &[u8],
-    choice: crate::implementation::Implementation,
+    implementation: crate::implementation::Implementation,
 ) -> Option<Cbc<C>> {
-    Cbc::with_choice(&key_of::<C>(key)?, choice)
+    Cbc::with_implementation(&key_of::<C>(key)?, implementation)
 }
 
 /// Algorithm Functional Test: one message, one IV.
 fn aft<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
-    choice: crate::implementation::Implementation,
+    implementation: crate::implementation::Implementation,
 ) -> usize {
     let mut count = 0;
     for t in group["tests"].as_array().expect("tests") {
-        let Some(cbc) = cbc::<C>(&hex(&t["key"]), choice) else {
+        let Some(cbc) = cbc::<C>(&hex(&t["key"]), implementation) else {
             continue;
         };
         let iv = hex(&t["iv"]);
@@ -115,7 +119,7 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
 fn mct<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
-    choice: crate::implementation::Implementation,
+    implementation: crate::implementation::Implementation,
 ) -> usize {
     let (input_name, output_name) =
         if encrypt { ("pt", "ct") } else { ("ct", "pt") };
@@ -136,7 +140,7 @@ fn mct<C: BlockCipher<Block = [u8; 16]>>(
             assert_eq!(iv, hex(&step["iv"]), "{tag} iv");
             assert_eq!(input, hex(&step[input_name]), "{tag} input");
 
-            let cbc = cbc::<C>(&key, choice).expect("width");
+            let cbc = cbc::<C>(&key, implementation).expect("width");
             let (last, previous) = if encrypt {
                 step_encrypt(&cbc, &iv, &input)
             } else {

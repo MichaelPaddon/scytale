@@ -215,6 +215,6 @@ mod tests {
 
     #[test]
     fn probe_agrees_with_constructor() {
-        assert!(ChaCha20::try_new(&[0u8; 32]).is_ok());
+        assert!(ChaCha20::try_new(&crate::Key::from([0u8; 32])).is_ok());
     }
 }

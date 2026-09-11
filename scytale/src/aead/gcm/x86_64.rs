@@ -358,11 +358,11 @@ pub(crate) struct Subkey {
 }
 
 impl Subkey {
-    /// The powers of hash subkey `h`, at the width asked for, or
-    /// `None` where this processor has not the instructions for it.
+    /// The powers of hash subkey `h` for `implementation`, or `None`
+    /// where this processor has not its instructions.
     ///
-    /// The wider table is four times the work to build: worth it for
-    /// a key that many messages go under, not for one derived per
+    /// VAES also wants a table four times the work to build: worth it
+    /// for a key that many messages go under, not for one derived per
     /// message as GCM-SIV derives its own.
     pub(crate) fn of(
         h: &[u8; BLOCK],
@@ -383,9 +383,9 @@ impl Subkey {
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
-    /// The engine under hash subkey `h` at the width asked for, or
-    /// `None` where this processor lacks the instructions for it or
-    /// `C` is not a cipher this is written for.
+    /// The engine `implementation` names, under hash subkey `h`, or
+    /// `None` where this processor lacks its instructions or `C` is
+    /// not a cipher this is written for.
     pub(crate) fn of(
         h: &[u8; BLOCK],
         implementation: Implementation,

@@ -31,15 +31,17 @@ pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
     };
     let mut cases = 0;
     let mut engines = 0;
-    for &choice in xts::CHOICES {
+    for &implementation in xts::CHOICES {
         let (data, tweak) = (C::zero_key(), one_key::<C>());
-        if Xts::<C>::with_choice(&data, &tweak, choice).is_none() {
+        if Xts::<C>::with_implementation(&data, &tweak, implementation)
+            .is_none()
+        {
             continue;
         }
         engines += 1;
         for (group, encrypt) in &groups {
             let bits = group["payloadLen"].as_u64().expect("payloadLen");
-            cases += aft::<C>(group, *encrypt, bits as usize, choice);
+            cases += aft::<C>(group, *encrypt, bits as usize, implementation);
         }
     }
     assert!(engines >= 1, "no implementation to test");
@@ -65,7 +67,7 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
     bits: usize,
-    choice: crate::implementation::Implementation,
+    implementation: crate::implementation::Implementation,
 ) -> usize {
     let mut count = 0;
     for t in group["tests"].as_array().expect("tests") {
@@ -76,7 +78,7 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
         else {
             continue;
         };
-        let xts = Xts::<C>::with_choice(&data, &tweak, choice)
+        let xts = Xts::<C>::with_implementation(&data, &tweak, implementation)
             .expect("implementation");
         let tweak: [u8; 16] = hex(&t["tweakValue"]).try_into().expect("tweak");
         let (input, expected) = if encrypt {

@@ -84,8 +84,8 @@ use self::x86_64 as native;
 use super::{LANES, xor};
 use crate::Error;
 use crate::cipher::{BlockCipher, OneBlock};
+use crate::constant_time;
 use crate::implementation::Implementation;
-use crate::util;
 
 /// XTS over a block cipher.
 ///
@@ -145,18 +145,18 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Clone for Engine<C> {
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
     /// The best engine for this cipher on this processor.
     fn new() -> Self {
-        for &choice in CHOICES {
-            if let Some(engine) = Self::with(choice) {
+        for &implementation in CHOICES {
+            if let Some(engine) = Self::with(implementation) {
                 return engine;
             }
         }
         Engine::Generic(core::marker::PhantomData)
     }
 
-    /// The engine `choice` names, or `None` where this processor or
+    /// The engine `implementation` names, or `None` where this processor or
     /// this cipher has no such thing.
-    fn with(choice: Implementation) -> Option<Self> {
-        match choice {
+    fn with(implementation: Implementation) -> Option<Self> {
+        match implementation {
             Implementation::Portable => {
                 Some(Engine::Generic(core::marker::PhantomData))
             }
@@ -183,7 +183,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
     /// construction, and the standard forbids it. That is reported
     /// as [`Error::InvalidKeyLength`] with the length of the pair.
     pub fn try_new(data: &C::Key, tweak: &C::Key) -> Result<Self, Error> {
-        if util::equal(data.as_ref(), tweak.as_ref()) {
+        if constant_time::equal(data.as_ref(), tweak.as_ref()) {
             return Err(Error::InvalidKeyLength(2 * data.as_ref().len()));
         }
         Ok(Xts {
@@ -193,22 +193,22 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
         })
     }
 
-    /// The mode over the implementation `choice` names, or `None`
+    /// The mode over the implementation `implementation` names, or `None`
     /// where this processor or this cipher has no such thing.
     ///
     /// For the tests and the vector suites, which run every
     /// implementation rather than only the one [`try_new`](Self::try_new)
     /// would take.
     #[cfg(test)]
-    pub(crate) fn with_choice(
+    pub(crate) fn with_implementation(
         data: &C::Key,
         tweak: &C::Key,
-        choice: Implementation,
+        implementation: Implementation,
     ) -> Option<Self> {
         Some(Xts {
             data: C::new(data),
             tweak: C::new(tweak),
-            engine: Engine::with(choice)?,
+            engine: Engine::with(implementation)?,
         })
     }
 
@@ -537,13 +537,19 @@ mod tests {
 
         let all: Vec<Xts<Aes128>> = CHOICES
             .iter()
-            .filter_map(|&c| Xts::<Aes128>::with_choice(&data, &tweak, c))
+            .filter_map(|&c| {
+                Xts::<Aes128>::with_implementation(&data, &tweak, c)
+            })
             .collect();
         assert!(!all.is_empty(), "no implementation to test");
         // The generic one is always to be had.
         assert!(
-            Xts::<Aes128>::with_choice(&data, &tweak, Implementation::Portable)
-                .is_some()
+            Xts::<Aes128>::with_implementation(
+                &data,
+                &tweak,
+                Implementation::Portable
+            )
+            .is_some()
         );
 
         for len in BLOCK..MAX {

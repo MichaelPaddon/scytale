@@ -99,7 +99,7 @@ use crate::{Error, KeyType};
 /// an object once they are named:
 /// `&dyn Aead<Key = Key<[u8; 16]>, Nonce = [u8; 12], Tag = [u8; 16]>`
 /// takes AES-128-GCM and AES-128-GCM-SIV alike. Only
-/// [`try_new`](Aead::try_new) needs the concrete type.
+/// [`new`](Aead::new) needs the concrete type.
 ///
 /// [`Xpn`] deliberately does not implement it. Its nonce is two
 /// separate halves, a secret salt and a frame identifier, and pushing
@@ -122,7 +122,10 @@ pub trait Aead: KeyType {
     type Tag: Copy + AsRef<[u8]> + AsMut<[u8]>;
 
     /// Takes the key.
-    fn try_new(key: &Self::Key) -> Result<Self, Error>
+    ///
+    /// Every one of these has a portable implementation, so there is
+    /// no processor on which taking a key can fail.
+    fn new(key: &Self::Key) -> Self
     where
         Self: Sized;
 
@@ -207,7 +210,7 @@ mod tests {
             key: &A::Key,
             nonce: &A::Nonce,
         ) -> [u8; 16] {
-            let aead = A::try_new(key).expect("key");
+            let aead = A::new(key);
             let mut tag = [0u8; 16];
             aead.encrypt(nonce, b"", &mut [], &mut tag)
                 .expect("encrypt");

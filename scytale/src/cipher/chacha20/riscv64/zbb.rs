@@ -203,7 +203,10 @@ mod tests {
 
     #[test]
     fn probes_agree_with_constructors() {
-        assert_eq!(ChaCha20::try_new(&[0u8; 32]).is_ok(), has_zbb());
+        assert_eq!(
+            ChaCha20::try_new(&crate::Key::from([0u8; 32])).is_ok(),
+            has_zbb()
+        );
     }
 
     /// `roriw` is in Zbb, which RVA23 requires, and in Zbkb, which

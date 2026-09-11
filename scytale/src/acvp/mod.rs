@@ -1200,7 +1200,7 @@ mod hkdf {
 /// actually exercised:
 ///
 /// ```text
-/// cargo test --test acvp inventory -- --nocapture
+/// cargo test --lib acvp::inventory -- --nocapture
 /// ```
 mod inventory {
     #[allow(unused_imports)]
@@ -1210,6 +1210,46 @@ mod inventory {
     use crate::cipher::chacha20::Backend;
     use crate::cipher::{aes, chacha20};
     use crate::hash::{Hash, sha2, sha3};
+
+    /// Every implementation of every mode that has more than one,
+    /// under the cipher `C`.
+    fn modes<C>()
+    where
+        C: crate::cipher::BlockCipher<
+                Block = [u8; 16],
+                Key = crate::Key<[u8; 16]>,
+            >,
+    {
+        use crate::aead::{gcm, gcm_siv};
+        use crate::cipher::mode::{cbc, ctr, xts};
+        use crate::implementation::Implementation;
+
+        let key = crate::Key::from([0x42u8; 16]);
+        let tweak = crate::Key::from([0x99u8; 16]);
+        let one = |suite: &str,
+                   all: &[Implementation],
+                   has: &dyn Fn(Implementation) -> bool| {
+            println!("{suite}");
+            for &i in all {
+                report(i.name(), has(i));
+            }
+        };
+        one("AES-CBC", cbc::CHOICES, &|i| {
+            cbc::Cbc::<C>::with_implementation(&key, i).is_some()
+        });
+        one("AES-CTR", ctr::CHOICES, &|i| {
+            ctr::Ctr::<C>::with_implementation(&key, i).is_some()
+        });
+        one("AES-XTS", xts::CHOICES, &|i| {
+            xts::Xts::<C>::with_implementation(&key, &tweak, i).is_some()
+        });
+        one("AES-GCM", gcm::CHOICES, &|i| {
+            gcm::Gcm::<C>::with_implementation(&key, i).is_some()
+        });
+        one("AES-GCM-SIV", gcm_siv::CHOICES, &|i| {
+            gcm_siv::GcmSiv::<C>::with_implementation(&key, i).is_some()
+        });
+    }
 
     /// Whether a hash can be built on this processor.
     fn hash<H: Hash>() -> bool {
@@ -1270,6 +1310,11 @@ mod inventory {
                 aes::riscv64::zvkned::Aes::<16>::supported(),
             );
         }
+
+        // The modes and AEADs written out for particular
+        // instructions, which are implementations in their own right
+        // and validated by name like the ciphers above.
+        modes::<aes::Aes128>();
 
         // SHA-256 and SHA-512 are listed apart: they are different
         // instructions, and a processor can have one without the

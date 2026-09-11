@@ -1,4 +1,9 @@
-//! Small helpers shared across the library.
+//! Comparisons whose timing says nothing about their operands.
+//!
+//! Anything that compares a secret -- a tag, a digest, a password
+//! hash -- has to read all of both sides, because an ordinary
+//! comparison stops at the first difference and an attacker who can
+//! time it learns where that was.
 
 /// Reports whether two byte strings are equal, without letting the
 /// time taken reveal where they first differ.
@@ -7,7 +12,7 @@
 /// differing byte, and an attacker who can time that learns how much
 /// of a guessed tag was right, one byte at a time. This reads every
 /// byte of both, always.
-pub(crate) fn equal(a: &[u8], b: &[u8]) -> bool {
+pub fn equal(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

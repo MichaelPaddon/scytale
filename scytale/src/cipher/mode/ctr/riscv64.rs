@@ -63,8 +63,9 @@ impl<C: BlockCipher> Engine<C> {
     /// lacks the instructions or `C` is not a cipher this is written
     /// for.
     ///
-    /// The loop takes whatever vector length it finds, so there is no
-    /// second width to ask for: `wide` is answered with nothing.
+    /// The loop takes whatever vector length it finds, so there is
+    /// one implementation here, and anything but
+    /// [`Implementation::Zvkned`] is answered with nothing.
     pub(crate) fn of(implementation: Implementation) -> Option<Self> {
         let wanted = implementation == Implementation::Zvkned;
         if !wanted || !has_zvkned() || !has_vrev8() {

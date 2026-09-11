@@ -120,7 +120,7 @@ fn multi_case<H: Hash + Clone + BlockType>(t: &Value) -> bool {
         assert_eq!(want.len(), l_bits as usize / 8);
         let info = hex(&iteration["fixedInfo"]);
         let mut dkm = vec![0u8; want.len()];
-        hkdf::expand::<H>(prk.as_ref(), &info, &mut dkm).expect("expand");
+        hkdf::expand::<H>(prk.as_ref(), &[&info], &mut dkm).expect("expand");
         dkm == want
     })
 }
@@ -148,6 +148,6 @@ fn case<H: Hash + Clone + BlockType>(t: &Value) -> bool {
     let expected = hex(&t["dkm"]);
     assert_eq!(expected.len(), l_bits as usize / 8);
     let mut dkm = vec![0u8; expected.len()];
-    hkdf::derive::<H>(&salt, &ikm, &info, &mut dkm).expect("derive");
+    hkdf::derive::<H>(&salt, &ikm, &[&info], &mut dkm).expect("derive");
     dkm == expected
 }

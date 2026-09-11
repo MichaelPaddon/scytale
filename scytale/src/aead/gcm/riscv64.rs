@@ -150,8 +150,8 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
     /// processor lacks the instructions or `C` is not a cipher this is
     /// written for.
     ///
-    /// The loop works at one fixed width, so there is no second one to
-    /// ask for: `wide` is answered with nothing.
+    /// There is one implementation here, so anything but
+    /// [`Implementation::Zvkned`] is answered with nothing.
     pub(crate) fn of(
         h: &[u8; BLOCK],
         implementation: Implementation,

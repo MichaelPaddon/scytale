@@ -17,20 +17,17 @@
 //! use scytale::hash::sha2::Sha256;
 //! use scytale::kdf::hkdf;
 //! use scytale::kex::x25519;
-//! use scytale::Random;
 //! use scytale::random::CtrDrbg;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let mut rng = CtrDrbg::from_system()?;
 //!
 //! // Each party publishes one value and keeps one.
-//! let mut alice = [0u8; x25519::KEY_SIZE];
-//! let mut bob = [0u8; x25519::KEY_SIZE];
-//! rng.fill(&mut alice)?;
-//! rng.fill(&mut bob)?;
-//! let shared = x25519::shared_secret(&alice, &x25519::public_key(&bob))?;
+//! let alice = x25519::PrivateKey::generate(&mut rng)?;
+//! let bob = x25519::PrivateKey::generate(&mut rng)?;
+//! let shared = alice.shared_secret(bob.public_key())?;
 //! let mut key = [0u8; 32];
-//! hkdf::derive::<Sha256>(b"", &shared, b"session v1", &mut key)?;
+//! hkdf::derive::<Sha256>(b"", &shared, &[b"session v1"], &mut key)?;
 //! # Ok(())
 //! # }
 //! ```

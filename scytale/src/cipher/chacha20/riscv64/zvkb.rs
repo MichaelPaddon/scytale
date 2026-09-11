@@ -222,7 +222,10 @@ mod tests {
 
     #[test]
     fn probes_agree_with_constructors() {
-        assert_eq!(ChaCha20::try_new(&[0u8; 32]).is_ok(), has_zvkb());
+        assert_eq!(
+            ChaCha20::try_new(&crate::Key::from([0u8; 32])).is_ok(),
+            has_zvkb()
+        );
     }
 
     /// `vror.vi` is in Zvbb and in Zvkb, and a processor with the

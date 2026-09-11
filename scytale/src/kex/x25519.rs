@@ -10,12 +10,26 @@
 //! The shared secret is a curve point, not a uniform string: feed it
 //! to [`hkdf`](crate::kdf::hkdf) to make keys, never use it as one.
 //!
-//! Keys are 32 bytes each way, and travel in the RFC 8410 forms
-//! everything else stores them in: a secret key as PKCS#8 through
-//! [`secret_from_der`] and [`secret_der`], a public key as
-//! `SubjectPublicKeyInfo` through [`public_key_from_der`] and
-//! [`public_key_der`], and either in PEM through the `_pem`
-//! functions beside those.
+//! Keys are 32 bytes each way. [`PrivateKey`] and [`PublicKey`] are
+//! the pair to reach for: the secret is held in a [`Key`], so it is
+//! wiped when it goes out of scope, and each carries the RFC 8410
+//! encodings the rest of the world stores keys in. The free functions
+//! below take the bare bytes, for code that already has them.
+//!
+//! ```
+//! use scytale::Key;
+//! use scytale::kex::x25519::PrivateKey;
+//!
+//! # fn main() -> Result<(), scytale::Error> {
+//! let alice = PrivateKey::new(&Key::from([0x11u8; 32]));
+//! let bob = PrivateKey::new(&Key::from([0x22u8; 32]));
+//!
+//! let ours = alice.shared_secret(bob.public_key())?;
+//! let theirs = bob.shared_secret(alice.public_key())?;
+//! assert_eq!(ours, theirs);
+//! # Ok(())
+//! # }
+//! ```
 //!
 //! # Constant time
 //!
@@ -33,11 +47,14 @@
 //! function performs no such check, because the protocols that need
 //! the unchecked function say so explicitly.
 
-use zeroize::Zeroize;
+use core::fmt;
+
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::Error;
 use crate::der;
 use crate::math::fe25519::Fe;
+use crate::{Key, Random};
 
 /// The length of a secret key, a public key, and the shared secret.
 pub const KEY_SIZE: usize = 32;
@@ -234,9 +251,172 @@ pub fn public_key_pem(public: &[u8; KEY_SIZE]) -> [u8; PUBLIC_KEY_PEM_SIZE] {
     der::curve_public_pem(&der::X25519, public)
 }
 
+/// The length of a key pair's DER encoding, a version 1
+/// `PrivateKeyInfo` carrying the public key beside the secret.
+pub const PAIR_DER_SIZE: usize = der::CURVE_PAIR_DER;
+
+/// The length of a key pair's PEM encoding, a `PRIVATE KEY` block.
+pub const PAIR_PEM_SIZE: usize = der::CURVE_PAIR_PEM;
+
+/// One side's secret key, and the public key that goes with it.
+///
+/// The secret is held in a [`Key`], so it is wiped when the key goes
+/// out of scope; the free functions above take the bare bytes for
+/// code that has them already.
+#[derive(Clone, ZeroizeOnDrop)]
+pub struct PrivateKey {
+    secret: Key<[u8; KEY_SIZE]>,
+    #[zeroize(skip)]
+    public: PublicKey,
+}
+
+/// The other side's public key: a u-coordinate.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct PublicKey {
+    bytes: [u8; KEY_SIZE],
+}
+
+impl fmt::Debug for PrivateKey {
+    /// Deliberately omits the secret; the public key is not one.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PrivateKey")
+            .field("public", &self.public)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for PublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PublicKey").finish_non_exhaustive()
+    }
+}
+
+impl PrivateKey {
+    /// A key drawn from `rng`. Any 32 bytes are a secret key.
+    pub fn generate<R: Random>(rng: &mut R) -> Result<Self, Error> {
+        let mut secret = Key::zeroed();
+        rng.fill(secret.as_mut())?;
+        Ok(Self::new(&secret))
+    }
+
+    /// The key `secret` is.
+    pub fn new(secret: &Key<[u8; KEY_SIZE]>) -> Self {
+        let public = PublicKey {
+            bytes: public_key(secret.array()),
+        };
+        PrivateKey {
+            secret: secret.clone(),
+            public,
+        }
+    }
+
+    /// The secret, to store or to hand to code that wants the bytes.
+    pub fn secret_bytes(&self) -> [u8; KEY_SIZE] {
+        *self.secret.array()
+    }
+
+    /// The public key, derived when this key was built.
+    pub fn public_key(&self) -> &PublicKey {
+        &self.public
+    }
+
+    /// The secret shared with `public`, as [`shared_secret`]
+    /// computes it and with the same refusal of a low-order point.
+    pub fn shared_secret(
+        &self,
+        public: &PublicKey,
+    ) -> Result<[u8; KEY_SIZE], Error> {
+        shared_secret(self.secret.array(), &public.bytes)
+    }
+
+    /// A key from its DER `PrivateKeyInfo`, of either version; a
+    /// version 1 structure's public key is checked against the
+    /// secret's own, as [`secret_from_der`] describes.
+    pub fn try_from_der(bytes: &[u8]) -> Result<Self, Error> {
+        let mut secret = Key::from(secret_from_der(bytes)?);
+        let key = Self::new(&secret);
+        secret.zeroize();
+        Ok(key)
+    }
+
+    /// The key pair as a version 1 `PrivateKeyInfo`, which carries
+    /// the public key beside the secret. The output is a secret, to
+    /// be wiped when done.
+    ///
+    /// [`secret_der`] writes the version 0 form, which is what
+    /// OpenSSL emits; this one is what readers that require the
+    /// public key accept.
+    pub fn der_bytes(&self) -> [u8; PAIR_DER_SIZE] {
+        der::curve_pair_der(
+            &der::X25519,
+            self.secret.array(),
+            &self.public.bytes,
+        )
+    }
+
+    /// A key from a `PRIVATE KEY` PEM block, read as
+    /// [`secret_from_pem`] reads one.
+    pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
+        let mut secret = Key::from(secret_from_pem(pem)?);
+        let key = Self::new(&secret);
+        secret.zeroize();
+        Ok(key)
+    }
+
+    /// The key pair as a `PRIVATE KEY` PEM block around
+    /// [`der_bytes`](Self::der_bytes). A secret, to be wiped when
+    /// done.
+    pub fn pem_bytes(&self) -> [u8; PAIR_PEM_SIZE] {
+        der::curve_pair_pem(
+            &der::X25519,
+            self.secret.array(),
+            &self.public.bytes,
+        )
+    }
+}
+
+impl PublicKey {
+    /// The key those bytes are. Every 32 bytes name a u-coordinate;
+    /// the ones that are useless are refused where they are used, by
+    /// [`PrivateKey::shared_secret`].
+    pub fn new(bytes: &[u8; KEY_SIZE]) -> Self {
+        PublicKey { bytes: *bytes }
+    }
+
+    /// The u-coordinate.
+    pub fn bytes(&self) -> [u8; KEY_SIZE] {
+        self.bytes
+    }
+
+    /// A key from its DER `SubjectPublicKeyInfo`.
+    pub fn try_from_der(bytes: &[u8]) -> Result<Self, Error> {
+        Ok(PublicKey {
+            bytes: public_key_from_der(bytes)?,
+        })
+    }
+
+    /// The key's `SubjectPublicKeyInfo`.
+    pub fn der_bytes(&self) -> [u8; PUBLIC_KEY_DER_SIZE] {
+        public_key_der(&self.bytes)
+    }
+
+    /// A key from a `PUBLIC KEY` PEM block.
+    pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
+        Ok(PublicKey {
+            bytes: public_key_from_pem(pem)?,
+        })
+    }
+
+    /// The key as a `PUBLIC KEY` PEM block.
+    pub fn pem_bytes(&self) -> [u8; PUBLIC_KEY_PEM_SIZE] {
+        public_key_pem(&self.bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::random::{CtrDrbg, MIN_SEED};
 
     /// Decodes the RFC's lowercase hex into bytes.
     fn unhex(hex: &str) -> [u8; 32] {
@@ -249,6 +429,74 @@ mod tests {
     }
 
     /// RFC 7748 section 5.2, both one-shot vectors.
+    /// The key types are the free functions with the secret held in
+    /// something that wipes itself, so they must agree at every step,
+    /// and the pair encoding must read back as what it wrote.
+    #[test]
+    fn key_types_match_the_functions() {
+        let alice = PrivateKey::new(&Key::from([0x11u8; KEY_SIZE]));
+        let bob = PrivateKey::new(&Key::from([0x22u8; KEY_SIZE]));
+        assert_eq!(alice.public_key().bytes(), public_key(&[0x11; KEY_SIZE]));
+
+        // Both sides reach the same secret, which is what the free
+        // functions reach too.
+        let one = alice.shared_secret(bob.public_key()).expect("shared");
+        let two = bob.shared_secret(alice.public_key()).expect("shared");
+        assert_eq!(one, two);
+        assert_eq!(
+            one,
+            shared_secret(&[0x11; KEY_SIZE], &public_key(&[0x22; KEY_SIZE]))
+                .unwrap()
+        );
+
+        // A low-order point is refused through the type as well.
+        assert_eq!(
+            alice.shared_secret(&PublicKey::new(&[0u8; KEY_SIZE])),
+            Err(Error::InvalidPublicKey)
+        );
+
+        // The version 1 encoding carries the public key, and reading
+        // it back checks the pair agrees.
+        let der = alice.der_bytes();
+        let read = PrivateKey::try_from_der(&der).expect("der");
+        assert_eq!(read.secret_bytes(), alice.secret_bytes());
+        assert_eq!(read.public_key(), alice.public_key());
+        let pem = alice.pem_bytes();
+        assert_eq!(
+            PrivateKey::try_from_pem(&pem).unwrap().secret_bytes(),
+            alice.secret_bytes()
+        );
+
+        // The version 0 form still reads, and is the shorter one.
+        let short = secret_der(&alice.secret_bytes());
+        assert!(short.len() < der.len());
+        assert_eq!(
+            PrivateKey::try_from_der(&short).unwrap().public_key(),
+            alice.public_key()
+        );
+
+        // A public key round-trips through both encodings.
+        let public = *alice.public_key();
+        assert_eq!(
+            PublicKey::try_from_der(&public.der_bytes()).unwrap(),
+            public
+        );
+        assert_eq!(
+            PublicKey::try_from_pem(&public.pem_bytes()).unwrap(),
+            public
+        );
+    }
+
+    /// A drawn key takes its whole secret from the source.
+    #[test]
+    fn generate_draws_the_secret() {
+        let mut rng = CtrDrbg::from_seed(&[0x77u8; MIN_SEED]).expect("seed");
+        let one = PrivateKey::generate(&mut rng).expect("one");
+        let two = PrivateKey::generate(&mut rng).expect("two");
+        assert_ne!(one.secret_bytes(), two.secret_bytes());
+        assert_ne!(one.public_key(), two.public_key());
+    }
+
     #[test]
     fn rfc7748_function_vectors() {
         let k = unhex(

@@ -53,12 +53,12 @@
 
 use zeroize::Zeroize;
 
+use crate::constant_time;
 use crate::hash::sha2::{Sha256, Sha512};
 use crate::hash::sha3::Shake256;
 use crate::hash::{Hash, Xof, XofReader};
 use crate::mac::Mac;
 use crate::mac::hmac::Hmac;
-use crate::util;
 use crate::{BlockType, Error};
 
 /// The largest `n` of any set, which sizes every node buffer.
@@ -831,7 +831,7 @@ impl<F: Family> Ctx<'_, F> {
             idx_leaf = (idx_tree & ((1 << p.hp) - 1)) as u32;
             idx_tree >>= p.hp;
         }
-        Ok(util::equal(&node[..n], pk_root))
+        Ok(constant_time::equal(&node[..n], pk_root))
     }
 
     /// `fors_skGen`: the secret at leaf `idx` of the FORS instance

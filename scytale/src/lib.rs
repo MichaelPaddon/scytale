@@ -19,6 +19,7 @@
 //! | [`kex`] | X25519 and ECDH key agreement |
 //! | [`pke`] | RSA-OAEP public-key encryption |
 //! | [`random`] | a CTR_DRBG generator and the entropy that seeds it |
+//! | [`constant_time`] | comparing secrets without timing them |
 //! | [`sig`] | Ed25519, ECDSA, ML-DSA, SLH-DSA and RSA signatures |
 //! | [`Error`] | the one type every fallible call returns |
 //!
@@ -41,8 +42,10 @@
 //! let secret = [0x42u8; 32];
 //! let mut cipher_key = Aes128::zero_key();
 //! let mut mac_key = HmacSha256::zero_key();
-//! hkdf::derive::<Sha256>(b"salt", &secret, b"cipher", cipher_key.as_mut())?;
-//! hkdf::derive::<Sha256>(b"salt", &secret, b"mac", mac_key.as_mut())?;
+//! let cipher = &[b"cipher".as_slice()];
+//! hkdf::derive::<Sha256>(b"salt", &secret, cipher, cipher_key.as_mut())?;
+//! let mac = &[b"mac".as_slice()];
+//! hkdf::derive::<Sha256>(b"salt", &secret, mac, mac_key.as_mut())?;
 //!
 //! // Authenticated encryption, with nonces that cannot repeat.
 //! let gcm = Gcm::<Aes128>::new(&cipher_key);
@@ -129,6 +132,7 @@ pub mod aead;
 mod align;
 mod arch;
 pub mod cipher;
+pub mod constant_time;
 mod der;
 mod error;
 pub mod hash;
@@ -145,7 +149,6 @@ pub mod random;
 pub mod sig;
 
 mod traits;
-mod util;
 
 pub use error::Error;
 pub use traits::{BlockType, ByteArray, Key, KeyType, Random};

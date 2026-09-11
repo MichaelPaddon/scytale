@@ -63,8 +63,8 @@ use super::ghash::BLOCK;
 use super::polyval::Polyval;
 use crate::cipher::mode::{ByteOrder, counter_blocks, xor};
 use crate::cipher::{BlockCipher, OneBlock};
+use crate::constant_time;
 use crate::implementation::Implementation;
-use crate::util;
 use crate::{Error, Key, KeyType};
 use zeroize::Zeroize;
 
@@ -120,7 +120,7 @@ mod sealed {
 /// [`Aes256`](crate::cipher::aes::Aes256) give. Any other 128-bit
 /// block cipher taking a key of one of those widths satisfies the
 /// construction and is allowed here, but it is outside the standard
-/// and there are no vectors for it; that choice is the caller's.
+/// and there are no vectors for it; that implementation is the caller's.
 ///
 /// Every nonce gets its own pair of keys derived from the key here,
 /// so the cipher this holds encrypts nothing but those derivations.
@@ -206,8 +206,9 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> Aead for GcmSiv<C> {
     type Nonce = [u8; NONCE];
     type Tag = [u8; TAG];
 
-    fn try_new(key: &Self::Key) -> Result<Self, Error> {
-        Ok(GcmSiv::new(key))
+    fn new(key: &Self::Key) -> Self {
+        // The inherent constructor, which takes precedence here.
+        GcmSiv::new(key)
     }
 
     fn encrypt(
@@ -253,7 +254,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> Aead for GcmSiv<C> {
             &mut counter,
             data,
         )?;
-        if util::equal(&full, tag) {
+        if constant_time::equal(&full, tag) {
             Ok(())
         } else {
             data.fill(0);
@@ -265,21 +266,21 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> Aead for GcmSiv<C> {
 impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
     /// Takes the key that all others are derived from.
     pub fn new(key: &C::Key) -> Self {
-        for &choice in CHOICES {
-            if let Some(mode) = Self::with_choice(key, choice) {
+        for &implementation in CHOICES {
+            if let Some(mode) = Self::with_implementation(key, implementation) {
                 return mode;
             }
         }
         Self::generic(key)
     }
 
-    /// The mode over the implementation `choice` names, or `None`
+    /// The mode over the implementation `implementation` names, or `None`
     /// where this processor or this cipher has no such thing.
-    pub(crate) fn with_choice(
+    pub(crate) fn with_implementation(
         key: &C::Key,
-        choice: Implementation,
+        implementation: Implementation,
     ) -> Option<Self> {
-        match choice {
+        match implementation {
             Implementation::Portable => Some(Self::generic(key)),
             #[cfg(any(
                 target_arch = "aarch64",
@@ -724,9 +725,11 @@ mod tests {
             *b = (i * 9 + 4) as u8;
         }
 
-        let generic =
-            GcmSiv::<Aes128>::with_choice(&key, Implementation::Portable)
-                .unwrap();
+        let generic = GcmSiv::<Aes128>::with_implementation(
+            &key,
+            Implementation::Portable,
+        )
+        .unwrap();
         for len in 0..MAX {
             let mut want = [0u8; MAX];
             want[..len].copy_from_slice(&message[..len]);
@@ -735,8 +738,9 @@ mod tests {
                 .encrypt(&nonce, &aad, &mut want[..len], &mut wanted_tag)
                 .unwrap();
 
-            for &choice in CHOICES {
-                let Some(siv) = GcmSiv::<Aes128>::with_choice(&key, choice)
+            for &implementation in CHOICES {
+                let Some(siv) =
+                    GcmSiv::<Aes128>::with_implementation(&key, implementation)
                 else {
                     continue;
                 };
@@ -745,12 +749,22 @@ mod tests {
                 let mut tag = [0u8; TAG];
                 siv.encrypt(&nonce, &aad, &mut got[..len], &mut tag)
                     .unwrap();
-                assert_eq!(got[..len], want[..len], "{len}, {choice:?}");
-                assert_eq!(tag, wanted_tag, "tag {len}, {choice:?}");
+                assert_eq!(
+                    got[..len],
+                    want[..len],
+                    "{len}, {implementation:?}"
+                );
+                assert_eq!(tag, wanted_tag, "tag {len}, {implementation:?}");
 
                 siv.decrypt(&nonce, &aad, &mut got[..len], &tag)
-                    .unwrap_or_else(|e| panic!("{len}, {choice:?}: {e:?}"));
-                assert_eq!(got[..len], message[..len], "{len}, {choice:?}");
+                    .unwrap_or_else(|e| {
+                        panic!("{len}, {implementation:?}: {e:?}")
+                    });
+                assert_eq!(
+                    got[..len],
+                    message[..len],
+                    "{len}, {implementation:?}"
+                );
             }
         }
     }

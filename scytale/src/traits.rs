@@ -195,7 +195,7 @@ impl<B: ByteArray> AsMut<[u8]> for Key<B> {
 impl<B: ByteArray> PartialEq for Key<B> {
     /// Constant time, since one of these is a secret.
     fn eq(&self, other: &Self) -> bool {
-        crate::util::equal(self.as_ref(), other.as_ref())
+        crate::constant_time::equal(self.as_ref(), other.as_ref())
     }
 }
 

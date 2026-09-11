@@ -39,8 +39,19 @@
 use core::fmt;
 
 use super::{LANES, xor};
+use crate::KeyType;
 use crate::cipher::{BlockCipher, OneBlock};
 use crate::{ByteArray, Error};
+
+/// The key is the cipher's own, so generic code can draw one
+/// without naming the cipher.
+impl<C: BlockCipher> KeyType for Cfb128<C> {
+    type Key = C::Key;
+
+    fn zero_key() -> Self::Key {
+        C::zero_key()
+    }
+}
 
 /// CFB with 128-bit segments over a block cipher.
 #[derive(Clone)]

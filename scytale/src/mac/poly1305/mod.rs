@@ -75,7 +75,11 @@ pub struct Poly1305 {
 
 impl Poly1305 {
     /// Starts an authenticator under `key`: `r` then `s`.
-    pub fn new(key: &[u8; KEY_SIZE]) -> Self {
+    ///
+    /// The key is for this message and no other; see the warnings
+    /// above.
+    pub fn new(key: &Key<[u8; KEY_SIZE]>) -> Self {
+        let key = key.array();
         let word = |at: usize| {
             let mut bytes = [0u8; 8];
             bytes.copy_from_slice(&key[at..at + 8]);
@@ -215,7 +219,7 @@ impl Mac for Poly1305 {
     type Tag = [u8; BLOCK];
 
     fn try_new(key: &Self::Key) -> Result<Self, Error> {
-        Ok(Poly1305::new(key.array()))
+        Ok(Poly1305::new(key))
     }
 
     fn reset(&mut self) {
@@ -328,7 +332,7 @@ mod tests {
     }
 
     fn tag_of(key: &[u8; 32], message: &[u8]) -> [u8; 16] {
-        let mut mac = Poly1305::new(key);
+        let mut mac = Poly1305::new(&Key::from(*key));
         mac.update(message);
         mac.finalize()
     }
@@ -358,14 +362,14 @@ mod tests {
         for len in 0..MAX {
             let want = one_at_a_time(&key, &data[..len]);
 
-            let mut p = Poly1305::new(&key);
+            let mut p = Poly1305::new(&Key::from(key));
             p.update(&data[..len]);
             assert_eq!(p.finalize(), want, "{len} bytes");
 
             // Pieces, so a run starts and ends part way along and the
             // part block is carried between calls.
             for piece in [1, 16, 17, 64, 65] {
-                let mut p = Poly1305::new(&key);
+                let mut p = Poly1305::new(&Key::from(key));
                 for part in data[..len].chunks(piece) {
                     p.update(part);
                 }
@@ -377,7 +381,7 @@ mod tests {
     /// The tag with every block put through the chain on its own,
     /// which no bulk path touches.
     fn one_at_a_time(key: &[u8; KEY_SIZE], message: &[u8]) -> [u8; BLOCK] {
-        let mut p = Poly1305::new(key);
+        let mut p = Poly1305::new(&Key::from(*key));
         let (blocks, rest) = message.as_chunks::<BLOCK>();
         for block in blocks {
             p.absorb(block, 1);
@@ -513,13 +517,13 @@ mod tests {
         let message: [u8; 101] = core::array::from_fn(|i| (i * 13) as u8);
         let expected = tag_of(key, &message);
         for chunk in [1, 3, 15, 16, 17, 40] {
-            let mut mac = Poly1305::new(key);
+            let mut mac = Poly1305::new(&Key::from(*key));
             for piece in message.chunks(chunk) {
                 mac.update(piece);
             }
             assert_eq!(mac.finalize(), expected, "chunk {chunk}");
         }
-        let mut mac = Poly1305::new(key);
+        let mut mac = Poly1305::new(&Key::from(*key));
         mac.update(b"not this");
         mac.reset();
         mac.update(&message);
@@ -530,7 +534,7 @@ mod tests {
     fn verify_accepts_and_rejects() {
         let key = [7u8; 32];
         let tag = tag_of(&key, b"message");
-        let mut mac = Poly1305::new(&key);
+        let mut mac = Poly1305::new(&Key::from(key));
         mac.update(b"message");
         assert_eq!(mac.clone().verify(&tag), Ok(()));
         let mut wrong = tag;
@@ -554,7 +558,7 @@ mod tests {
             }
         }
         let key = [0x5a; 32];
-        let mut mac = Poly1305::new(&key);
+        let mut mac = Poly1305::new(&Key::from(key));
         mac.update(b"abc");
         let mut buffer = Buffer([0; 128], 0);
         fmt::write(&mut buffer, format_args!("{mac:?}")).unwrap();

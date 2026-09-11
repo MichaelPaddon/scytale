@@ -42,7 +42,18 @@ use core::fmt;
 
 use super::{bit, set_bit, shift_in_bit};
 use crate::Error;
+use crate::KeyType;
 use crate::cipher::{BlockCipher, OneBlock};
+
+/// The key is the cipher's own, so generic code can draw one
+/// without naming the cipher.
+impl<C: BlockCipher> KeyType for Cfb1<C> {
+    type Key = C::Key;
+
+    fn zero_key() -> Self::Key {
+        C::zero_key()
+    }
+}
 
 /// CFB with 1-bit segments over a block cipher.
 #[derive(Clone)]

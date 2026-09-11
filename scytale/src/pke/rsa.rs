@@ -115,6 +115,11 @@ pub type Rsa3072PrivateKey = PrivateKey<48, 384, 24>;
 pub type Rsa4096PublicKey = PublicKey<64, 512>;
 /// A 4096-bit decryption key.
 pub type Rsa4096PrivateKey = PrivateKey<64, 512, 32>;
+/// An 8192-bit encryption key: slow, and rare outside long-lived
+/// roots.
+pub type Rsa8192PublicKey = PublicKey<128, 1024>;
+/// An 8192-bit decryption key.
+pub type Rsa8192PrivateKey = PrivateKey<128, 1024, 64>;
 /// A 1024-bit encryption key: legacy interoperation only, too small
 /// for new uses.
 pub type Rsa1024PublicKey = PublicKey<16, 128>;

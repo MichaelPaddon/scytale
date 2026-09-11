@@ -32,13 +32,15 @@ pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
     let mut cases = 0;
     let mut rejections = 0;
     let mut engines = 0;
-    for &choice in gcm::CHOICES {
-        if Gcm::<C>::with_choice(&C::zero_key(), choice).is_none() {
+    for &implementation in gcm::CHOICES {
+        if Gcm::<C>::with_implementation(&C::zero_key(), implementation)
+            .is_none()
+        {
             continue;
         }
         engines += 1;
         for (group, encrypt) in &groups {
-            let (n, r) = aft::<C>(group, *encrypt, choice);
+            let (n, r) = aft::<C>(group, *encrypt, implementation);
             cases += n;
             rejections += r;
         }
@@ -61,7 +63,7 @@ fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
 fn aft<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
-    choice: crate::implementation::Implementation,
+    implementation: crate::implementation::Implementation,
 ) -> (usize, usize) {
     let tag_len = group["tagLen"].as_u64().expect("tagLen") as usize / 8;
     let mut cases = 0;
@@ -72,7 +74,8 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
         let Some(key) = key_of::<C>(&hex(&t["key"])) else {
             continue;
         };
-        let gcm = Gcm::<C>::with_choice(&key, choice).expect("implementation");
+        let gcm = Gcm::<C>::with_implementation(&key, implementation)
+            .expect("implementation");
         let nonce = hex(&t["iv"]);
         let aad = hex(&t["aad"]);
 

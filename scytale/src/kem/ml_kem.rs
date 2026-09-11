@@ -56,9 +56,9 @@
 use zeroize::Zeroize;
 
 use crate::Error;
+use crate::constant_time;
 use crate::hash::sha3::{Sha3_256, Sha3_512, Shake128, Shake256};
 use crate::hash::{Hash, Xof, XofReader};
-use crate::util;
 
 /// The modulus.
 const Q: u32 = 3329;
@@ -584,7 +584,7 @@ fn decapsulate<const K: usize>(
     encrypt::<K>(ek, &m, &r, again)?;
     // Both secrets are in hand; the comparison picks one without
     // saying which, or when.
-    let same = util::equal(c, again);
+    let same = constant_time::equal(c, again);
     let mask = (same as u8).wrapping_neg();
     for (k, rej) in key.iter_mut().zip(&rejected) {
         *k = (*k & mask) | (rej & !mask);

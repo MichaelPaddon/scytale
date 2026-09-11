@@ -14,12 +14,24 @@
 //! string, no pre-hashing. Ed25519ctx and Ed25519ph can be added if
 //! a protocol requires them.
 //!
-//! Keys are 32 bytes each way, and travel in the RFC 8410 forms
-//! everything else stores them in: a secret key as PKCS#8 through
-//! [`secret_from_der`] and [`secret_der`], a public key as
-//! `SubjectPublicKeyInfo` through [`public_key_from_der`] and
-//! [`public_key_der`], and either in PEM through the `_pem`
-//! functions beside those.
+//! Keys are 32 bytes each way. [`PrivateKey`] and [`PublicKey`] are
+//! the pair to reach for: the secret is held in a [`Key`], so it is
+//! wiped when it goes out of scope, and each carries the RFC 8410
+//! encodings the rest of the world stores keys in. The free functions
+//! below take the bare bytes, for code that already has them.
+//!
+//! ```
+//! use scytale::Key;
+//! use scytale::sig::ed25519::PrivateKey;
+//!
+//! # fn main() -> Result<(), scytale::Error> {
+//! let key = PrivateKey::try_new(&Key::from([0x42u8; 32]))?;
+//! let signature = key.sign(b"the message")?;
+//! key.public_key().verify(b"the message", &signature)?;
+//! assert!(key.public_key().verify(b"another", &signature).is_err());
+//! # Ok(())
+//! # }
+//! ```
 //!
 //! # Constant time
 //!
@@ -37,13 +49,15 @@
 //! one. The equation is checked without the cofactor, matching the
 //! bulk of deployed verifiers.
 
-use zeroize::Zeroize;
+use core::fmt;
 
-use crate::Error;
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
 use crate::der;
 use crate::hash::Hash;
 use crate::hash::sha2::Sha512;
 use crate::math::fe25519::Fe;
+use crate::{Error, Key, Random};
 
 /// The length of a secret key.
 pub const KEY_SIZE: usize = 32;
@@ -238,6 +252,177 @@ pub fn public_key_pem(
     public: &[u8; PUBLIC_KEY_SIZE],
 ) -> [u8; PUBLIC_KEY_PEM_SIZE] {
     der::curve_public_pem(&der::ED25519, public)
+}
+
+/// The length of a key pair's DER encoding, a version 1
+/// `PrivateKeyInfo` carrying the public key beside the seed.
+pub const PAIR_DER_SIZE: usize = der::CURVE_PAIR_DER;
+
+/// The length of a key pair's PEM encoding, a `PRIVATE KEY` block.
+pub const PAIR_PEM_SIZE: usize = der::CURVE_PAIR_PEM;
+
+/// A signing key, and the public key that goes with it.
+///
+/// The secret is held in a [`Key`], so it is wiped when the key goes
+/// out of scope; the free functions above take the bare bytes for
+/// code that has them already.
+#[derive(Clone, ZeroizeOnDrop)]
+pub struct PrivateKey {
+    secret: Key<[u8; KEY_SIZE]>,
+    #[zeroize(skip)]
+    public: PublicKey,
+}
+
+/// A verifying key: a point in its compressed form.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct PublicKey {
+    bytes: [u8; PUBLIC_KEY_SIZE],
+}
+
+impl fmt::Debug for PrivateKey {
+    /// Deliberately omits the secret; the public key is not one.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PrivateKey")
+            .field("public", &self.public)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for PublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PublicKey").finish_non_exhaustive()
+    }
+}
+
+impl PrivateKey {
+    /// A key drawn from `rng`.
+    ///
+    /// Any 32 bytes are a secret key, so this is 32 bytes from the
+    /// source and the public key they give.
+    pub fn generate<R: Random>(rng: &mut R) -> Result<Self, Error> {
+        let mut secret = Key::zeroed();
+        rng.fill(secret.as_mut())?;
+        Self::try_new(&secret)
+    }
+
+    /// The key `secret` is the seed of.
+    ///
+    /// Fails only where the hash it needs cannot be built.
+    pub fn try_new(secret: &Key<[u8; KEY_SIZE]>) -> Result<Self, Error> {
+        let public = PublicKey {
+            bytes: public_key(secret.array())?,
+        };
+        Ok(PrivateKey {
+            secret: secret.clone(),
+            public,
+        })
+    }
+
+    /// The seed, to store or to hand to code that wants the bytes.
+    pub fn secret_bytes(&self) -> [u8; KEY_SIZE] {
+        *self.secret.array()
+    }
+
+    /// The public key, derived when this key was built.
+    pub fn public_key(&self) -> &PublicKey {
+        &self.public
+    }
+
+    /// Signs `message`.
+    pub fn sign(&self, message: &[u8]) -> Result<[u8; SIGNATURE_SIZE], Error> {
+        sign(self.secret.array(), message)
+    }
+
+    /// A key from its DER `PrivateKeyInfo`, of either version; a
+    /// version 1 structure's public key is checked against the
+    /// secret's own, as [`secret_from_der`] describes.
+    pub fn try_from_der(bytes: &[u8]) -> Result<Self, Error> {
+        let mut secret = Key::from(secret_from_der(bytes)?);
+        let key = Self::try_new(&secret);
+        secret.zeroize();
+        key
+    }
+
+    /// The key pair as a version 1 `PrivateKeyInfo`, which carries
+    /// the public key beside the seed. The output is a secret, to be
+    /// wiped when done.
+    ///
+    /// [`secret_der`] writes the version 0 form, which is what
+    /// OpenSSL emits; this one is what readers that require the
+    /// public key accept.
+    pub fn der_bytes(&self) -> [u8; PAIR_DER_SIZE] {
+        der::curve_pair_der(
+            &der::ED25519,
+            self.secret.array(),
+            &self.public.bytes,
+        )
+    }
+
+    /// A key from a `PRIVATE KEY` PEM block, read as
+    /// [`secret_from_pem`] reads one.
+    pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
+        let mut secret = Key::from(secret_from_pem(pem)?);
+        let key = Self::try_new(&secret);
+        secret.zeroize();
+        key
+    }
+
+    /// The key pair as a `PRIVATE KEY` PEM block around
+    /// [`der_bytes`](Self::der_bytes). A secret, to be wiped when
+    /// done.
+    pub fn pem_bytes(&self) -> [u8; PAIR_PEM_SIZE] {
+        der::curve_pair_pem(
+            &der::ED25519,
+            self.secret.array(),
+            &self.public.bytes,
+        )
+    }
+}
+
+impl PublicKey {
+    /// The key those bytes are, unchecked: they are checked where
+    /// they are used, as [`verify`] describes.
+    pub fn new(bytes: &[u8; PUBLIC_KEY_SIZE]) -> Self {
+        PublicKey { bytes: *bytes }
+    }
+
+    /// The compressed point.
+    pub fn bytes(&self) -> [u8; PUBLIC_KEY_SIZE] {
+        self.bytes
+    }
+
+    /// Checks that `signature` signs `message` under this key.
+    pub fn verify(
+        &self,
+        message: &[u8],
+        signature: &[u8; SIGNATURE_SIZE],
+    ) -> Result<(), Error> {
+        verify(&self.bytes, message, signature)
+    }
+
+    /// A key from its DER `SubjectPublicKeyInfo`.
+    pub fn try_from_der(bytes: &[u8]) -> Result<Self, Error> {
+        Ok(PublicKey {
+            bytes: public_key_from_der(bytes)?,
+        })
+    }
+
+    /// The key's `SubjectPublicKeyInfo`.
+    pub fn der_bytes(&self) -> [u8; PUBLIC_KEY_DER_SIZE] {
+        public_key_der(&self.bytes)
+    }
+
+    /// A key from a `PUBLIC KEY` PEM block.
+    pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
+        Ok(PublicKey {
+            bytes: public_key_from_pem(pem)?,
+        })
+    }
+
+    /// The key as a `PUBLIC KEY` PEM block.
+    pub fn pem_bytes(&self) -> [u8; PUBLIC_KEY_PEM_SIZE] {
+        public_key_pem(&self.bytes)
+    }
 }
 
 /// The secret scalar: the low half of the expanded secret, clamped
@@ -642,6 +827,7 @@ fn load_words(bytes: &[u8; 32]) -> [u64; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::random::{CtrDrbg, MIN_SEED};
 
     /// Decodes hex into `buf`, returning the filled prefix.
     fn unhex<'a>(hex: &str, buf: &'a mut [u8]) -> &'a [u8] {
@@ -793,6 +979,70 @@ mod tests {
              3dca179c138ac17ad9bef1177331a704",
         ),
     ];
+
+    /// The key types are the free functions with the secret held in
+    /// something that wipes itself, so they must agree at every step,
+    /// and the pair encoding must read back as what it wrote.
+    #[test]
+    fn key_types_match_the_functions() {
+        let seed = [0x9du8; KEY_SIZE];
+        let key = PrivateKey::try_new(&Key::from(seed)).expect("key");
+        assert_eq!(key.secret_bytes(), seed);
+        assert_eq!(key.public_key().bytes(), public_key(&seed).unwrap());
+
+        let message = b"the message";
+        let signature = key.sign(message).expect("sign");
+        assert_eq!(signature, sign(&seed, message).unwrap());
+        key.public_key()
+            .verify(message, &signature)
+            .expect("verify");
+        assert_eq!(
+            key.public_key().verify(b"another", &signature),
+            Err(Error::InvalidSignature)
+        );
+
+        // The version 1 encoding carries the public key, and reading
+        // it back checks the pair agrees.
+        let der = key.der_bytes();
+        let read = PrivateKey::try_from_der(&der).expect("der");
+        assert_eq!(read.secret_bytes(), seed);
+        assert_eq!(read.public_key(), key.public_key());
+        let pem = key.pem_bytes();
+        assert_eq!(
+            PrivateKey::try_from_pem(&pem).unwrap().secret_bytes(),
+            seed
+        );
+
+        // The version 0 form still reads, and is the shorter one.
+        assert!(secret_der(&seed).len() < der.len());
+        let short = PrivateKey::try_from_der(&secret_der(&seed)).expect("v0");
+        assert_eq!(short.public_key(), key.public_key());
+
+        // A public key round-trips through both encodings.
+        let public = *key.public_key();
+        assert_eq!(
+            PublicKey::try_from_der(&public.der_bytes()).unwrap(),
+            public
+        );
+        assert_eq!(
+            PublicKey::try_from_pem(&public.pem_bytes()).unwrap(),
+            public
+        );
+    }
+
+    /// A drawn key takes its whole seed from the source.
+    #[test]
+    fn generate_draws_the_seed() {
+        let mut rng = CtrDrbg::from_seed(&[0x33u8; MIN_SEED]).expect("seed");
+        let one = PrivateKey::generate(&mut rng).expect("one");
+        let two = PrivateKey::generate(&mut rng).expect("two");
+        assert_ne!(one.secret_bytes(), two.secret_bytes());
+        assert_ne!(one.public_key(), two.public_key());
+        assert_eq!(
+            one.public_key().bytes(),
+            public_key(&one.secret_bytes()).unwrap()
+        );
+    }
 
     #[test]
     fn rfc8032_vectors() {

@@ -92,7 +92,7 @@ pub trait Mac: KeyType {
     /// would leak the tag through timing.
     fn verify(&mut self, tag: &[u8]) -> Result<(), Error> {
         let expected = self.finalize();
-        if crate::util::equal(expected.as_ref(), tag) {
+        if crate::constant_time::equal(expected.as_ref(), tag) {
             Ok(())
         } else {
             Err(Error::AuthenticationFailed)
@@ -126,10 +126,10 @@ mod tests {
             mac.finalize()
         }
         let key = [7u8; 32];
-        let mut fresh = Poly1305::new(&key);
+        let mut fresh = Poly1305::new(&Key::from(key));
         fresh.update(b"message");
         let expected = fresh.finalize();
-        let mut poly = Poly1305::new(&key);
+        let mut poly = Poly1305::new(&Key::from(key));
         assert_eq!(tag16(&mut poly), expected);
     }
 

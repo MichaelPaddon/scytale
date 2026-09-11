@@ -40,7 +40,7 @@
 //! let shared = alice.shared_secret(bob.public_key())?;
 //! assert_eq!(shared, bob.shared_secret(alice.public_key())?);
 //! let mut key = [0u8; 32];
-//! hkdf::derive::<Sha256>(b"", &shared, b"session v1", &mut key)?;
+//! hkdf::derive::<Sha256>(b"", &shared, &[b"session v1"], &mut key)?;
 //! # Ok(())
 //! # }
 //! ```

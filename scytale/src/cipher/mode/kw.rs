@@ -63,6 +63,7 @@
 use core::fmt;
 
 use crate::Error;
+use crate::KeyType;
 use crate::cipher::{BlockCipher, OneBlock};
 
 /// The cipher block this is defined for.
@@ -73,6 +74,16 @@ pub(super) const SEMIBLOCK: usize = 8;
 
 /// The check value for the unpadded form, from SP 800-38F.
 const ICV1: [u8; SEMIBLOCK] = [0xa6; SEMIBLOCK];
+
+/// The key is the cipher's own, so generic code can draw one
+/// without naming the cipher.
+impl<C: BlockCipher<Block = [u8; BLOCK]>> KeyType for Kw<C> {
+    type Key = C::Key;
+
+    fn zero_key() -> Self::Key {
+        C::zero_key()
+    }
+}
 
 /// Key wrapping over a block cipher.
 #[derive(Clone)]
@@ -156,7 +167,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Kw<C> {
         let mut a = [0u8; SEMIBLOCK];
         a.copy_from_slice(&wrapped[..SEMIBLOCK]);
         unwrap_body(&self.cipher, self.forward, &mut a, out)?;
-        if !crate::util::equal(&a, &ICV1) {
+        if !crate::constant_time::equal(&a, &ICV1) {
             out.fill(0);
             return Err(Error::AuthenticationFailed);
         }

@@ -8,13 +8,11 @@
 //! whatever a later version adds:
 //!
 //! ```
-//! use scytale::cipher::chacha20::ChaCha20;
-//! use scytale::Error;
+//! use scytale::{Error, Key};
 //!
-//! match ChaCha20::try_new(&[0u8; 7]) {
+//! match Key::<[u8; 32]>::try_from(&[0u8; 7][..]) {
 //!     Ok(_) => unreachable!(),
 //!     Err(Error::InvalidKeyLength(n)) => assert_eq!(n, 7),
-//!     Err(Error::NotSupported) => panic!("no implementation at all"),
 //!     Err(other) => panic!("{other}"),
 //! }
 //! ```

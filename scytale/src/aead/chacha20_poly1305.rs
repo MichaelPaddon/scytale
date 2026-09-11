@@ -13,7 +13,7 @@
 //! use scytale::aead::{Aead, ChaCha20Poly1305};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let aead = ChaCha20Poly1305::try_new(&Key::from([0x42u8; 32]))?;
+//! let aead = ChaCha20Poly1305::new(&Key::from([0x42u8; 32]));
 //! let nonce = [7u8; 12];
 //! let header = b"to: bob";
 //! let mut message = *b"attack at dawn";
@@ -78,8 +78,9 @@ impl Aead for ChaCha20Poly1305 {
     type Nonce = [u8; NONCE_SIZE];
     type Tag = [u8; TAG];
 
-    fn try_new(key: &Self::Key) -> Result<Self, Error> {
-        ChaCha20Poly1305::try_new(key)
+    fn new(key: &Self::Key) -> Self {
+        // The inherent constructor, which takes precedence here.
+        ChaCha20Poly1305::new(key)
     }
 
     fn encrypt(
@@ -118,13 +119,10 @@ impl Aead for ChaCha20Poly1305 {
 
 impl ChaCha20Poly1305 {
     /// Takes the key.
-    ///
-    /// Fails only if the processor cannot run any of the keystream
-    /// implementations, which no processor this builds for does.
-    pub fn try_new(key: &Key<[u8; KEY_SIZE]>) -> Result<Self, Error> {
-        Ok(ChaCha20Poly1305 {
-            cipher: ChaCha20::try_new(key.as_ref())?,
-        })
+    pub fn new(key: &Key<[u8; KEY_SIZE]>) -> Self {
+        ChaCha20Poly1305 {
+            cipher: ChaCha20::new(key),
+        }
     }
 
     /// Starts encrypting a message that arrives in pieces.
@@ -178,7 +176,9 @@ impl<'a> Core<'a> {
         let (key, _) = block
             .split_first_chunk::<32>()
             .ok_or(Error::InvalidKeyLength(block.len()))?;
-        let mac = Poly1305::new(key);
+        let mut key = Key::from(*key);
+        let mac = Poly1305::new(&key);
+        key.zeroize();
         block.zeroize();
         Ok(Core {
             stream: cipher.stream(nonce, 1),
@@ -291,7 +291,7 @@ impl Decryptor<'_> {
     /// Checks `tag` against the message, in constant time.
     pub fn verify(self, tag: &[u8; TAG]) -> Result<(), Error> {
         let expected = self.core.tag();
-        if crate::util::equal(&expected, tag) {
+        if crate::constant_time::equal(&expected, tag) {
             Ok(())
         } else {
             Err(Error::AuthenticationFailed)
@@ -344,7 +344,7 @@ mod tests {
     const TAG_HEX: &str = "1ae10b594f09e26a7e902ecbd0600691";
 
     fn aead() -> ChaCha20Poly1305 {
-        ChaCha20Poly1305::try_new(&Key::from(hex::<32>(KEY))).unwrap()
+        ChaCha20Poly1305::new(&Key::from(hex::<32>(KEY)))
     }
 
     #[test]
@@ -456,7 +456,7 @@ mod tests {
                 Ok(())
             }
         }
-        let aead = ChaCha20Poly1305::try_new(&Key::from([0x5au8; 32])).unwrap();
+        let aead = ChaCha20Poly1305::new(&Key::from([0x5au8; 32]));
         let mut buffer = Buffer([0; 128], 0);
         core::fmt::write(&mut buffer, format_args!("{aead:?}")).unwrap();
         let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();

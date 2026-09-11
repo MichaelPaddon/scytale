@@ -62,6 +62,7 @@
 use core::fmt;
 
 use crate::Error;
+use crate::KeyType;
 use crate::cipher::BLOCK;
 use crate::cipher::{BlockCipher, OneBlock};
 use crate::math::natural::Natural;
@@ -84,6 +85,16 @@ const MAX_NUMBER: usize = MAX_HALF * 2;
 
 /// The most bytes drawn from the cipher each round.
 const MAX_DRAWN: usize = 4 * MAX_NUMBER.div_ceil(4) + 4 + BLOCK;
+
+/// The key is the cipher's own, so generic code can draw one
+/// without naming the cipher.
+impl<C: BlockCipher<Block = [u8; BLOCK]>> KeyType for Ff1<C> {
+    type Key = C::Key;
+
+    fn zero_key() -> Self::Key {
+        C::zero_key()
+    }
+}
 
 /// FF1 over a block cipher, for one radix.
 #[derive(Clone)]

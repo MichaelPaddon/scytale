@@ -88,8 +88,8 @@ impl<C: BlockCipher> Engine<C> {
     /// lacks the instructions or `C` is not a cipher this is written
     /// for.
     ///
-    /// The extension works on a register of one block, so there is no
-    /// wider form: `wide` is answered with nothing.
+    /// The extension has one implementation here, so anything but
+    /// [`Implementation::Armv8`] is answered with nothing.
     pub(crate) fn of(implementation: Implementation) -> Option<Self> {
         if implementation != Implementation::Armv8 || !has_aes() {
             return None;

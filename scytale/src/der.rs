@@ -557,6 +557,33 @@ pub(crate) fn curve_secret_der(
     out
 }
 
+/// The length of a curve secret's version 1 PrivateKeyInfo, which
+/// carries the public key beside the seed.
+pub(crate) const CURVE_PAIR_DER: usize = 83;
+
+/// A curve secret and its public key as a version 1 PrivateKeyInfo,
+/// RFC 5958's `OneAsymmetricKey`, fixed down to the byte.
+///
+/// The version 0 form above is what OpenSSL writes and is enough on
+/// its own. This one carries the public key as well, which some
+/// readers require and which lets a reader check the pair agrees.
+pub(crate) fn curve_pair_der(
+    oid: &[u8; 3],
+    secret: &[u8; CURVE_KEY],
+    public: &[u8; CURVE_KEY],
+) -> [u8; CURVE_PAIR_DER] {
+    let mut out = [0u8; CURVE_PAIR_DER];
+    out[..16].copy_from_slice(&[
+        0x30, 81, 0x02, 1, 1, 0x30, 5, 0x06, 3, oid[0], oid[1], oid[2], 0x04,
+        34, 0x04, 32,
+    ]);
+    out[16..48].copy_from_slice(secret);
+    // [1] IMPLICIT BIT STRING, with no unused bits.
+    out[48..51].copy_from_slice(&[0x81, 33, 0]);
+    out[51..].copy_from_slice(public);
+    out
+}
+
 /// A curve public key from its SubjectPublicKeyInfo.
 pub(crate) fn curve_public_from_der(
     oid: &[u8; 3],
@@ -619,6 +646,23 @@ pub(crate) fn curve_secret_pem(
     let mut out = [0u8; CURVE_SECRET_PEM];
     let n = pem::encode(PRIVATE_KEY, &der, &mut out);
     debug_assert_eq!(n, CURVE_SECRET_PEM);
+    der.zeroize();
+    out
+}
+
+/// The length of a curve key pair's PEM block.
+pub(crate) const CURVE_PAIR_PEM: usize = 168;
+
+/// [`curve_pair_der`] in a `PRIVATE KEY` PEM block.
+pub(crate) fn curve_pair_pem(
+    oid: &[u8; 3],
+    secret: &[u8; CURVE_KEY],
+    public: &[u8; CURVE_KEY],
+) -> [u8; CURVE_PAIR_PEM] {
+    let mut der = curve_pair_der(oid, secret, public);
+    let mut out = [0u8; CURVE_PAIR_PEM];
+    let n = pem::encode(PRIVATE_KEY, &der, &mut out);
+    debug_assert_eq!(n, CURVE_PAIR_PEM);
     der.zeroize();
     out
 }

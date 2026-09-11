@@ -59,9 +59,9 @@
 use zeroize::Zeroize;
 
 use crate::Error;
+use crate::constant_time;
 use crate::hash::sha3::{Shake128, Shake256};
 use crate::hash::{Xof, XofReader};
-use crate::util;
 
 /// The modulus.
 const Q: u32 = 8_380_417;
@@ -731,7 +731,7 @@ fn check_private<const K: usize, const L: usize>(
     encode_public(&e.rho, &t1, pk);
     let mut tr = [0u8; 64];
     h(&[pk], &mut tr)?;
-    Ok(same && util::equal(&tr, &e.tr))
+    Ok(same && constant_time::equal(&tr, &e.tr))
 }
 
 /// `ML-DSA.Sign_internal`, algorithm 7, over the formatted message
@@ -928,7 +928,7 @@ fn verify<const K: usize, const L: usize>(
     }
     let mut again = [0u8; 64];
     h(&[&mu, w1_bytes], &mut again[..p.c_tilde])?;
-    if util::equal(&again[..p.c_tilde], c_tilde) {
+    if constant_time::equal(&again[..p.c_tilde], c_tilde) {
         Ok(())
     } else {
         Err(Error::InvalidSignature)
