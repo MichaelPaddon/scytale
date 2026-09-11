@@ -88,6 +88,23 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xpn<C> {
         Xpn { gcm: Gcm::new(key) }
     }
 
+    /// The same over the implementation `choice` names, or `None`
+    /// where this processor or this cipher has no such thing.
+    ///
+    /// For the tests and the benchmark, which name an implementation
+    /// rather than take whichever this processor would pick. There is
+    /// nothing of XPN's own to choose: it is [`Gcm`] with the nonce
+    /// assembled differently, so the choice is GCM's.
+    #[cfg(test)]
+    pub(crate) fn with_choice(
+        key: &C::Key,
+        choice: crate::implementation::Implementation,
+    ) -> Option<Self> {
+        Some(Xpn {
+            gcm: Gcm::with_choice(key, choice)?,
+        })
+    }
+
     /// Encrypts `data` in place and writes its tag.
     ///
     /// The session `salt` comes first and the `frame` identifier

@@ -42,7 +42,7 @@ pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
     };
     let mut count = 0;
     let mut engines = 0;
-    for choice in ctr::CHOICES {
+    for &choice in ctr::CHOICES {
         if Ctr::<C>::with_choice(&C::zero_key(), choice).is_none() {
             continue;
         }
@@ -71,7 +71,7 @@ fn truncate(data: &mut [u8], bits: usize) {
 fn aft<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
-    choice: ctr::Choice,
+    choice: crate::implementation::Implementation,
 ) -> usize {
     let mut count = 0;
     for t in group["tests"].as_array().expect("tests") {

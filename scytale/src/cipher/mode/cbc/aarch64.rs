@@ -31,6 +31,7 @@ use crate::cipher::BlockCipher;
 use crate::cipher::aes::aarch64::{
     KeysEitherWay as Keys, armv8::has_aes, keys_either_way,
 };
+use crate::implementation::Implementation;
 
 /// The block these loops work in.
 const BLOCK: usize = 16;
@@ -61,8 +62,8 @@ impl<C: BlockCipher> Engine<C> {
     /// The extension works on a register of one block, so unlike
     /// x86-64 there is no wider form: `wide` is answered with
     /// nothing.
-    pub(crate) fn at_width(wide: bool) -> Option<Self> {
-        if wide || !has_aes() {
+    pub(crate) fn of(implementation: Implementation) -> Option<Self> {
+        if implementation != Implementation::Armv8 || !has_aes() {
             return None;
         }
         Some(Engine {

@@ -49,6 +49,7 @@ use crate::cipher::BlockCipher;
 pub(crate) use crate::cipher::aes::x86_64::{Keys, keys};
 use crate::cipher::aes::x86_64::{Schedule, has_aesni};
 use crate::cipher::mode::{ByteOrder, add_counter};
+use crate::implementation::Implementation;
 use crate::probe::Probe;
 
 /// Blocks the loop takes at once, which is also how many powers of
@@ -363,10 +364,15 @@ impl Subkey {
     /// The wider table is four times the work to build: worth it for
     /// a key that many messages go under, not for one derived per
     /// message as GCM-SIV derives its own.
-    pub(crate) fn at_width(h: &[u8; BLOCK], wide: bool) -> Option<Self> {
-        if !supported() || (wide && !wide_supported()) {
-            return None;
-        }
+    pub(crate) fn of(
+        h: &[u8; BLOCK],
+        implementation: Implementation,
+    ) -> Option<Self> {
+        let wide = match implementation {
+            Implementation::Vaes if wide_supported() => true,
+            Implementation::Aesni if supported() => false,
+            _ => return None,
+        };
         let h = prepare(&[halve(&h[..8]), halve(&h[8..])]);
         // SAFETY: `supported` has just confirmed the instructions.
         let powers = unsafe { powers_of(&h) };
@@ -380,10 +386,13 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
     /// The engine under hash subkey `h` at the width asked for, or
     /// `None` where this processor lacks the instructions for it or
     /// `C` is not a cipher this is written for.
-    pub(crate) fn at_width(h: &[u8; BLOCK], wide: bool) -> Option<Self> {
+    pub(crate) fn of(
+        h: &[u8; BLOCK],
+        implementation: Implementation,
+    ) -> Option<Self> {
         Some(Engine {
             keys: keys::<C>()?,
-            subkey: Subkey::at_width(h, wide)?,
+            subkey: Subkey::of(h, implementation)?,
         })
     }
 }
@@ -565,7 +574,7 @@ impl Polyval {
     /// processor has not the instructions for it.
     pub(crate) fn new(key: &[u8; BLOCK]) -> Option<Self> {
         Some(Polyval {
-            subkey: Subkey::at_width(key, false)?,
+            subkey: Subkey::of(key, Implementation::Aesni)?,
             digest: Digest::new(false),
         })
     }
@@ -629,10 +638,23 @@ impl Polyval {
             // Fewer than a group is left, if anything: not enough to
             // be worth running the two together, so they go in turn.
             if !rest.is_empty() {
-                siv_counter(schedule, counter, rest);
+                siv_counter(Implementation::Aesni, schedule, counter, rest);
                 self.hash(rest);
             }
         }
+    }
+}
+
+/// Whether GCM-SIV can run `implementation` on this processor.
+///
+/// The same instructions the counter loop needs, since that is what
+/// GCM-SIV borrows. The hash beside it is narrower by choice, as
+/// [`Polyval`] explains, whichever of these is taken.
+pub(crate) fn siv_supported(implementation: Implementation) -> bool {
+    match implementation {
+        Implementation::Vaes => wide_supported(),
+        Implementation::Aesni => supported(),
+        _ => false,
     }
 }
 
@@ -642,13 +664,14 @@ impl Polyval {
 /// `data` is a whole number of blocks, and `counter` is left on the
 /// block after the last.
 pub(crate) fn siv_counter(
+    implementation: Implementation,
     schedule: Schedule<'_>,
     counter: &mut [u8; BLOCK],
     data: &mut [u8],
 ) {
     debug_assert_eq!(data.len() % BLOCK, 0);
     let (rk, rounds) = (schedule.keys(), schedule.rounds());
-    let wide = wide_supported();
+    let wide = implementation == Implementation::Vaes;
     let mut data = data;
     while !data.is_empty() {
         let room = (256 - counter[0] as usize) * BLOCK;

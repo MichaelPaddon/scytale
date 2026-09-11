@@ -84,6 +84,7 @@ use self::x86_64 as native;
 use super::{LANES, xor};
 use crate::Error;
 use crate::cipher::{BlockCipher, OneBlock};
+use crate::implementation::Implementation;
 use crate::util;
 
 /// XTS over a block cipher.
@@ -103,25 +104,21 @@ pub struct Xts<C: BlockCipher<Block = [u8; BLOCK]>> {
     engine: Engine<C>,
 }
 
-/// Which implementation to use.
+/// Every implementation, best first.
 ///
 /// A caller never names one: the mode takes the best the processor
 /// has. The tests and the vector suites do name them, so that every
 /// implementation is validated and not only the one this machine
 /// would pick.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Choice {
-    /// XTS written out, two blocks to a register.
-    Wide,
-    /// The same, one block to a register.
-    Narrow,
-    /// The construction over the cipher's own bulk calls.
-    Generic,
-}
-
-/// Every implementation, best first.
-pub(crate) const CHOICES: [Choice; 3] =
-    [Choice::Wide, Choice::Narrow, Choice::Generic];
+pub(crate) const CHOICES: &[Implementation] = &[
+    #[cfg(target_arch = "x86_64")]
+    Implementation::Vaes,
+    #[cfg(target_arch = "x86_64")]
+    Implementation::Aesni,
+    #[cfg(target_arch = "aarch64")]
+    Implementation::Armv8,
+    Implementation::Portable,
+];
 
 /// What does the bulk work, settled when the mode is built.
 enum Engine<C: BlockCipher<Block = [u8; BLOCK]>> {
@@ -148,7 +145,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Clone for Engine<C> {
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
     /// The best engine for this cipher on this processor.
     fn new() -> Self {
-        for choice in CHOICES {
+        for &choice in CHOICES {
             if let Some(engine) = Self::with(choice) {
                 return engine;
             }
@@ -158,15 +155,14 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
 
     /// The engine `choice` names, or `None` where this processor or
     /// this cipher has no such thing.
-    fn with(choice: Choice) -> Option<Self> {
+    fn with(choice: Implementation) -> Option<Self> {
         match choice {
-            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-            Choice::Wide => native::Engine::at_width(true).map(Engine::Native),
-            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-            Choice::Narrow => {
-                native::Engine::at_width(false).map(Engine::Native)
+            Implementation::Portable => {
+                Some(Engine::Generic(core::marker::PhantomData))
             }
-            Choice::Generic => Some(Engine::Generic(core::marker::PhantomData)),
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            hardware => native::Engine::of(hardware).map(Engine::Native),
+            #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
             #[allow(unreachable_patterns)]
             _ => None,
         }
@@ -207,7 +203,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
     pub(crate) fn with_choice(
         data: &C::Key,
         tweak: &C::Key,
-        choice: Choice,
+        choice: Implementation,
     ) -> Option<Self> {
         Some(Xts {
             data: C::new(data),
@@ -546,7 +542,7 @@ mod tests {
         assert!(!all.is_empty(), "no implementation to test");
         // The generic one is always to be had.
         assert!(
-            Xts::<Aes128>::with_choice(&data, &tweak, Choice::Generic)
+            Xts::<Aes128>::with_choice(&data, &tweak, Implementation::Portable)
                 .is_some()
         );
 

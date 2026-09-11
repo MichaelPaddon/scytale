@@ -46,6 +46,7 @@ use crate::align::At16;
 use crate::cipher::BlockCipher;
 pub(crate) use crate::cipher::aes::aarch64::{Keys, keys};
 use crate::cipher::aes::aarch64::{Schedule, armv8::has_aes};
+use crate::implementation::Implementation;
 
 /// Blocks the loop takes at once, which is also how many powers of
 /// the subkey the hash keeps.
@@ -128,8 +129,11 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
     /// The extension works on a register of one block, so unlike
     /// x86-64 there is no wider form: `wide` is answered with
     /// nothing.
-    pub(crate) fn at_width(h: &[u8; BLOCK], wide: bool) -> Option<Self> {
-        if wide {
+    pub(crate) fn of(
+        h: &[u8; BLOCK],
+        implementation: Implementation,
+    ) -> Option<Self> {
+        if implementation != Implementation::Armv8 {
             return None;
         }
         Some(Engine {
@@ -279,6 +283,14 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Hasher<'a, C> {
     }
 }
 
+/// Whether GCM-SIV can run `implementation` on this processor.
+///
+/// The same instructions the counter loop needs, since that is what
+/// GCM-SIV borrows.
+pub(crate) fn siv_supported(implementation: Implementation) -> bool {
+    implementation == Implementation::Armv8 && supported()
+}
+
 /// Counter mode over `data` with GCM-SIV's counter, which is the first
 /// four bytes of the block, least significant first, and nothing
 /// hashed beside it.
@@ -295,10 +307,12 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Hasher<'a, C> {
 ///
 /// `data` is a whole number of blocks.
 pub(crate) fn siv_counter(
+    implementation: Implementation,
     schedule: Schedule<'_>,
     counter: &mut [u8; BLOCK],
     data: &mut [u8],
 ) {
+    debug_assert_eq!(implementation, Implementation::Armv8);
     debug_assert_eq!(data.len() % BLOCK, 0);
     let (rk, rounds) = (schedule.keys(), schedule.rounds());
     let mut data = data;

@@ -34,6 +34,7 @@ use super::super::{ByteOrder, add_counter};
 use crate::align::At16;
 use crate::cipher::BlockCipher;
 use crate::cipher::aes::x86_64::{Keys, has_aesni, keys};
+use crate::implementation::Implementation;
 use crate::probe::Probe;
 
 /// The block these loops work in.
@@ -119,10 +120,12 @@ impl<C: BlockCipher> Engine<C> {
     /// The engine for this cipher at the width asked for, or `None`
     /// where this processor lacks the instructions for it or `C` is
     /// not a cipher this is written for.
-    pub(crate) fn at_width(wide: bool) -> Option<Self> {
-        if !has_aesni() || (wide && !has_vaes()) {
-            return None;
-        }
+    pub(crate) fn of(implementation: Implementation) -> Option<Self> {
+        let wide = match implementation {
+            Implementation::Vaes if has_vaes() => true,
+            Implementation::Aesni if has_aesni() => false,
+            _ => return None,
+        };
         Some(Engine {
             keys: keys::<C>()?,
             wide,

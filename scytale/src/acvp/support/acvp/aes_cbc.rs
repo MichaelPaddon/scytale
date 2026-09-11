@@ -34,7 +34,7 @@ pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
     };
     let mut count = 0;
     let mut engines = 0;
-    for choice in cbc::CHOICES {
+    for &choice in cbc::CHOICES {
         if Cbc::<C>::with_choice(&C::zero_key(), choice).is_none() {
             continue;
         }
@@ -55,7 +55,7 @@ pub fn run_mct<C: BlockCipher<Block = [u8; 16]>>() {
         return;
     };
     let mut count = 0;
-    for choice in cbc::CHOICES {
+    for &choice in cbc::CHOICES {
         if Cbc::<C>::with_choice(&C::zero_key(), choice).is_none() {
             continue;
         }
@@ -73,7 +73,7 @@ fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
 
 fn cbc<C: BlockCipher<Block = [u8; 16]>>(
     key: &[u8],
-    choice: cbc::Choice,
+    choice: crate::implementation::Implementation,
 ) -> Option<Cbc<C>> {
     Cbc::with_choice(&key_of::<C>(key)?, choice)
 }
@@ -82,7 +82,7 @@ fn cbc<C: BlockCipher<Block = [u8; 16]>>(
 fn aft<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
-    choice: cbc::Choice,
+    choice: crate::implementation::Implementation,
 ) -> usize {
     let mut count = 0;
     for t in group["tests"].as_array().expect("tests") {
@@ -115,7 +115,7 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
 fn mct<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
-    choice: cbc::Choice,
+    choice: crate::implementation::Implementation,
 ) -> usize {
     let (input_name, output_name) =
         if encrypt { ("pt", "ct") } else { ("ct", "pt") };

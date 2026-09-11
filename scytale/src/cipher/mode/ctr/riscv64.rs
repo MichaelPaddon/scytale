@@ -28,7 +28,7 @@
 //!
 //! # Availability
 //!
-//! [`Engine::at_width`] hands back nothing where the processor lacks
+//! [`Engine::of`] hands back nothing where the processor lacks
 //! the instructions or the cipher is not one of ours, and counter mode
 //! then uses the construction over the cipher's own `encrypt`. The
 //! byte reverse is wanted as well as the cipher: without it the
@@ -39,6 +39,7 @@
 use super::super::{ByteOrder, add_counter};
 use crate::cipher::BlockCipher;
 use crate::cipher::aes::riscv64::{Keys, has_vrev8, has_zvkned, keys};
+use crate::implementation::Implementation;
 
 /// The block these loops work in.
 const BLOCK: usize = 16;
@@ -64,8 +65,9 @@ impl<C: BlockCipher> Engine<C> {
     ///
     /// The loop takes whatever vector length it finds, so there is no
     /// second width to ask for: `wide` is answered with nothing.
-    pub(crate) fn at_width(wide: bool) -> Option<Self> {
-        if wide || !has_zvkned() || !has_vrev8() {
+    pub(crate) fn of(implementation: Implementation) -> Option<Self> {
+        let wanted = implementation == Implementation::Zvkned;
+        if !wanted || !has_zvkned() || !has_vrev8() {
             return None;
         }
         Some(Engine { keys: keys::<C>()? })

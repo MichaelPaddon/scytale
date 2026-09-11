@@ -32,7 +32,7 @@ pub fn run_aft<C: BlockCipher<Block = [u8; 16], Key: SivKey>>() {
     let mut cases = 0;
     let mut rejections = 0;
     let mut engines = 0;
-    for choice in gcm_siv::CHOICES {
+    for &choice in gcm_siv::CHOICES {
         if GcmSiv::<C>::with_choice(&C::zero_key(), choice).is_none() {
             continue;
         }
@@ -59,7 +59,7 @@ fn groups<C: KeyType>(test_type: &str) -> Option<Vec<(Value, bool)>> {
 fn aft<C: BlockCipher<Block = [u8; 16], Key: SivKey>>(
     group: &Value,
     encrypt: bool,
-    choice: gcm_siv::Choice,
+    choice: crate::implementation::Implementation,
 ) -> (usize, usize) {
     let mut cases = 0;
     let mut rejections = 0;

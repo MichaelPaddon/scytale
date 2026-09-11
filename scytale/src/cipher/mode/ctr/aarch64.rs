@@ -31,7 +31,7 @@
 //!
 //! # Availability
 //!
-//! [`Engine::at_width`] hands back nothing where the processor lacks
+//! [`Engine::of`] hands back nothing where the processor lacks
 //! the instructions or the cipher is not one of ours, and counter mode
 //! then uses the construction over the cipher's own `encrypt`.
 
@@ -41,6 +41,7 @@ use super::super::{ByteOrder, add_counter};
 use crate::align::At16;
 use crate::cipher::BlockCipher;
 use crate::cipher::aes::aarch64::{Keys, armv8::has_aes, keys};
+use crate::implementation::Implementation;
 
 /// The block these loops work in.
 const BLOCK: usize = 16;
@@ -89,8 +90,8 @@ impl<C: BlockCipher> Engine<C> {
     ///
     /// The extension works on a register of one block, so there is no
     /// wider form: `wide` is answered with nothing.
-    pub(crate) fn at_width(wide: bool) -> Option<Self> {
-        if wide || !has_aes() {
+    pub(crate) fn of(implementation: Implementation) -> Option<Self> {
+        if implementation != Implementation::Armv8 || !has_aes() {
             return None;
         }
         Some(Engine { keys: keys::<C>()? })

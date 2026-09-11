@@ -132,6 +132,7 @@ pub mod cipher;
 mod der;
 mod error;
 pub mod hash;
+mod implementation;
 pub mod kdf;
 pub mod kem;
 pub mod kex;

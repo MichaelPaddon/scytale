@@ -99,6 +99,7 @@ use super::ghash::{BLOCK, Ghash};
 use crate::aead::Aead;
 use crate::cipher::mode::{ByteOrder, counter_blocks, xor};
 use crate::cipher::{BlockCipher, OneBlock};
+use crate::implementation::Implementation;
 use crate::util;
 use crate::{Error, KeyType};
 
@@ -171,31 +172,29 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Clone for Engine<C> {
     }
 }
 
-/// Which implementation to use.
+/// Every implementation, best first.
 ///
 /// A caller never names one: the mode takes the best the processor
 /// has. The tests and the vector suites do name them, so that every
 /// implementation is validated and not only the one this machine
 /// would pick.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Choice {
-    /// The one loop, two blocks to a register.
-    Wide,
-    /// The one loop, one block to a register.
-    Narrow,
-    /// The counter loop and the hash, called in turn.
-    Generic,
-}
-
-/// Every implementation, best first.
-pub(crate) const CHOICES: [Choice; 3] =
-    [Choice::Wide, Choice::Narrow, Choice::Generic];
+pub(crate) const CHOICES: &[Implementation] = &[
+    #[cfg(target_arch = "x86_64")]
+    Implementation::Vaes,
+    #[cfg(target_arch = "x86_64")]
+    Implementation::Aesni,
+    #[cfg(target_arch = "aarch64")]
+    Implementation::Armv8,
+    #[cfg(target_arch = "riscv64")]
+    Implementation::Zvkned,
+    Implementation::Portable,
+];
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
     /// The best engine for this cipher on this processor, under hash
     /// subkey `h`.
     fn new(h: &[u8; BLOCK]) -> Self {
-        for choice in CHOICES {
+        for &choice in CHOICES {
             if let Some(engine) = Self::with(h, choice) {
                 return engine;
             }
@@ -205,28 +204,16 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
 
     /// The engine `choice` names, or `None` where this processor or
     /// this cipher has no such thing.
-    fn with(h: &[u8; BLOCK], choice: Choice) -> Option<Self> {
+    fn with(h: &[u8; BLOCK], choice: Implementation) -> Option<Self> {
         let _ = h;
         match choice {
+            Implementation::Portable => Some(Engine::Generic),
             #[cfg(any(
                 target_arch = "aarch64",
                 target_arch = "riscv64",
                 target_arch = "x86_64"
             ))]
-            Choice::Wide => {
-                native::Engine::at_width(h, true).map(Engine::Native)
-            }
-            #[cfg(any(
-                target_arch = "aarch64",
-                target_arch = "riscv64",
-                target_arch = "x86_64"
-            ))]
-            Choice::Narrow => {
-                native::Engine::at_width(h, false).map(Engine::Native)
-            }
-            Choice::Generic => Some(Engine::Generic),
-            #[allow(unreachable_patterns)]
-            _ => None,
+            hardware => native::Engine::of(h, hardware).map(Engine::Native),
         }
     }
 }
@@ -382,7 +369,10 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
     /// implementation rather than only the one [`new`](Self::new)
     /// would take.
     #[cfg(test)]
-    pub(crate) fn with_choice(key: &C::Key, choice: Choice) -> Option<Self> {
+    pub(crate) fn with_choice(
+        key: &C::Key,
+        choice: Implementation,
+    ) -> Option<Self> {
         let cipher = C::new(key);
         let mut h = [0u8; BLOCK];
         cipher.encrypt_one(&mut h);
@@ -1242,14 +1232,17 @@ mod tests {
             let other = Gcm::<portable::bitsliced::Aes<16>>::new(&key);
             assert!(matches!(other.engine, Engine::Generic));
 
-            // The generic one is always to be had, and the narrower
-            // of the two written out is too wherever this test runs
-            // at all, so both are validated and not just the one this
-            // machine would take.
-            assert!(Gcm::<Aes128>::with_choice(&key, Choice::Narrow).is_some());
-            assert!(
-                Gcm::<Aes128>::with_choice(&key, Choice::Generic).is_some()
-            );
+            // The portable one is always to be had, and on x86-64 the
+            // AES-NI one is too wherever this test runs at all, so
+            // both are validated and not just the one this machine
+            // would take.
+            let portable = Implementation::Portable;
+            assert!(Gcm::<Aes128>::with_choice(&key, portable).is_some());
+            #[cfg(target_arch = "x86_64")]
+            {
+                let aesni = Implementation::Aesni;
+                assert!(Gcm::<Aes128>::with_choice(&key, aesni).is_some());
+            }
         }
     }
 

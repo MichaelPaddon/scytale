@@ -542,9 +542,10 @@ for.
 
 ### The modes and the AEADs
 
-AES-128 over 16 KB buffers, on the implementation the processor
-picks. Rates are bytes, counted in millions and thousands of
-millions:
+AES-128 over 16 KB buffers, on the fastest implementation this
+processor has. Each is measured on every implementation it is written
+for, named; these are the best of them. Rates are bytes, counted in
+millions and thousands of millions:
 
 | Construction | Speed |
 | --- | --- |

@@ -71,6 +71,7 @@ use core::fmt;
 
 use super::{ByteOrder, counter_blocks, xor};
 use crate::cipher::{BlockCipher, OneBlock};
+use crate::implementation::Implementation;
 use crate::{ByteArray, Error};
 
 /// What does the work, settled when the mode is built, because it is
@@ -108,30 +109,28 @@ impl<C: BlockCipher> Clone for Engine<C> {
     }
 }
 
-/// Which implementation to use.
+/// Every implementation, best first.
 ///
 /// A caller never names one: the mode takes the best the processor
 /// has. The tests and the vector suites do name them, so that every
 /// implementation is validated and not only the one this machine
 /// would pick.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Choice {
-    /// Counter mode written out, two blocks to a register.
-    Wide,
-    /// The same, one block to a register.
-    Narrow,
-    /// The construction over the cipher's own bulk encrypt.
-    Generic,
-}
-
-/// Every implementation, best first.
-pub(crate) const CHOICES: [Choice; 3] =
-    [Choice::Wide, Choice::Narrow, Choice::Generic];
+pub(crate) const CHOICES: &[Implementation] = &[
+    #[cfg(target_arch = "x86_64")]
+    Implementation::Vaes,
+    #[cfg(target_arch = "x86_64")]
+    Implementation::Aesni,
+    #[cfg(target_arch = "aarch64")]
+    Implementation::Armv8,
+    #[cfg(target_arch = "riscv64")]
+    Implementation::Zvkned,
+    Implementation::Portable,
+];
 
 impl<C: BlockCipher> Engine<C> {
     /// The best engine for this cipher on this processor.
     fn new() -> Self {
-        for choice in CHOICES {
+        for &choice in CHOICES {
             if let Some(engine) = Self::with(choice) {
                 return engine;
             }
@@ -141,25 +140,15 @@ impl<C: BlockCipher> Engine<C> {
 
     /// The engine `choice` names, or `None` where this processor or
     /// this cipher has no such thing.
-    fn with(choice: Choice) -> Option<Self> {
+    fn with(choice: Implementation) -> Option<Self> {
         match choice {
+            Implementation::Portable => Some(Engine::Generic),
             #[cfg(any(
                 target_arch = "aarch64",
                 target_arch = "riscv64",
                 target_arch = "x86_64"
             ))]
-            Choice::Wide => native::Engine::at_width(true).map(Engine::Native),
-            #[cfg(any(
-                target_arch = "aarch64",
-                target_arch = "riscv64",
-                target_arch = "x86_64"
-            ))]
-            Choice::Narrow => {
-                native::Engine::at_width(false).map(Engine::Native)
-            }
-            Choice::Generic => Some(Engine::Generic),
-            #[allow(unreachable_patterns)]
-            _ => None,
+            hardware => native::Engine::of(hardware).map(Engine::Native),
         }
     }
 
@@ -219,7 +208,10 @@ where
     /// implementation rather than only the one [`new`](Self::new)
     /// would take.
     #[cfg(test)]
-    pub(crate) fn with_choice(key: &C::Key, choice: Choice) -> Option<Self> {
+    pub(crate) fn with_choice(
+        key: &C::Key,
+        choice: Implementation,
+    ) -> Option<Self> {
         Some(Ctr {
             cipher: C::new(key),
             engine: Engine::with(choice)?,
@@ -465,7 +457,7 @@ mod tests {
 
         let key = Key::from(key);
         let mut engines = 0;
-        for choice in CHOICES {
+        for &choice in CHOICES {
             let Some(ctr) = Ctr::<Aes128>::with_choice(&key, choice) else {
                 continue;
             };
@@ -479,7 +471,8 @@ mod tests {
         assert!(engines >= 1, "no implementation to test");
         // The generic one is always to be had, and on a processor
         // with the instructions the narrower written-out one is too.
-        assert!(Ctr::<Aes128>::with_choice(&key, Choice::Generic).is_some());
+        let portable = Implementation::Portable;
+        assert!(Ctr::<Aes128>::with_choice(&key, portable).is_some());
     }
 
     /// The loops add to the last byte of the block without carrying

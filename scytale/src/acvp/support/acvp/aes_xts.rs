@@ -31,7 +31,7 @@ pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
     };
     let mut cases = 0;
     let mut engines = 0;
-    for choice in xts::CHOICES {
+    for &choice in xts::CHOICES {
         let (data, tweak) = (C::zero_key(), one_key::<C>());
         if Xts::<C>::with_choice(&data, &tweak, choice).is_none() {
             continue;
@@ -65,7 +65,7 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
     group: &Value,
     encrypt: bool,
     bits: usize,
-    choice: xts::Choice,
+    choice: crate::implementation::Implementation,
 ) -> usize {
     let mut count = 0;
     for t in group["tests"].as_array().expect("tests") {

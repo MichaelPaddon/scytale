@@ -68,6 +68,7 @@ use crate::align::At16;
 use crate::cipher::BlockCipher;
 pub(crate) use crate::cipher::aes::riscv64::{Keys, keys};
 use crate::cipher::aes::riscv64::{Schedule, has_vrev8, has_zvkned};
+use crate::implementation::Implementation;
 
 /// Blocks the loop takes at once, which is also how many powers of
 /// the subkey it holds.
@@ -151,8 +152,11 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
     ///
     /// The loop works at one fixed width, so there is no second one to
     /// ask for: `wide` is answered with nothing.
-    pub(crate) fn at_width(h: &[u8; BLOCK], wide: bool) -> Option<Self> {
-        if wide {
+    pub(crate) fn of(
+        h: &[u8; BLOCK],
+        implementation: Implementation,
+    ) -> Option<Self> {
+        if implementation != Implementation::Zvkned {
             return None;
         }
         Some(Engine {
@@ -346,6 +350,14 @@ fn counter_tail(
     }
 }
 
+/// Whether GCM-SIV can run `implementation` on this processor.
+///
+/// The same instructions the counter loop needs, since that is what
+/// GCM-SIV borrows.
+pub(crate) fn siv_supported(implementation: Implementation) -> bool {
+    implementation == Implementation::Zvkned && supported()
+}
+
 /// Counter mode over `data` with GCM-SIV's counter, which is the first
 /// four bytes of the block, least significant first, and nothing
 /// hashed beside it.
@@ -357,10 +369,12 @@ fn counter_tail(
 ///
 /// `data` is a whole number of blocks.
 pub(crate) fn siv_counter(
+    implementation: Implementation,
     schedule: Schedule<'_>,
     counter: &mut [u8; BLOCK],
     data: &mut [u8],
 ) {
+    debug_assert_eq!(implementation, Implementation::Zvkned);
     debug_assert_eq!(data.len() % BLOCK, 0);
     if data.is_empty() {
         return;

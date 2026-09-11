@@ -63,6 +63,7 @@ use super::ghash::BLOCK;
 use super::polyval::Polyval;
 use crate::cipher::mode::{ByteOrder, counter_blocks, xor};
 use crate::cipher::{BlockCipher, OneBlock};
+use crate::implementation::Implementation;
 use crate::util;
 use crate::{Error, Key, KeyType};
 use zeroize::Zeroize;
@@ -145,6 +146,9 @@ pub struct GcmSiv<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> {
         allow(dead_code)
     )]
     native: Option<Keys<C>>,
+    /// Which one that is, so that the counter loop is told rather
+    /// than asking the processor again per message.
+    implementation: Implementation,
 }
 
 /// How to reach a cipher's round keys; see [`GcmSiv::native`].
@@ -172,24 +176,23 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> fmt::Debug
     }
 }
 
-/// Which implementation to use.
+/// Every implementation, best first.
 ///
 /// A caller never names one: the mode takes the best the processor
 /// has. The tests and the vector suites do name them, so that every
 /// implementation is validated and not only the one this machine
 /// would pick.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Choice {
-    /// The counter written out, and when decrypting the hash run
-    /// beside it.
-    Native,
-    /// The construction over the cipher's own counter loop, with the
-    /// hash run separately.
-    Generic,
-}
-
-/// Every implementation, best first.
-pub(crate) const CHOICES: [Choice; 2] = [Choice::Native, Choice::Generic];
+pub(crate) const CHOICES: &[Implementation] = &[
+    #[cfg(target_arch = "x86_64")]
+    Implementation::Vaes,
+    #[cfg(target_arch = "x86_64")]
+    Implementation::Aesni,
+    #[cfg(target_arch = "aarch64")]
+    Implementation::Armv8,
+    #[cfg(target_arch = "riscv64")]
+    Implementation::Zvkned,
+    Implementation::Portable,
+];
 
 impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> KeyType for GcmSiv<C> {
     type Key = C::Key;
@@ -262,7 +265,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> Aead for GcmSiv<C> {
 impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
     /// Takes the key that all others are derived from.
     pub fn new(key: &C::Key) -> Self {
-        for choice in CHOICES {
+        for &choice in CHOICES {
             if let Some(mode) = Self::with_choice(key, choice) {
                 return mode;
             }
@@ -272,23 +275,26 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
 
     /// The mode over the implementation `choice` names, or `None`
     /// where this processor or this cipher has no such thing.
-    pub(crate) fn with_choice(key: &C::Key, choice: Choice) -> Option<Self> {
+    pub(crate) fn with_choice(
+        key: &C::Key,
+        choice: Implementation,
+    ) -> Option<Self> {
         match choice {
+            Implementation::Portable => Some(Self::generic(key)),
             #[cfg(any(
                 target_arch = "aarch64",
                 target_arch = "riscv64",
                 target_arch = "x86_64"
             ))]
-            Choice::Native => {
+            hardware => {
+                gcm::native::siv_supported(hardware).then_some(())?;
                 let keys = gcm::native::keys::<C>()?;
                 Some(GcmSiv {
                     native: Some(keys),
+                    implementation: hardware,
                     ..Self::generic(key)
                 })
             }
-            Choice::Generic => Some(Self::generic(key)),
-            #[allow(unreachable_patterns)]
-            _ => None,
         }
     }
 
@@ -299,6 +305,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
             cipher: C::new(key),
             key_len: key.as_ref().len(),
             native: None,
+            implementation: Implementation::Portable,
         }
     }
 
@@ -312,6 +319,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
         if let Some(schedule) = self.native.and_then(|keys| keys(cipher)) {
             let (whole, tail) = data.as_chunks_mut::<BLOCK>();
             gcm::native::siv_counter(
+                self.implementation,
                 schedule,
                 counter,
                 whole.as_flattened_mut(),
@@ -362,7 +370,12 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
                 if !fused {
                     // In turn: the counter written out, and then the
                     // hash over what it produced.
-                    gcm::native::siv_counter(schedule, counter, whole);
+                    gcm::native::siv_counter(
+                        self.implementation,
+                        schedule,
+                        counter,
+                        whole,
+                    );
                     hash.update(whole);
                 }
                 steal(cipher, counter, tail);
@@ -712,7 +725,8 @@ mod tests {
         }
 
         let generic =
-            GcmSiv::<Aes128>::with_choice(&key, Choice::Generic).unwrap();
+            GcmSiv::<Aes128>::with_choice(&key, Implementation::Portable)
+                .unwrap();
         for len in 0..MAX {
             let mut want = [0u8; MAX];
             want[..len].copy_from_slice(&message[..len]);
@@ -721,7 +735,7 @@ mod tests {
                 .encrypt(&nonce, &aad, &mut want[..len], &mut wanted_tag)
                 .unwrap();
 
-            for choice in CHOICES {
+            for &choice in CHOICES {
                 let Some(siv) = GcmSiv::<Aes128>::with_choice(&key, choice)
                 else {
                     continue;
