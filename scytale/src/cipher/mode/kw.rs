@@ -30,7 +30,7 @@
 //!   wrapped can confirm the guess by wrapping it themselves. A key
 //!   cannot be guessed, which is why this is safe for keys and only
 //!   for keys. For anything else use an authenticated mode with a
-//!   nonce, such as [`Gcm`](super::Gcm).
+//!   nonce, such as [`Gcm`](crate::aead::Gcm).
 //! - The input must be a whole number of eight-byte units, and at
 //!   least sixteen bytes. [`Kwp`](super::Kwp) removes both of those
 //!   restrictions, at the cost of padding.

@@ -204,7 +204,7 @@ mod tests {
     extern crate std;
 
     use super::*;
-    use crate::cipher::mode::ghash::{BLOCK, MAX_GROUP, halve};
+    use crate::aead::ghash::{BLOCK, MAX_GROUP, halve};
     use std::eprintln;
 
     /// A cheap spread of test values; the multiply is linear in each

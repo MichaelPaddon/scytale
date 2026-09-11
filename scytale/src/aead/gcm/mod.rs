@@ -1,11 +1,11 @@
 //! Galois/Counter Mode (NIST SP 800-38D).
 //!
-//! The first authenticated mode here: it encrypts with counter mode
-//! and authenticates with GHASH, a hash built on multiplication in a
-//! finite field, so a receiver learns not just what the message says
-//! but that nobody altered it. Data sent alongside in the clear, such
-//! as a header that must be readable but must not be tampered with,
-//! can be authenticated too.
+//! The default here, and a mode of operation in its own right: it
+//! encrypts with counter mode and authenticates with GHASH, a hash
+//! built on multiplication in a finite field, so a receiver learns
+//! not just what the message says but that nobody altered it. Data
+//! sent alongside in the clear, such as a header that must be
+//! readable but must not be tampered with, can be authenticated too.
 //!
 //! # Speed
 //!
@@ -35,7 +35,7 @@
 //!   recover the hash key and then forge tags for any message at all.
 //!   If nonces cannot be guaranteed unique, use a mode built to
 //!   survive repeats.
-//! - **Counting beats drawing.** [`Nonces`](super::Nonces) makes a
+//! - **Counting beats drawing.** [`Nonces`](crate::cipher::Nonces) makes a
 //!   repeat impossible. A nonce drawn at random is allowed, but then
 //!   the standard caps one key at 2^32 messages, and counting those
 //!   messages is the caller's job.
@@ -57,7 +57,7 @@
 //! ```
 //! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
-//! use scytale::cipher::mode::Gcm;
+//! use scytale::aead::{Aead, Gcm};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let gcm = Gcm::<Aes128>::new(&Key::from([0u8; 16]));
@@ -96,10 +96,11 @@ pub(crate) use self::x86_64 as native;
 use core::fmt;
 
 use super::ghash::{BLOCK, Ghash};
-use super::{ByteOrder, counter_blocks, xor};
-use crate::Error;
+use crate::aead::Aead;
+use crate::cipher::mode::{ByteOrder, counter_blocks, xor};
 use crate::cipher::{BlockCipher, OneBlock};
 use crate::util;
+use crate::{Error, KeyType};
 
 /// The most message bytes GCM may protect under one key and nonce:
 /// 2^39 - 256 bits, the limit at which counter mode would repeat.
@@ -392,15 +393,53 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
         })
     }
 
-    /// Encrypts `data` in place and writes its tag.
+    /// Starts encrypting a message that arrives in pieces.
     ///
-    /// `aad` is authenticated but not encrypted.
-    pub fn encrypt(
+    /// The nonce is a slice here, not the fixed
+    /// [`Nonce`](Aead::Nonce) the one-shot calls take: GCM accepts one
+    /// of any length, and this is the way to use one. Ninety-six bits
+    /// is what the standard recommends and what everything else here
+    /// assumes, so reach for another length only when a protocol
+    /// dictates it.
+    pub fn encryptor(&self, nonce: &[u8]) -> Result<Encryptor<'_, C>, Error> {
+        Ok(Encryptor {
+            core: Core::new(self, nonce)?,
+        })
+    }
+
+    /// Starts decrypting a message that arrives in pieces.
+    ///
+    /// Takes a nonce of any length, as
+    /// [`encryptor`](Self::encryptor) explains.
+    pub fn decryptor(&self, nonce: &[u8]) -> Result<Decryptor<'_, C>, Error> {
+        Ok(Decryptor {
+            core: Core::new(self, nonce)?,
+        })
+    }
+}
+
+impl<C: BlockCipher<Block = [u8; BLOCK]>> KeyType for Gcm<C> {
+    type Key = C::Key;
+
+    fn zero_key() -> Self::Key {
+        C::zero_key()
+    }
+}
+
+impl<C: BlockCipher<Block = [u8; BLOCK]>> Aead for Gcm<C> {
+    type Nonce = [u8; SHORT_NONCE];
+    type Tag = [u8; TAG];
+
+    fn try_new(key: &Self::Key) -> Result<Self, Error> {
+        Ok(Gcm::new(key))
+    }
+
+    fn encrypt(
         &self,
-        nonce: &[u8],
+        nonce: &Self::Nonce,
         aad: &[u8],
         data: &mut [u8],
-        tag: &mut [u8; TAG],
+        tag: &mut Self::Tag,
     ) -> Result<(), Error> {
         let mut state = self.encryptor(nonce)?;
         state.aad(aad)?;
@@ -409,17 +448,12 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
         Ok(())
     }
 
-    /// Checks `tag` and, if it is right, decrypts `data` in place.
-    ///
-    /// On failure the buffer is wiped and
-    /// [`Error::AuthenticationFailed`] returned, so a caller cannot
-    /// use plaintext that was never authenticated.
-    pub fn decrypt(
+    fn decrypt(
         &self,
-        nonce: &[u8],
+        nonce: &Self::Nonce,
         aad: &[u8],
         data: &mut [u8],
-        tag: &[u8; TAG],
+        tag: &Self::Tag,
     ) -> Result<(), Error> {
         let mut state = self.decryptor(nonce)?;
         state.aad(aad)?;
@@ -431,20 +465,6 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
                 Err(e)
             }
         }
-    }
-
-    /// Starts encrypting a message that arrives in pieces.
-    pub fn encryptor(&self, nonce: &[u8]) -> Result<Encryptor<'_, C>, Error> {
-        Ok(Encryptor {
-            core: Core::new(self, nonce)?,
-        })
-    }
-
-    /// Starts decrypting a message that arrives in pieces.
-    pub fn decryptor(&self, nonce: &[u8]) -> Result<Decryptor<'_, C>, Error> {
-        Ok(Decryptor {
-            core: Core::new(self, nonce)?,
-        })
     }
 }
 
@@ -891,11 +911,31 @@ mod tests {
         data.copy_from_slice(plain);
         let mut got = [0u8; 16];
 
-        gcm.encrypt(nonce, aad, data, &mut got).unwrap();
+        // The vectors carry nonces of several lengths. The one-shot
+        // calls take the standard twelve bytes, so the others go
+        // through the incremental form, which is where GCM's general
+        // nonce lives.
+        match <&[u8; SHORT_NONCE]>::try_from(nonce) {
+            Ok(nonce) => gcm.encrypt(nonce, aad, data, &mut got).unwrap(),
+            Err(_) => {
+                let mut state = gcm.encryptor(nonce).unwrap();
+                state.aad(aad).unwrap();
+                state.update(data).unwrap();
+                got = state.finalize().unwrap();
+            }
+        }
         assert_eq!(data, cipher, "case {i} ciphertext");
         assert_eq!(&got, tag, "case {i} tag");
 
-        gcm.decrypt(nonce, aad, data, tag).unwrap();
+        match <&[u8; SHORT_NONCE]>::try_from(nonce) {
+            Ok(nonce) => gcm.decrypt(nonce, aad, data, tag).unwrap(),
+            Err(_) => {
+                let mut state = gcm.decryptor(nonce).unwrap();
+                state.aad(aad).unwrap();
+                state.update(data).unwrap();
+                state.verify(tag).unwrap();
+            }
+        }
         assert_eq!(data, plain, "case {i} plaintext");
     }
 
@@ -1150,6 +1190,20 @@ mod tests {
         }
     }
 
+    /// Encrypts through the incremental form, which is what takes a
+    /// nonce of any length.
+    fn seal<C: BlockCipher<Block = [u8; BLOCK]>>(
+        gcm: &Gcm<C>,
+        nonce: &[u8],
+        data: &mut [u8],
+        tag: &mut [u8; TAG],
+    ) {
+        let mut state = gcm.encryptor(nonce).unwrap();
+        state.aad(b"x").unwrap();
+        state.update(data).unwrap();
+        *tag = state.finalize().unwrap();
+    }
+
     /// A nonce that is not ninety-six bits is hashed down to a
     /// counter block, which the engine does with its own hash. Both
     /// engines must reach the same block.
@@ -1163,8 +1217,8 @@ mod tests {
             let mut a = [7u8; 40];
             let mut b = a;
             let (mut ta, mut tb) = ([0u8; TAG], [0u8; TAG]);
-            native.encrypt(&nonce, b"x", &mut a, &mut ta).unwrap();
-            generic.encrypt(&nonce, b"x", &mut b, &mut tb).unwrap();
+            seal(&native, &nonce, &mut a, &mut ta);
+            seal(&generic, &nonce, &mut b, &mut tb);
             assert_eq!(a, b, "{len}-byte nonce");
             assert_eq!(ta, tb, "{len}-byte nonce tag");
         }

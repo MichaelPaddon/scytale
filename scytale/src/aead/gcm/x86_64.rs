@@ -44,11 +44,11 @@ use super::{BLOCK, Direction};
 // Re-exported so that GCM-SIV, which runs the same counter
 // under a different byte order, can name one path whatever the
 // architecture is.
-use super::super::{ByteOrder, add_counter};
 use crate::align::{At16, At32};
 use crate::cipher::BlockCipher;
 pub(crate) use crate::cipher::aes::x86_64::{Keys, keys};
 use crate::cipher::aes::x86_64::{Schedule, has_aesni};
+use crate::cipher::mode::{ByteOrder, add_counter};
 use crate::probe::Probe;
 
 /// Blocks the loop takes at once, which is also how many powers of

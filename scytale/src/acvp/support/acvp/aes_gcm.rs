@@ -12,9 +12,9 @@ use std::{eprintln, format, println, string::String, vec, vec::Vec};
 use super::{groups as suite_groups, hex, key_of};
 use crate::Error;
 use crate::KeyType;
+use crate::aead::gcm;
+use crate::aead::{Aead, Gcm};
 use crate::cipher::BlockCipher;
-use crate::cipher::mode::Gcm;
-use crate::cipher::mode::gcm;
 use serde_json::Value;
 
 const FILE: &str = "ACVP-AES-GCM-1.0/internalProjection.json";
@@ -79,8 +79,20 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
         if encrypt {
             let mut data = hex(&t["pt"]);
             let mut got = [0u8; 16];
-            gcm.encrypt(&nonce, &aad, &mut data, &mut got)
-                .expect("encrypt");
+            // The suite runs several nonce lengths. The one-shot takes
+            // the standard twelve bytes; the rest go through the
+            // incremental form, which accepts any length.
+            match <&[u8; 12]>::try_from(&nonce[..]) {
+                Ok(nonce) => gcm
+                    .encrypt(nonce, &aad, &mut data, &mut got)
+                    .expect("encrypt"),
+                Err(_) => {
+                    let mut state = gcm.encryptor(&nonce).expect("encryptor");
+                    state.aad(&aad).expect("aad");
+                    state.update(&mut data).expect("update");
+                    got = state.finalize().expect("finalize");
+                }
+            }
             assert_eq!(data, hex(&t["ct"]), "{tag} ciphertext");
             assert_eq!(got[..tag_len], hex(&t["tag"]), "{tag} tag");
         } else {
@@ -91,9 +103,10 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
             let should_pass = t["testPassed"].as_bool().unwrap_or(true);
             let mut data = hex(&t["ct"]);
             let expected = hex(&t["tag"]);
-            let result = if tag_len == 16 {
+            let short_nonce = <&[u8; 12]>::try_from(&nonce[..]).ok();
+            let result = if let (16, Some(nonce)) = (tag_len, short_nonce) {
                 let full: [u8; 16] = expected.try_into().expect("tag");
-                gcm.decrypt(&nonce, &aad, &mut data, &full)
+                gcm.decrypt(nonce, &aad, &mut data, &full)
             } else {
                 let mut state = gcm.decryptor(&nonce).expect("decryptor");
                 state.aad(&aad).expect("aad");

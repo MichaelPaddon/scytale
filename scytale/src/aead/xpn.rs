@@ -13,7 +13,10 @@
 //! Both are 96 bits. The salt is fixed for the session and secret.
 //! The other half identifies the frame: in MACsec it is a 32-bit
 //! channel identifier followed by the 64-bit packet number, most
-//! significant byte first.
+//! significant byte first. That is a counting nonce with the split
+//! moved, so [`Nonces`](crate::cipher::Nonces) builds it:
+//! `Nonces::<[u8; 12]>::try_new(&channel.to_be_bytes(), packet)`
+//! hands out one frame identifier per call and refuses to repeat one.
 //!
 //! # Using it safely
 //!
@@ -34,7 +37,7 @@
 //! ```
 //! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
-//! use scytale::cipher::mode::Xpn;
+//! use scytale::aead::Xpn;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let xpn = Xpn::<Aes128>::new(&Key::from([0u8; 16]));
@@ -57,6 +60,7 @@
 
 use core::fmt;
 
+use super::Aead;
 use super::gcm::{Gcm, SHORT_NONCE, TAG};
 use super::ghash::BLOCK;
 use crate::Error;
@@ -100,7 +104,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xpn<C> {
         data: &mut [u8],
         tag: &mut [u8; TAG],
     ) -> Result<(), Error> {
-        self.gcm.encrypt(&nonce(salt, frame)[..], aad, data, tag)
+        self.gcm.encrypt(&nonce(salt, frame), aad, data, tag)
     }
 
     /// Checks `tag` and, if it is right, decrypts `data` in place.
@@ -115,7 +119,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xpn<C> {
         data: &mut [u8],
         tag: &[u8; TAG],
     ) -> Result<(), Error> {
-        self.gcm.decrypt(&nonce(salt, frame)[..], aad, data, tag)
+        self.gcm.decrypt(&nonce(salt, frame), aad, data, tag)
     }
 
     /// As [`decrypt`](Self::decrypt), for a protocol that carries a
@@ -158,8 +162,8 @@ fn nonce(salt: &[u8; HALF], frame: &[u8; HALF]) -> [u8; HALF] {
 mod tests {
     use super::*;
     use crate::Key;
+    use crate::aead::Gcm;
     use crate::cipher::aes::Aes128;
-    use crate::cipher::mode::Gcm;
 
     fn xpn() -> Xpn<Aes128> {
         Xpn::new(&Key::from([0x42u8; 16]))

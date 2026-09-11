@@ -59,8 +59,8 @@
 #![allow(unsafe_code)]
 
 use super::super::ghash;
-use super::super::{ByteOrder, add_counter};
 use super::{BLOCK, Direction};
+use crate::cipher::mode::{ByteOrder, add_counter};
 // Re-exported so that GCM-SIV, which runs the same counter
 // under a different byte order, can name one path whatever the
 // architecture is.

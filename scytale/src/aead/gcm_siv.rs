@@ -1,6 +1,6 @@
 //! AES-GCM-SIV (RFC 8452), which survives a repeated nonce.
 //!
-//! Every mode before this one fails catastrophically if a nonce is
+//! Every other construction here fails catastrophically if a nonce is
 //! used twice: the keystream repeats and the messages leak into each
 //! other, and for GCM an attacker can go on to forge tags at will.
 //! GCM-SIV is built so that repeating a nonce reveals only whether
@@ -34,7 +34,7 @@
 //! ```
 //! use scytale::Key;
 //! use scytale::cipher::aes::Aes128;
-//! use scytale::cipher::mode::GcmSiv;
+//! use scytale::aead::{Aead, GcmSiv};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let siv = GcmSiv::<Aes128>::new(&Key::from([0u8; 16]));
@@ -52,6 +52,7 @@
 
 use core::fmt;
 
+use super::Aead;
 #[cfg(any(
     target_arch = "aarch64",
     target_arch = "riscv64",
@@ -60,10 +61,10 @@ use core::fmt;
 use super::gcm;
 use super::ghash::BLOCK;
 use super::polyval::Polyval;
-use super::{ByteOrder, counter_blocks, xor};
+use crate::cipher::mode::{ByteOrder, counter_blocks, xor};
 use crate::cipher::{BlockCipher, OneBlock};
 use crate::util;
-use crate::{Error, Key};
+use crate::{Error, Key, KeyType};
 use zeroize::Zeroize;
 
 /// The nonce length, fixed by the standard.
@@ -86,7 +87,7 @@ const MAX_FIELD: u64 = 1 << 36;
 /// ```
 /// use scytale::Key;
 /// use scytale::cipher::aes::{Aes128, Aes256};
-/// use scytale::cipher::mode::GcmSiv;
+/// use scytale::aead::{Aead, GcmSiv};
 /// let _ = GcmSiv::<Aes128>::new(&Key::from([0u8; 16]));
 /// let _ = GcmSiv::<Aes256>::new(&Key::from([0u8; 32]));
 /// ```
@@ -94,7 +95,7 @@ const MAX_FIELD: u64 = 1 << 36;
 /// ```compile_fail
 /// use scytale::Key;
 /// use scytale::cipher::aes::Aes192;
-/// use scytale::cipher::mode::GcmSiv;
+/// use scytale::aead::{Aead, GcmSiv};
 /// // AES-192 is a cipher, but not one GCM-SIV is defined over.
 /// let _ = GcmSiv::<Aes192>::new(&Key::from([0u8; 24]));
 /// ```
@@ -190,6 +191,74 @@ pub(crate) enum Choice {
 /// Every implementation, best first.
 pub(crate) const CHOICES: [Choice; 2] = [Choice::Native, Choice::Generic];
 
+impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> KeyType for GcmSiv<C> {
+    type Key = C::Key;
+
+    fn zero_key() -> Self::Key {
+        C::zero_key()
+    }
+}
+
+impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> Aead for GcmSiv<C> {
+    type Nonce = [u8; NONCE];
+    type Tag = [u8; TAG];
+
+    fn try_new(key: &Self::Key) -> Result<Self, Error> {
+        Ok(GcmSiv::new(key))
+    }
+
+    fn encrypt(
+        &self,
+        nonce: &Self::Nonce,
+        aad: &[u8],
+        data: &mut [u8],
+        tag: &mut Self::Tag,
+    ) -> Result<(), Error> {
+        check(aad, data.len())?;
+        let (hash_key, cipher) = self.derive(nonce);
+
+        // The tag covers the plaintext, so it is computed first.
+        let full = authenticate(&hash_key, &cipher, nonce, aad, data)?;
+        let mut counter = full;
+        counter[BLOCK - 1] |= 0x80;
+        self.apply(&cipher, &mut counter, data);
+
+        tag.copy_from_slice(&full);
+        Ok(())
+    }
+
+    fn decrypt(
+        &self,
+        nonce: &Self::Nonce,
+        aad: &[u8],
+        data: &mut [u8],
+        tag: &Self::Tag,
+    ) -> Result<(), Error> {
+        check(aad, data.len())?;
+        let (hash_key, cipher) = self.derive(nonce);
+
+        // The counter comes from the tag, so the message can be
+        // decrypted before the tag is known to be right; then the tag
+        // is recomputed over the plaintext and compared.
+        let mut counter = *tag;
+        counter[BLOCK - 1] |= 0x80;
+        let full = self.decrypt_and_authenticate(
+            &hash_key,
+            &cipher,
+            nonce,
+            aad,
+            &mut counter,
+            data,
+        )?;
+        if util::equal(&full, tag) {
+            Ok(())
+        } else {
+            data.fill(0);
+            Err(Error::AuthenticationFailed)
+        }
+    }
+}
+
 impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
     /// Takes the key that all others are derived from.
     pub fn new(key: &C::Key) -> Self {
@@ -230,62 +299,6 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
             cipher: C::new(key),
             key_len: key.as_ref().len(),
             native: None,
-        }
-    }
-
-    /// Encrypts `data` in place and writes its 16-byte tag.
-    pub fn encrypt(
-        &self,
-        nonce: &[u8; NONCE],
-        aad: &[u8],
-        data: &mut [u8],
-        tag: &mut [u8; TAG],
-    ) -> Result<(), Error> {
-        check(aad, data.len())?;
-        let (hash_key, cipher) = self.derive(nonce);
-
-        // The tag covers the plaintext, so it is computed first.
-        let full = authenticate(&hash_key, &cipher, nonce, aad, data)?;
-        let mut counter = full;
-        counter[BLOCK - 1] |= 0x80;
-        self.apply(&cipher, &mut counter, data);
-
-        tag.copy_from_slice(&full);
-        Ok(())
-    }
-
-    /// Checks `tag` and, if it is right, decrypts `data` in place.
-    ///
-    /// On failure the buffer is wiped and
-    /// [`Error::AuthenticationFailed`] returned.
-    pub fn decrypt(
-        &self,
-        nonce: &[u8; NONCE],
-        aad: &[u8],
-        data: &mut [u8],
-        tag: &[u8; TAG],
-    ) -> Result<(), Error> {
-        check(aad, data.len())?;
-        let (hash_key, cipher) = self.derive(nonce);
-
-        // The counter comes from the tag, so the message can be
-        // decrypted before the tag is known to be right; then the tag
-        // is recomputed over the plaintext and compared.
-        let mut counter = *tag;
-        counter[BLOCK - 1] |= 0x80;
-        let full = self.decrypt_and_authenticate(
-            &hash_key,
-            &cipher,
-            nonce,
-            aad,
-            &mut counter,
-            data,
-        )?;
-        if util::equal(&full, tag) {
-            Ok(())
-        } else {
-            data.fill(0);
-            Err(Error::AuthenticationFailed)
         }
     }
 

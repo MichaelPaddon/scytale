@@ -64,12 +64,10 @@ use std::time::Duration;
 use cpu_time::ThreadTime;
 
 use crate::Key;
+use crate::aead::{Aead, ChaCha20Poly1305, Gcm, GcmSiv, Xpn};
 use crate::cipher::chacha20;
-use crate::cipher::mode::ChaCha20Poly1305;
 use crate::cipher::mode::ctr;
-use crate::cipher::mode::{
-    Cbc, Cfb1, Cfb8, Cfb128, Ctr, Gcm, GcmSiv, Kw, Kwp, Ofb, Xpn, Xts,
-};
+use crate::cipher::mode::{Cbc, Cfb1, Cfb8, Cfb128, Ctr, Kw, Kwp, Ofb, Xts};
 use crate::cipher::mode::{Ff1, Ff3_1};
 use crate::cipher::{BlockCipher, aes};
 #[allow(unused_imports)]
@@ -690,7 +688,7 @@ fn chacha_section<C: StreamCipher>(
     // Poly1305 and the AEAD cannot fail to build: the key is right
     // and the automatic ChaCha20 always exists.
     let mut mac = Poly1305::try_new(&Key::from(KEY256)).expect("poly1305");
-    let aead = ChaCha20Poly1305::try_new(&KEY256).expect("aead");
+    let aead = ChaCha20Poly1305::try_new(&Key::from(KEY256)).expect("aead");
     let mut tags = [[0u8; 16]; 2];
     let (enc_tag, dec_tag) = tags.split_at_mut(1);
     let mut tasks: Vec<Task<'_>> = vec![

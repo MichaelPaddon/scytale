@@ -10,8 +10,8 @@ use std::{eprintln, format, println, string::String, vec, vec::Vec};
 use super::{groups as suite_groups, hex, key_of};
 use crate::Error;
 use crate::KeyType;
+use crate::aead::Xpn;
 use crate::cipher::BlockCipher;
-use crate::cipher::mode::Xpn;
 use serde_json::Value;
 
 const FILE: &str = "ACVP-AES-XPN-1.0/internalProjection.json";

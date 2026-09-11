@@ -30,7 +30,7 @@
 //!   or draw them from a source that cannot repeat.
 //! - **This authenticates nothing.** Anyone can flip bits of the
 //!   ciphertext and flip the same bits of the message. Use
-//!   [`ChaCha20Poly1305`](crate::cipher::mode::ChaCha20Poly1305),
+//!   [`ChaCha20Poly1305`](crate::aead::ChaCha20Poly1305),
 //!   which is this cipher under a MAC, unless a protocol supplies
 //!   its own authentication.
 //! - The counter is 32 bits, so one nonce carries at most 256 GiB;
@@ -73,6 +73,10 @@ use crate::probe::Probe;
 pub const KEY_SIZE: usize = 32;
 
 /// The nonce length, in bytes.
+///
+/// It must never repeat under one key, which is a stronger
+/// requirement than being unpredictable:
+/// [`Nonces`](crate::cipher::Nonces) counts them so that it cannot.
 pub const NONCE_SIZE: usize = 12;
 
 /// Bytes of keystream per block.

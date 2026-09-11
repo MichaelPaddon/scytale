@@ -1,15 +1,17 @@
-//! Modes of operation, generic over any [`BlockCipher`], and one
-//! that wraps a stream cipher instead.
+//! Modes of operation, generic over any [`BlockCipher`].
 //!
 //! A block cipher on its own only transforms one block. A mode says
 //! how to carry that over a message: how blocks chain, how a nonce
-//! enters, and, for the authenticated modes, how a tag is computed.
-//! [`ChaCha20Poly1305`] is the exception: a stream cipher and a MAC
-//! that were designed to be used together, with no block cipher
-//! underneath.
+//! enters, and how the bytes that do not fill a block are dealt with.
+//!
+//! None of these authenticates anything. Authenticated encryption is
+//! built differently and lives in [`aead`](crate::aead); reach for it
+//! first, and come here for the cases it does not cover -- a protocol
+//! that brings its own MAC, a disk with no room for a tag, a format
+//! that must be preserved.
 //!
 //! A mode is built from the key its cipher runs under, and names
-//! that cipher as its type parameter: `Gcm::<Aes128>::new(&key)`.
+//! that cipher as its type parameter: `Ctr::<Aes128>::new(&key)`.
 //! Handing it a key rather than a built cipher is what lets it
 //! decide, once, how to do the work: for a cipher and a processor it
 //! has a hand-written implementation of the pair for, that; for
@@ -20,34 +22,23 @@
 //!
 //! | Need | Mode |
 //! | --- | --- |
-//! | Encrypt and authenticate a message | [`Gcm`], with [`Nonces`] |
-//! | The same, without AES instructions | [`ChaCha20Poly1305`] |
-//! | The same, when a nonce might repeat | [`GcmSiv`] |
-//! | MACsec frames | [`Xpn`] |
+//! | Encrypt and authenticate a message | [`aead`](crate::aead), not here |
 //! | A disk or other sector-addressed store | [`Xts`] |
 //! | Wrap a key | [`Kw`], or [`Kwp`] for any length |
 //! | Encrypt within a format, such as a card number | [`Ff1`], [`Ff3_1`] |
 //! | Plain stream, for a protocol | [`Ctr`], [`Cbc`], [`Ofb`], [`Cfb128`] |
 //! | Byte or bit at a time, for a legacy protocol | [`Cfb8`], [`Cfb1`] |
 //!
-//! [`Gcm`] is the default. It is fast, standard, and refuses to hand
-//! back a message that does not authenticate. Its one hazard is a
-//! repeated nonce, which [`Nonces`] rules out; where uniqueness cannot
-//! be promised, [`GcmSiv`] survives a repeat. [`ChaCha20Poly1305`]
-//! is as strong as [`Gcm`] and, on a processor without AES
-//! instructions, several times faster while leaking nothing through
-//! the cache; with them, [`Gcm`] is the faster.
-//!
-//! [`Xts`] authenticates nothing: it is for storage, where there is
-//! no room for a tag and the threat is a stolen disk. [`Kw`] and
-//! [`Kwp`] are deterministic, which is right for keys and wrong for
-//! anything else. The format-preserving modes are not constant time
-//! and their history is uneven; use them only where the format is
-//! the point.
+//! [`Xts`] is for storage, where there is no room for a tag and the
+//! threat is a stolen disk. [`Kw`] and [`Kwp`] are deterministic,
+//! which is right for keys and wrong for anything else. The
+//! format-preserving modes are not constant time and their history is
+//! uneven; use them only where the format is the point.
 //!
 //! The plain modes, [`Ctr`], [`Cbc`], [`Ofb`] and [`Cfb128`],
-//! authenticate nothing and must be paired with a MAC over the
-//! ciphertext, checked before decrypting. [`Cfb8`] and [`Cfb1`] are
+//! must be paired with a MAC over the ciphertext, checked before
+//! decrypting, and getting that pairing right is the work that
+//! [`aead`](crate::aead) has already done. [`Cfb8`] and [`Cfb1`] are
 //! those again at a fraction of the speed, for protocols that fixed
 //! their segment size long ago.
 //!
@@ -57,36 +48,24 @@ pub mod cbc;
 pub mod cfb1;
 pub mod cfb128;
 pub mod cfb8;
-pub mod chacha20_poly1305;
 pub mod ctr;
 pub mod ff1;
 pub mod ff3_1;
-pub mod gcm;
-pub mod gcm_siv;
-pub(crate) mod ghash;
 pub mod kw;
 pub mod kwp;
-pub mod nonce;
 pub mod ofb;
-pub(crate) mod polyval;
-pub mod xpn;
 pub mod xts;
 
 pub use cbc::Cbc;
 pub use cfb1::Cfb1;
 pub use cfb8::Cfb8;
 pub use cfb128::Cfb128;
-pub use chacha20_poly1305::ChaCha20Poly1305;
 pub use ctr::Ctr;
 pub use ff1::Ff1;
 pub use ff3_1::Ff3_1;
-pub use gcm::Gcm;
-pub use gcm_siv::{GcmSiv, SivKey};
 pub use kw::Kw;
 pub use kwp::Kwp;
-pub use nonce::Nonces;
 pub use ofb::Ofb;
-pub use xpn::Xpn;
 pub use xts::Xts;
 
 use crate::cipher::BlockCipher;

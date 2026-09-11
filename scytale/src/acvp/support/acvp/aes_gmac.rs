@@ -8,8 +8,8 @@ use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
 use super::{groups as suite_groups, hex, key_of};
 use crate::Error;
+use crate::aead::{Aead, Gcm};
 use crate::cipher::BlockCipher;
-use crate::cipher::mode::Gcm;
 
 const FILE: &str = "ACVP-AES-GMAC-1.0/internalProjection.json";
 
@@ -35,9 +35,20 @@ pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
             let expected = hex(&t["tag"]);
             assert!(hex(&t["pt"]).is_empty() && hex(&t["ct"]).is_empty());
             if *encrypt {
+                // As in the GCM suite: the one-shot takes the
+                // standard nonce, the incremental form takes the rest.
                 let mut got = [0u8; 16];
-                gcm.encrypt(&nonce, &aad, &mut [], &mut got)
-                    .expect("encrypt");
+                match <&[u8; 12]>::try_from(&nonce[..]) {
+                    Ok(nonce) => gcm
+                        .encrypt(nonce, &aad, &mut [], &mut got)
+                        .expect("encrypt"),
+                    Err(_) => {
+                        let mut state =
+                            gcm.encryptor(&nonce).expect("encryptor");
+                        state.aad(&aad).expect("aad");
+                        got = state.finalize().expect("finalize");
+                    }
+                }
                 assert_eq!(got[..tag_len], expected, "{tag}");
             } else {
                 let should_pass =

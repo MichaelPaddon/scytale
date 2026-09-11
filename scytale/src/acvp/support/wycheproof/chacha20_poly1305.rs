@@ -14,9 +14,9 @@ use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
 use super::super::acvp::hex;
 use super::load;
-use crate::Error;
+use crate::aead::{Aead, ChaCha20Poly1305};
 use crate::cipher::chacha20::{Backend, Cipher};
-use crate::cipher::mode::ChaCha20Poly1305;
+use crate::{Error, Key};
 
 const FILE: &str = "wycheproof/chacha20_poly1305_test.json";
 
@@ -42,7 +42,10 @@ pub fn run() {
         }
         for t in group["tests"].as_array().expect("tests") {
             let tag = format!("tcId {}: {}", t["tcId"], t["comment"]);
-            let aead = ChaCha20Poly1305::try_new(&hex(&t["key"])).expect("key");
+            let Ok(key) = Key::try_from(&hex(&t["key"])[..]) else {
+                continue;
+            };
+            let aead = ChaCha20Poly1305::try_new(&key).expect("key");
             let nonce: [u8; 12] = hex(&t["iv"]).try_into().expect("nonce");
             let aad = hex(&t["aad"]);
             let msg = hex(&t["msg"]);

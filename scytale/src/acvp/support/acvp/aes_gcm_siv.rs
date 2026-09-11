@@ -10,8 +10,8 @@ use std::{eprintln, format, println, string::String, vec, vec::Vec};
 use super::{groups as suite_groups, hex, key_of};
 use crate::Error;
 use crate::KeyType;
+use crate::aead::{Aead, GcmSiv, SivKey, gcm_siv};
 use crate::cipher::BlockCipher;
-use crate::cipher::mode::{GcmSiv, SivKey, gcm_siv};
 use serde_json::Value;
 
 const FILE: &str = "ACVP-AES-GCM-SIV-1.0/internalProjection.json";

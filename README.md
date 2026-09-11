@@ -16,8 +16,8 @@
 [license-badge]: https://img.shields.io/crates/l/scytale.svg
 [license]: https://github.com/MichaelPaddon/scytale/blob/main/LICENSE
 
-Correct, fast, portable cryptography in Rust: ciphers and the modes
-over them, hashes, message authentication, key derivation, key
+Correct, fast, portable cryptography in Rust: ciphers, authenticated
+encryption and the modes over them, hashes, message authentication, key derivation, key
 agreement, public-key encryption, signatures, post-quantum key
 encapsulation and signatures, and random numbers. It is `no_std`, has
 two dependencies, needs no C compiler and no build script, and has no
@@ -87,7 +87,8 @@ cargo add scytale
 ```
 
 ```rust
-use scytale::cipher::{aes::Aes256, mode::Gcm};
+use scytale::aead::{Aead, Gcm};
+use scytale::cipher::aes::Aes256;
 use scytale::random::CtrDrbg;
 use scytale::{KeyType, Random};
 
@@ -158,6 +159,7 @@ the machinery behind it:
 
 | Module | Job | Algorithms |
 | --- | --- | --- |
+| `aead` | authenticated encryption | GCM, GCM-SIV, XPN, ChaCha20-Poly1305 |
 | `cipher` | encryption | AES, ChaCha20, and the modes built on them |
 | `hash` | digests | SHA-2, SHA-3, SHAKE; SHA-1 for what still names it |
 | `mac` | message authentication | HMAC, Poly1305 |
@@ -175,10 +177,34 @@ the machinery behind it:
 | AES (FIPS 197) | 128, 192, 256 | the block cipher itself |
 | ChaCha20 (RFC 8439) | 256 | a stream cipher; no tables, no AES needed |
 
+### Authenticated encryption
+
+These encrypt a message and authenticate it together, and refuse to
+hand back a message whose tag does not check. Unless a protocol
+dictates otherwise, start here.
+
+| Construction | Notes |
+| --- | --- |
+| GCM | the default; GMAC is GCM with no plaintext |
+| GCM-SIV | survives a repeated nonce (RFC 8452) |
+| XPN | GCM under a MACsec extended packet number |
+| ChaCha20-Poly1305 (RFC 8439) | GCM's equal; faster without AES hardware |
+
+The first three are modes of operation of a block cipher and are
+generic over it; the fourth is a stream cipher and a MAC designed
+together, with no block cipher underneath. They share a module because
+what a caller wants is authenticated encryption, not a particular way
+of building it, and they share a trait for the same reason.
+
+### Modes of operation
+
 Every mode below is generic: it wraps any block cipher, and AES is
 simply the one there is so far. The key width is part of the type,
 `Aes128`, `Aes192` or `Aes256`, so a key of the wrong length is a
-compile error rather than a run-time one.
+compile error rather than a run-time one. None of them authenticates
+anything, so each must be paired with a MAC over the ciphertext,
+checked before decrypting; the `aead` module has already done that
+work.
 
 | Mode | Kind | Notes |
 | --- | --- | --- |
@@ -186,18 +212,9 @@ compile error rather than a run-time one.
 | CFB1, CFB8, CFB128 | confidentiality | the three NIST segment sizes |
 | OFB | confidentiality | |
 | CTR | confidentiality | |
-| GCM | authenticated | GMAC is GCM with no plaintext |
-| GCM-SIV | authenticated | survives a repeated nonce (RFC 8452) |
-| XPN | authenticated | GCM under a MACsec extended packet number |
 | XTS | disk sectors | ciphertext stealing for a partial block |
 | FF1, FF3-1 | format preserving | see their documentation first |
 | KW, KWP | key wrapping | deterministic; for keys, not messages |
-
-And one that wraps no block cipher:
-
-| Mode | Kind | Notes |
-| --- | --- | --- |
-| ChaCha20-Poly1305 (RFC 8439) | authenticated | GCM's equal; faster without AES hardware |
 
 `encrypt_blocks` on the cipher itself encrypts each block
 independently, which is ECB. On its own that is not a safe way to
@@ -205,8 +222,10 @@ encrypt a message, because equal blocks produce equal ciphertext. Use
 a mode.
 
 Most initialisation vectors need to be *unique* rather than random,
-which is a stronger requirement. `mode::Nonces` counts nonces for GCM
-and GCM-SIV so a repeat is impossible rather than merely unlikely.
+which is a stronger requirement. `cipher::Nonces` counts nonces so a
+repeat is impossible rather than merely unlikely: it splits the nonce
+into a fixed part and a counter, wherever the caller puts the
+boundary.
 
 Key wrapping is the odd one out: it takes no nonce and is
 deterministic, so wrapping the same key twice gives the same answer.
@@ -416,11 +435,12 @@ aes.decrypt_block(&mut block);
 aes.encrypt_blocks(&mut blocks); // blocks: [[u8; 16]; N]
 ```
 
-A mode wraps the cipher. Authenticated encryption returns a tag, and
-decryption checks it before the plaintext is worth anything:
+An AEAD wraps the cipher. It returns a tag, and decryption checks it
+before the plaintext is worth anything:
 
 ```rust
-use scytale::cipher::{aes::Aes128, mode::Gcm};
+use scytale::aead::{Aead, Gcm};
+use scytale::cipher::aes::Aes128;
 
 let gcm = Gcm::<Aes128>::new(&key);
 
@@ -429,8 +449,12 @@ gcm.encrypt(&nonce, associated_data, &mut buffer, &mut tag)?;
 gcm.decrypt(&nonce, associated_data, &mut buffer, &tag)?;
 ```
 
-Every mode also has an incremental form for data that arrives in
-pieces. Note that incremental decryption hands back plaintext before
+GCM, GCM-SIV and ChaCha20-Poly1305 share an `Aead` trait, so code that
+does not care which one it was handed -- a protocol that negotiated it,
+a format that records it -- can hold any of them behind one type. XPN
+stays out of it: its nonce is two separate halves, a secret salt and a
+frame identifier, and only the caller knows which is which. Most of
+these also have an incremental form for data that arrives in pieces. Note that incremental decryption hands back plaintext before
 the tag has been checked; the one-shot call above is the safe
 default.
 
@@ -516,13 +540,13 @@ with AVX2 and 790 MB/s portable. On a processor with no AES hardware
 it is several times faster than any AES here, which is what it is
 for.
 
-### The modes
+### The modes and the AEADs
 
 AES-128 over 16 KB buffers, on the implementation the processor
 picks. Rates are bytes, counted in millions and thousands of
 millions:
 
-| Mode | Speed |
+| Construction | Speed |
 | --- | --- |
 | CBC encrypt | 1.9 GB/s |
 | CBC decrypt | 15 GB/s |

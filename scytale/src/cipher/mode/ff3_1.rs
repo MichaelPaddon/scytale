@@ -55,8 +55,8 @@
 
 use core::fmt;
 
-use super::ghash::BLOCK;
 use crate::Error;
+use crate::cipher::BLOCK;
 use crate::cipher::{BlockCipher, OneBlock};
 use crate::math::natural::Natural;
 

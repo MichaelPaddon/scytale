@@ -9,10 +9,11 @@
 //! nonce must be.
 //!
 //! ```
-//! use scytale::cipher::mode::ChaCha20Poly1305;
+//! use scytale::Key;
+//! use scytale::aead::{Aead, ChaCha20Poly1305};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let aead = ChaCha20Poly1305::try_new(&[0x42; 32])?;
+//! let aead = ChaCha20Poly1305::try_new(&Key::from([0x42u8; 32]))?;
 //! let nonce = [7u8; 12];
 //! let header = b"to: bob";
 //! let mut message = *b"attack at dawn";
@@ -30,7 +31,7 @@
 //!   once: the keystream repeats, so the xor of the two messages
 //!   falls out, and the Poly1305 key repeats, which gives away the
 //!   key and with it forgeries. Count nonces, with
-//!   [`Nonces`](super::Nonces) or otherwise.
+//!   [`Nonces`](crate::cipher::Nonces) or otherwise.
 //! - Do not use a decrypted message before the tag has been checked.
 //!   The one-shot [`decrypt`](ChaCha20Poly1305::decrypt) checks first
 //!   and wipes the buffer on failure; the incremental form cannot,
@@ -50,10 +51,11 @@ use core::fmt;
 
 use zeroize::Zeroize;
 
-use crate::Error;
-use crate::cipher::chacha20::{AutoStream, ChaCha20, NONCE_SIZE};
+use super::Aead;
+use crate::cipher::chacha20::{AutoStream, ChaCha20, KEY_SIZE, NONCE_SIZE};
 use crate::mac::Mac;
 use crate::mac::poly1305::Poly1305;
+use crate::{Error, Key, KeyType};
 
 /// The tag length, in bytes.
 const TAG: usize = 16;
@@ -64,23 +66,28 @@ pub struct ChaCha20Poly1305 {
     cipher: ChaCha20,
 }
 
-impl ChaCha20Poly1305 {
-    /// Takes `key`, which must be 32 bytes.
-    pub fn try_new(key: &[u8]) -> Result<Self, Error> {
-        Ok(ChaCha20Poly1305 {
-            cipher: ChaCha20::try_new(key)?,
-        })
+impl KeyType for ChaCha20Poly1305 {
+    type Key = Key<[u8; KEY_SIZE]>;
+
+    fn zero_key() -> Self::Key {
+        Key::zeroed()
+    }
+}
+
+impl Aead for ChaCha20Poly1305 {
+    type Nonce = [u8; NONCE_SIZE];
+    type Tag = [u8; TAG];
+
+    fn try_new(key: &Self::Key) -> Result<Self, Error> {
+        ChaCha20Poly1305::try_new(key)
     }
 
-    /// Encrypts `data` in place and writes its tag.
-    ///
-    /// `aad` is authenticated but not encrypted.
-    pub fn encrypt(
+    fn encrypt(
         &self,
-        nonce: &[u8; NONCE_SIZE],
+        nonce: &Self::Nonce,
         aad: &[u8],
         data: &mut [u8],
-        tag: &mut [u8; TAG],
+        tag: &mut Self::Tag,
     ) -> Result<(), Error> {
         let mut state = self.encryptor(nonce)?;
         state.aad(aad)?;
@@ -89,17 +96,12 @@ impl ChaCha20Poly1305 {
         Ok(())
     }
 
-    /// Checks `tag` and, if it is right, decrypts `data` in place.
-    ///
-    /// On failure the buffer is wiped and
-    /// [`Error::AuthenticationFailed`] returned, so a caller cannot
-    /// use plaintext that was never authenticated.
-    pub fn decrypt(
+    fn decrypt(
         &self,
-        nonce: &[u8; NONCE_SIZE],
+        nonce: &Self::Nonce,
         aad: &[u8],
         data: &mut [u8],
-        tag: &[u8; TAG],
+        tag: &Self::Tag,
     ) -> Result<(), Error> {
         let mut state = self.decryptor(nonce)?;
         state.aad(aad)?;
@@ -111,6 +113,18 @@ impl ChaCha20Poly1305 {
                 Err(e)
             }
         }
+    }
+}
+
+impl ChaCha20Poly1305 {
+    /// Takes the key.
+    ///
+    /// Fails only if the processor cannot run any of the keystream
+    /// implementations, which no processor this builds for does.
+    pub fn try_new(key: &Key<[u8; KEY_SIZE]>) -> Result<Self, Error> {
+        Ok(ChaCha20Poly1305 {
+            cipher: ChaCha20::try_new(key.as_ref())?,
+        })
     }
 
     /// Starts encrypting a message that arrives in pieces.
@@ -330,7 +344,7 @@ mod tests {
     const TAG_HEX: &str = "1ae10b594f09e26a7e902ecbd0600691";
 
     fn aead() -> ChaCha20Poly1305 {
-        ChaCha20Poly1305::try_new(&hex::<32>(KEY)).unwrap()
+        ChaCha20Poly1305::try_new(&Key::from(hex::<32>(KEY))).unwrap()
     }
 
     #[test]
@@ -442,7 +456,7 @@ mod tests {
                 Ok(())
             }
         }
-        let aead = ChaCha20Poly1305::try_new(&[0x5a; 32]).unwrap();
+        let aead = ChaCha20Poly1305::try_new(&Key::from([0x5au8; 32])).unwrap();
         let mut buffer = Buffer([0; 128], 0);
         core::fmt::write(&mut buffer, format_args!("{aead:?}")).unwrap();
         let text = core::str::from_utf8(&buffer.0[..buffer.1]).unwrap();

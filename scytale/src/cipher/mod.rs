@@ -2,12 +2,15 @@
 //!
 //! A block cipher, [`aes`], and the modes of operation that turn it
 //! into something a message can be encrypted with, under [`mode`];
-//! and a stream cipher, [`chacha20`], with the authenticated mode
-//! built on it there too. The block cipher modes are written against
-//! the [`BlockCipher`] trait, so each works with any cipher. The
-//! block and the key are types, so a cipher of unknown make can
-//! still be an object:
+//! and a stream cipher, [`chacha20`]. The block cipher modes are
+//! written against the [`BlockCipher`] trait, so each works with any
+//! cipher. The block and the key are types, so a cipher of unknown
+//! make can still be an object:
 //! `&dyn BlockCipher<Block = [u8; 16], Key = [u8; 16]>`.
+//!
+//! Nothing here authenticates a message. The constructions that do
+//! are in [`aead`](crate::aead), and they are what most callers
+//! want.
 //!
 //! # Example
 //!
@@ -36,17 +39,37 @@
 //!
 //! A raw block cipher is the wrong tool for a message: it encrypts
 //! equal blocks to equal blocks, and it authenticates nothing. Reach
-//! for a mode, and unless there is a reason not to, an authenticated
-//! one: see [`mode`] for which.
+//! for [`aead`](crate::aead), and come to [`mode`] for the cases it
+//! does not cover.
+//!
+//! Whatever encrypts the message, most of these want an
+//! initialisation vector that is *unique* rather than random, which
+//! is a stronger requirement than it sounds. [`Nonces`] counts them,
+//! so a repeat is impossible rather than merely unlikely. It sits
+//! here rather than under [`mode`] because both a mode and a bare
+//! stream cipher take one.
 
 pub mod aes;
 pub mod chacha20;
 pub mod mode;
+pub mod nonce;
+
+pub use nonce::Nonces;
 
 use core::any::TypeId;
 use core::slice::from_mut;
 
 use crate::{BlockType, KeyType};
+
+/// The 128-bit block AES works in, and with it every construction
+/// defined over a 128-bit cipher: XTS, key wrapping, and the
+/// format-preserving modes.
+///
+/// Most code here takes the block from the cipher's own `Block` type
+/// and needs no constant. This is for the constructions whose
+/// standards fix the width instead, so that a cipher of another block
+/// size is a compile error rather than a silent miscalculation.
+pub(crate) const BLOCK: usize = 16;
 
 /// A block cipher: a keyed permutation of fixed-size blocks.
 ///

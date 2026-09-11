@@ -1,8 +1,8 @@
 //! Portable cryptographic primitives.
 //!
-//! Symmetric ciphers and their modes, hashes, message
-//! authentication, key derivation, key agreement, public-key
-//! encryption, signatures and random numbers,
+//! Symmetric ciphers, authenticated encryption and the modes over
+//! them, hashes, message authentication, key derivation, key
+//! agreement, public-key encryption, signatures and random numbers,
 //! written to run anywhere Rust
 //! does: `no_std`, no allocator, no cargo features to get wrong. Where
 //! the processor has instructions for a primitive they are used,
@@ -10,6 +10,7 @@
 //!
 //! | Module | What is in it |
 //! | --- | --- |
+//! | [`aead`] | GCM, GCM-SIV, XPN and ChaCha20-Poly1305 |
 //! | [`cipher`] | AES, ChaCha20, and the modes built on them |
 //! | [`hash`] | SHA-2, SHA-3, SHAKE, and SHA-1 for old protocols |
 //! | [`mac`] | HMAC over any hash, and Poly1305 |
@@ -30,7 +31,8 @@
 //! use scytale::mac::hmac::{Hmac, HmacSha256};
 //! use scytale::KeyType;
 //! use scytale::cipher::aes::Aes128;
-//! use scytale::cipher::mode::{Gcm, Nonces};
+//! use scytale::cipher::Nonces;
+//! use scytale::aead::{Aead, Gcm};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! // A session key, and a key for each job derived from it,
@@ -44,7 +46,8 @@
 //!
 //! // Authenticated encryption, with nonces that cannot repeat.
 //! let gcm = Gcm::<Aes128>::new(&cipher_key);
-//! let mut nonces = Nonces::new(7, 0);
+//! let mut nonces =
+//!     Nonces::<[u8; 12]>::try_new(&7u64.to_be_bytes(), 0)?;
 //! let nonce = nonces.take()?;
 //! let mut message = *b"attack at dawn";
 //! let mut tag = [0u8; 16];
@@ -122,6 +125,7 @@ mod acvp;
 #[cfg(test)]
 mod bench;
 
+pub mod aead;
 mod align;
 mod arch;
 pub mod cipher;
