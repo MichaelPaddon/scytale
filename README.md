@@ -63,7 +63,7 @@ key formats other software stores keys in.
 
 It is tested to the same extent. The standards' own vectors are built
 into the unit tests, and on top of them run the NIST ACVP suites and
-the Project Wycheproof files, close to sixty thousand vector cases
+the Project Wycheproof files, more than seventy thousand vector cases
 before the Monte Carlo suites add several million chained calls of
 their own. Every implementation of a primitive is put through the
 whole vector set for it, at every key size, and the whole suite runs
@@ -497,10 +497,10 @@ use, and then dispatches with a single predictable branch.
 Which implementation that is is not a choice a caller makes. The
 implementations are private: hardware instructions where the
 processor has them, otherwise constant-time portable code. There is a
-table-driven AES in the crate that is about twice the speed of the
-constant-time portable one, and it is never chosen, because it
-indexes tables with bytes derived from the key and so leaks the key
-to an attacker who can measure cache timing. A way for an application
+table-driven AES in the crate that is about seventy percent faster
+than the constant-time portable one, and it is never chosen, because
+it indexes tables with bytes derived from the key and so leaks the
+key to an attacker who can measure cache timing. A way for an application
 that runs nothing untrusted to ask for it by name is still to be
 designed.
 
@@ -529,167 +529,41 @@ dropped, as it always was, and the generator wipes its state.
 
 ## Speed
 
-Measured on a 13th Gen Intel Core i7-1355U, one thread, on mains
-power. The benchmark ships with the library, so these are numbers you
-can reproduce: `scripts/bench`. Every figure below is a
-row it prints, and it prints rather more than are quoted here. On a
-laptop running on battery, expect about half of each of them.
+Measured on a 13th Gen Intel Core i7-1355U, one thread pinned to a
+performance core, on mains power. Over 16 KB buffers, in bytes a
+second counted in millions and thousands of millions:
 
-### The ciphers
-
-AES itself, over 8 KB buffers:
-
-| Implementation | AES-128 | AES-256 |
+| What | Implementation | Speed |
 | --- | --- | --- |
-| `vaes` | 28 GB/s | 20 GB/s |
-| `aesni` | 14 GB/s | 10 GB/s |
-| `ttable` | 490 MB/s | 360 MB/s |
-| `bitsliced` | 280 MB/s | 210 MB/s |
-
-Short messages are not an afterthought: a buffer of eight blocks or
-fewer costs 8 to 11 ns per call with AES-NI.
-
-ChaCha20 needs no cipher instructions, only a vector unit: 2.8 GB/s
-with AVX2 and 790 MB/s portable. On a processor with no AES hardware
-it is several times faster than any AES here, which is what it is
-for.
-
-### The modes and the AEADs
-
-AES-128 over 16 KB buffers, on the fastest implementation this
-processor has. Each is measured on every implementation it is written
-for, named; these are the best of them. Rates are bytes, counted in
-millions and thousands of millions:
-
-| Construction | Speed |
-| --- | --- |
-| CBC encrypt | 1.9 GB/s |
-| CBC decrypt | 15 GB/s |
-| CFB1 | 7.4 MB/s |
-| CFB8 | 83 MB/s |
-| CFB128 | 1.6 GB/s |
-| OFB | 2.0 GB/s |
-| CTR | 12 GB/s |
-| GMAC | 11 GB/s |
-| GCM | 5.9 GB/s |
-| GCM-SIV | 1.3 GB/s |
-| XPN | 5.5 GB/s |
-| XTS | 8.4 GB/s |
-| KW, KWP | 116 MB/s |
-| ChaCha20-Poly1305 | 1.4 GB/s |
-
-CBC encryption, OFB and the CFB modes are serial by definition: each
-block waits for the one before it, so they run at the speed of single
-blocks and no amount of interleaving helps. CFB1 is a block operation
-per bit, which is the two orders of magnitude between it and CFB128.
-Key wrapping passes over its input six times, by construction, and is
-meant for keys rather than for messages.
-
-### Hashes and message authentication
-
-Over 16 KB buffers:
-
-| Function | Implementation | Speed |
-| --- | --- | --- |
-| SHA-1 | `portable` | 560 MB/s |
+| AES-128-GCM encrypt | `vaes` | 13.9 GB/s |
+| AES-128-GCM encrypt | `aesni` | 8.5 GB/s |
+| AES-128-GCM encrypt | `bitsliced` | 276 MB/s |
 | SHA-256 | `shani` | 2.4 GB/s |
-| SHA-256 | `portable` | 330 MB/s |
-| SHA-512 | `portable` | 520 MB/s |
-| SHA3-256 | `portable` | 540 MB/s |
-| SHA3-512 | `portable` | 270 MB/s |
-| SHAKE128 | `portable` | 640 MB/s |
-| SHAKE256 | `portable` | 520 MB/s |
-| HMAC-SHA-256 | `shani` | 2.3 GB/s |
-| HMAC-SHA-512 | `portable` | 540 MB/s |
-| Poly1305 | `portable` | 3.0 GB/s |
-| CTR_DRBG | `vaes` | 930 MB/s |
+| SHA-256 | `portable` | 341 MB/s |
+| ChaCha20-Poly1305 encrypt | `avx2` | 2.1 GB/s |
 
-SHA-224, SHA-384 and the SHA-512/t pair run at the speed of the
-function whose code they share.
+ChaCha20-Poly1305 is the one to reach for where the processor has no
+AES instructions: there it is several times faster than any AES here,
+which is what it is for.
 
-### Key derivation
+Every other construction, every implementation of each, and the key
+agreement, signature and post-quantum operations are measured too.
+Complete runs ship with the crate, in `benchmarks/`, one file per
+machine, each recording the date and the commit it measured:
+[i7-1355u][bench] is this one. The benchmark ships with the library
+too, so these are numbers you can reproduce:
 
-One derivation of a 32-byte key:
+```sh
+taskset -c 0 scripts/bench
+```
 
-| Function | Time |
-| --- | --- |
-| HKDF-SHA-256 | 0.6 us |
-| HKDF-SHA-512 | 2.6 us |
-| PBKDF2-HMAC-SHA-256, 100,000 iterations | 13 ms |
-| PBKDF2-HMAC-SHA-512, 100,000 iterations | 63 ms |
+The pin matters on a hybrid processor: unpinned, a row records which
+core the scheduler picked rather than how fast the code is. The
+benchmark has only been run on this x86-64 machine, so there are no
+timings for the ARM and RISC-V implementations. On a laptop running
+on battery, expect about half of each figure.
 
-PBKDF2 is slow on purpose, and its cost is the iteration count and
-nothing else. The two figures are what a login path costs at a round
-number of iterations; choose the count from the time you are willing
-to spend, not from this table.
-
-### Key agreement, signatures and encryption
-
-One operation, in microseconds:
-
-| Operation | Time |
-| --- | --- |
-| X25519 key generation | 29 us |
-| X25519 agreement | 29 us |
-| ECDH P-256 key generation | 40 us |
-| ECDH P-256 agreement | 97 us |
-| ECDH P-384 key generation | 107 us |
-| ECDH P-384 agreement | 290 us |
-| Ed25519 key generation | 57 us |
-| Ed25519 sign | 115 us |
-| Ed25519 verify | 113 us |
-| ECDSA P-256 sign | 50 us |
-| ECDSA P-256 verify | 135 us |
-| ECDSA P-384 sign | 140 us |
-| ECDSA P-384 verify | 393 us |
-| RSA-2048 PSS sign | 910 us |
-| RSA-2048 PSS verify | 158 us |
-| RSA-2048 OAEP encrypt | 159 us |
-| RSA-2048 OAEP decrypt | 915 us |
-
-Signing and key generation on the prime curves multiply the base
-point, which is known in advance and has a table of its multiples
-built in; agreement and verification multiply a point that arrives at
-run time and cannot. That is the whole distance between the 50 us
-ECDSA signature and the 135 us verification of it, and it is why
-Ed25519, which has no such table here yet, signs more slowly than
-P-256 while verifying faster.
-
-### Post-quantum
-
-| Parameter set | Key generation | Encapsulate | Decapsulate |
-| --- | --- | --- | --- |
-| ML-KEM-512 | 23 us | 25 us | 32 us |
-| ML-KEM-768 | 40 us | 40 us | 49 us |
-| ML-KEM-1024 | 60 us | 60 us | 72 us |
-
-| Parameter set | Key generation | Sign | Verify |
-| --- | --- | --- | --- |
-| ML-DSA-44 | 65 us | 607 us | 65 us |
-| ML-DSA-65 | 126 us | 385 us | 105 us |
-| ML-DSA-87 | 182 us | 332 us | 178 us |
-| SLH-DSA-SHA2-128s | 33 ms | 252 ms | 246 us |
-| SLH-DSA-SHA2-128f | 503 us | 11.7 ms | 699 us |
-
-ML-DSA signing repeats until a candidate passes, so its cost depends
-on the message and not only on the parameter set: ML-DSA-44 being the
-slowest to sign here is that, not a mistake. SLH-DSA has twelve
-parameter sets; the two shown are the small and the fast end of the
-128-bit ones, and they are the whole trade the family offers, a
-signature small and slow or large and quick.
-
-### Format-preserving encryption
-
-| Mode | Time |
-| --- | --- |
-| FF1, sixteen digits base 10 | 1.2 ms |
-| FF3-1, sixteen digits base 10 | 362 us |
-
-Both are ten rounds of a Feistel network over the caller's radix, and
-FF1 does more work per round.
-
-The benchmark has only been run on this x86-64 machine, so there are
-no timings for the ARM and RISC-V implementations.
+[bench]: https://github.com/MichaelPaddon/scytale/blob/main/scytale/benchmarks/i7-1355u.md
 
 ## Testing
 
