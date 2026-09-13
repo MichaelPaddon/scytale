@@ -22,18 +22,14 @@ use crate::pke::rsa::PublicKey as PkePublicKey;
 use crate::sig::rsa::PrivateKey;
 use serde_json::Value;
 
-/// One signature-primitive case at a fixed width. Returns whether
-/// the case was one that had to be refused.
-fn signature_case<const L: usize, const B: usize, const H: usize>(
-    group: &Value,
-    t: &Value,
-    tag: &str,
-) -> bool {
+/// One signature-primitive case. Returns whether the case was one
+/// that had to be refused.
+fn signature_case(group: &Value, t: &Value, tag: &str) -> bool {
     let n = hex(&t["n"]);
     let e = hex(&t["e"]);
     let key = match group["keyMode"].as_str().expect("keyMode") {
-        "standard" => PrivateKey::<L, B, H>::try_new(&n, &e, &hex(&t["d"])),
-        "crt" => PrivateKey::<L, B, H>::try_new_crt(
+        "standard" => PrivateKey::try_new(&n, &e, &hex(&t["d"])),
+        "crt" => PrivateKey::try_new_crt(
             &n,
             &e,
             &hex(&t["d"]),
@@ -46,17 +42,20 @@ fn signature_case<const L: usize, const B: usize, const H: usize>(
         other => panic!("unknown keyMode {other}"),
     }
     .expect("private key");
+    assert_eq!(key.bits() as u64, group["modulo"], "{tag} modulus length");
 
-    let message: [u8; B] = hex(&t["message"]).try_into().expect("message");
+    let message = hex(&t["message"]);
+    let len = key.modulus_len();
     match t["testPassed"].as_bool().expect("testPassed") {
         true => {
-            let signature = key.sign_primitive(&message).expect("sign");
-            assert_eq!(signature[..], hex(&t["signature"])[..], "{tag}");
+            let mut signature = vec![0u8; len];
+            key.sign_primitive(&message, &mut signature).expect("sign");
+            assert_eq!(signature, hex(&t["signature"]), "{tag}");
             // The public direction must undo it, which also proves
             // the answer is a representative and not a stray value.
-            let back = key
-                .public_key()
-                .verify_primitive(&signature)
+            let mut back = vec![0u8; len];
+            key.public_key()
+                .verify_primitive(&signature, &mut back)
                 .expect("verify");
             assert_eq!(back, message, "{tag} round trip");
             false
@@ -66,8 +65,9 @@ fn signature_case<const L: usize, const B: usize, const H: usize>(
         // which the primitive is what refuses.
         false => {
             assert!(t["signature"].is_null(), "{tag} has a signature");
+            let mut signature = vec![0u8; len];
             assert_eq!(
-                key.sign_primitive(&message),
+                key.sign_primitive(&message, &mut signature),
                 Err(Error::MessageTooLong),
                 "{tag}"
             );
@@ -95,12 +95,7 @@ pub fn run_signature_primitive() {
         let is_crt = group["keyMode"] == "crt";
         for t in group["tests"].as_array().expect("tests") {
             let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
-            let out_of_range = match group["modulo"].as_u64().expect("modulo") {
-                2048 => signature_case::<32, 256, 16>(group, t, &tag),
-                3072 => signature_case::<48, 384, 24>(group, t, &tag),
-                4096 => signature_case::<64, 512, 32>(group, t, &tag),
-                other => panic!("unknown modulus {other}"),
-            };
+            let out_of_range = signature_case(group, t, &tag);
             if out_of_range {
                 refused += 1;
             } else {
@@ -144,10 +139,7 @@ pub fn run_decryption_primitive() {
                 .enumerate()
             {
                 let tag = format!("tcId {} entry {i}", t["tcId"]);
-                let built = PkePublicKey::<32, 256>::try_new(
-                    &hex(&r["n"]),
-                    &hex(&r["e"]),
-                );
+                let built = PkePublicKey::try_new(&hex(&r["n"]), &hex(&r["e"]));
                 let passed = r["testPassed"].as_bool().expect("testPassed");
                 // A failing entry can be bad in either of two ways,
                 // and the crate refuses them at different points: an
@@ -159,30 +151,33 @@ pub fn run_decryption_primitive() {
                     refused += 1;
                     continue;
                 };
+                let len = key.modulus_len();
+                assert_eq!(len, 256, "{tag} modulus length");
                 if passed {
                     // A representative may be written with a
                     // leading zero byte, so it is right-aligned into
-                    // the key's width rather than converted.
+                    // the key's length rather than converted.
                     let bytes = hex(&r["plainText"]);
-                    let start = bytes.len().saturating_sub(256);
+                    let start = bytes.len().saturating_sub(len);
                     let tail = &bytes[start..];
                     assert!(
                         bytes[..start].iter().all(|b| *b == 0),
                         "{tag} wider than the key"
                     );
-                    let mut pt = [0u8; 256];
-                    pt[256 - tail.len()..].copy_from_slice(tail);
-                    let ct = key.encrypt_primitive(&pt).expect("apply");
-                    assert_eq!(ct[..], hex(&r["cipherText"])[..], "{tag}");
+                    let mut pt = vec![0u8; len];
+                    pt[len - tail.len()..].copy_from_slice(tail);
+                    let mut ct = vec![0u8; len];
+                    key.encrypt_primitive(&pt, &mut ct).expect("apply");
+                    assert_eq!(ct, hex(&r["cipherText"]), "{tag}");
                     verified += 1;
                 } else {
                     // No private exponent is given, so the refusal is
                     // checked against the same modulus comparison the
                     // private primitive makes.
-                    let ct: [u8; 256] =
-                        hex(&r["cipherText"]).try_into().expect("ciphertext");
+                    let ct = hex(&r["cipherText"]);
+                    let mut out = vec![0u8; len];
                     assert_eq!(
-                        key.encrypt_primitive(&ct),
+                        key.encrypt_primitive(&ct, &mut out),
                         Err(Error::MessageTooLong),
                         "{tag}"
                     );

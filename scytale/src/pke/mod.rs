@@ -11,12 +11,12 @@
 //!
 //! ```
 //! use scytale::hash::sha2::Sha256;
-//! use scytale::pke::rsa::Rsa2048PrivateKey;
+//! use scytale::pke::rsa::PrivateKey;
 //! use scytale::random::CtrDrbg;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let mut rng = CtrDrbg::from_system()?;
-//! let key = Rsa2048PrivateKey::generate(&mut rng)?;
+//! let key = PrivateKey::generate(&mut rng, 2048)?;
 //!
 //! // The sender encrypts a session key to the public half.
 //! let session_key = [0x42u8; 32];
@@ -26,7 +26,7 @@
 //!
 //! // The key holder recovers it.
 //! let mut out = [0u8; 256];
-//! let n = key.decrypt_oaep::<Sha256>(b"", &sealed, &mut out)?;
+//! let n = key.decrypt_oaep::<Sha256>(b"", sealed.as_ref(), &mut out)?;
 //! assert_eq!(&out[..n], &session_key);
 //! # Ok(())
 //! # }

@@ -1149,10 +1149,11 @@ fn sig_ops(options: &Options) -> bool {
     ) else {
         return false;
     };
-    let Ok(rsa_key) = rsa::Rsa2048PrivateKey::generate(&mut build) else {
+    let Ok(rsa_key) = rsa::PrivateKey::generate(&mut build, 2048) else {
         return false;
     };
-    let Ok(rsa_signature) = rsa_key.sign_pss::<sha2::Sha256>(MESSAGE, &KEY256)
+    let Ok(rsa_signature) =
+        rsa_key.sign_pss_with_salt::<sha2::Sha256>(MESSAGE, &KEY256)
     else {
         return false;
     };
@@ -1221,18 +1222,25 @@ fn sig_ops(options: &Options) -> bool {
         (
             "rsa-2048-pss-sign",
             Box::new(|| {
-                black_box(rsa_key.sign_pss::<sha2::Sha256>(MESSAGE, &KEY256))
-                    .ok();
+                black_box(
+                    rsa_key
+                        .sign_pss_with_salt::<sha2::Sha256>(MESSAGE, &KEY256),
+                )
+                .ok();
             }),
         ),
         (
             "rsa-2048-pss-verify",
             Box::new(|| {
-                black_box(rsa_key.public_key().verify_pss::<sha2::Sha256>(
-                    MESSAGE,
-                    &rsa_signature,
-                    KEY256.len(),
-                ))
+                black_box(
+                    rsa_key
+                        .public_key()
+                        .verify_pss_with_salt_len::<sha2::Sha256>(
+                            MESSAGE,
+                            rsa_signature.as_ref(),
+                            KEY256.len(),
+                        ),
+                )
                 .ok();
             }),
         ),
@@ -1499,7 +1507,7 @@ fn pke_ops(options: &Options) -> bool {
     let (Ok(mut build), Ok(mut rng)) = (seeded(), seeded()) else {
         return false;
     };
-    let Ok(key) = oaep::Rsa2048PrivateKey::generate(&mut build) else {
+    let Ok(key) = oaep::PrivateKey::generate(&mut build, 2048) else {
         return false;
     };
     let Ok(ciphertext) = key.public_key().encrypt_oaep::<sha2::Sha256, _>(
@@ -1527,7 +1535,7 @@ fn pke_ops(options: &Options) -> bool {
                 let mut out = [0u8; 256];
                 black_box(key.decrypt_oaep::<sha2::Sha256>(
                     &[],
-                    &ciphertext,
+                    ciphertext.as_ref(),
                     &mut out,
                 ))
                 .ok();

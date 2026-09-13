@@ -46,26 +46,23 @@ macro_rules! dispatch_hash {
     };
 }
 
-/// One verification, generic over hash and width.
-fn verify_one<H, const L: usize, const B: usize>(
+/// One verification, generic over the hash; the key's length is
+/// whatever the group's modulus is.
+fn verify_one<H: crate::sig::rsa::DigestInfo>(
     group: &Value,
     t: &Value,
-) -> bool
-where
-    H: crate::sig::rsa::DigestInfo,
-{
+) -> bool {
     let n = hex(&group["n"]);
-    let key =
-        PublicKey::<L, B>::try_new(&n, &hex(&group["e"])).expect("public key");
+    let key = PublicKey::try_new(&n, &hex(&group["e"])).expect("public key");
+    assert_eq!(key.bits() as u64, group["modulo"], "modulus length");
     let message = hex(&t["message"]);
-    let Ok(sig) = <[u8; B]>::try_from(hex(&t["signature"])) else {
-        return false;
-    };
+    let sig = hex(&t["signature"]);
     match group["sigType"].as_str().expect("sigType") {
         "pkcs1v1.5" => key.verify_pkcs1::<H>(&message, &sig).is_ok(),
         "pss" => {
             let salt = group["saltLen"].as_u64().expect("saltLen") as usize;
-            key.verify_pss::<H>(&message, &sig, salt).is_ok()
+            key.verify_pss_with_salt_len::<H>(&message, &sig, salt)
+                .is_ok()
         }
         other => panic!("unknown sigType {other}"),
     }
@@ -139,13 +136,7 @@ fn run(
         }
         for t in group["tests"].as_array().expect("tests") {
             let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
-            let accepted = match group["modulo"].as_u64().expect("modulo") {
-                1024 => dispatch_hash!(alg, verify_one_1024, group, t),
-                2048 => dispatch_hash!(alg, verify_one_2048, group, t),
-                3072 => dispatch_hash!(alg, verify_one_3072, group, t),
-                4096 => dispatch_hash!(alg, verify_one_4096, group, t),
-                other => panic!("unknown modulus {other}"),
-            };
+            let accepted = dispatch_hash!(alg, verify_one, group, t);
             let Some(accepted) = accepted else {
                 continue; // a SHAKE group
             };
@@ -165,32 +156,4 @@ fn run(
     if has_verdicts {
         assert!(rejections >= 10, "only {rejections} rejections");
     }
-}
-
-fn verify_one_1024<H: crate::sig::rsa::DigestInfo>(
-    group: &Value,
-    t: &Value,
-) -> bool {
-    verify_one::<H, 16, 128>(group, t)
-}
-
-fn verify_one_2048<H: crate::sig::rsa::DigestInfo>(
-    group: &Value,
-    t: &Value,
-) -> bool {
-    verify_one::<H, 32, 256>(group, t)
-}
-
-fn verify_one_3072<H: crate::sig::rsa::DigestInfo>(
-    group: &Value,
-    t: &Value,
-) -> bool {
-    verify_one::<H, 48, 384>(group, t)
-}
-
-fn verify_one_4096<H: crate::sig::rsa::DigestInfo>(
-    group: &Value,
-    t: &Value,
-) -> bool {
-    verify_one::<H, 64, 512>(group, t)
 }

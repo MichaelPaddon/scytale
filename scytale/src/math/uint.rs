@@ -1,9 +1,11 @@
 //! An unsigned integer of a fixed number of 64-bit limbs.
 //!
 //! The value type under the Montgomery arithmetic in
-//! [`montgomery`](super::montgomery), and so under RSA. The limb
-//! count is a const parameter: each user of the arithmetic names the
-//! width it needs, and nothing here imposes a ceiling.
+//! [`montgomery`](super::montgomery), and so under the prime curves.
+//! The limb count is a const parameter: each user of the arithmetic
+//! names the width it needs, and nothing here imposes a ceiling. RSA,
+//! whose width is a value, has its own arithmetic in
+//! [`limbs`](super::limbs).
 //!
 //! # Constant time
 //!
@@ -123,6 +125,23 @@ impl<const LIMBS: usize> Uint<LIMBS> {
         self.add_mod(self, n)
     }
 
+    /// The value shifted right by `bits`, which must be less than
+    /// the width.
+    pub(crate) fn shr(&self, bits: usize) -> Self {
+        debug_assert!(bits < 64 * LIMBS);
+        let words = bits / 64;
+        let within = bits % 64;
+        let mut out = [0u64; LIMBS];
+        for (i, o) in out.iter_mut().take(LIMBS - words).enumerate() {
+            let mut limb = self.0[i + words] >> within;
+            if within > 0 && i + words + 1 < LIMBS {
+                limb |= self.0[i + words + 1] << (64 - within);
+            }
+            *o = limb;
+        }
+        Uint(out)
+    }
+
     /// `self + other mod n`, for values already below `n`.
     pub(crate) fn add_mod(&self, other: &Self, n: &Self) -> Self {
         let (sum, carry) = self.add_carry(other);
@@ -144,144 +163,12 @@ impl<const LIMBS: usize> Uint<LIMBS> {
         out
     }
 
-    /// The full double-width product; `OUT` must be twice `LIMBS`.
-    pub(crate) fn mul_wide<const OUT: usize>(&self, other: &Self) -> Uint<OUT> {
-        const { assert!(OUT == 2 * LIMBS, "OUT must be 2 * LIMBS") };
-        let mut out = [0u64; OUT];
-        for (i, &a) in self.0.iter().enumerate() {
-            let mut carry = 0u64;
-            for (j, &b) in other.0.iter().enumerate() {
-                let v = u128::from(out[i + j])
-                    + u128::from(a) * u128::from(b)
-                    + u128::from(carry);
-                out[i + j] = v as u64;
-                carry = (v >> 64) as u64;
-            }
-            // Nothing has written this word yet, so the carry lands
-            // whole.
-            out[i + LIMBS] = carry;
-        }
-        Uint(out)
-    }
-
-    /// The value in a wider type; `OUT` must not be narrower.
-    pub(crate) fn widen<const OUT: usize>(&self) -> Uint<OUT> {
-        const { assert!(OUT >= LIMBS, "OUT must not be narrower") };
-        let mut out = [0u64; OUT];
-        out[..LIMBS].copy_from_slice(&self.0);
-        Uint(out)
-    }
-
     /// A value from borrowed limbs, which must fit.
     pub(crate) fn from_limbs(limbs: &[u64]) -> Self {
         debug_assert!(limbs.len() <= LIMBS);
         let mut out = [0u64; LIMBS];
         out[..limbs.len()].copy_from_slice(limbs);
         Uint(out)
-    }
-
-    /// The number of bits needed to write the value; zero for zero.
-    /// Not constant time: used where the value's size is no secret,
-    /// or where only the answer's rough size escapes.
-    pub(crate) fn bit_length(&self) -> usize {
-        for (i, limb) in self.0.iter().enumerate().rev() {
-            if *limb != 0 {
-                return 64 * i + (64 - limb.leading_zeros() as usize);
-            }
-        }
-        0
-    }
-
-    /// The number of zero bits below the lowest one bit; the full
-    /// width for zero. Not constant time, for the same reasons.
-    pub(crate) fn trailing_zeros(&self) -> usize {
-        let mut count = 0;
-        for limb in self.0 {
-            if limb == 0 {
-                count += 64;
-            } else {
-                return count + limb.trailing_zeros() as usize;
-            }
-        }
-        count
-    }
-
-    /// The value shifted right by `bits`, which must be less than
-    /// the width.
-    pub(crate) fn shr(&self, bits: usize) -> Self {
-        debug_assert!(bits < 64 * LIMBS);
-        let words = bits / 64;
-        let within = bits % 64;
-        let mut out = [0u64; LIMBS];
-        for (i, o) in out.iter_mut().take(LIMBS - words).enumerate() {
-            let mut limb = self.0[i + words] >> within;
-            if within > 0 && i + words + 1 < LIMBS {
-                limb |= self.0[i + words + 1] << (64 - within);
-            }
-            *o = limb;
-        }
-        Uint(out)
-    }
-
-    /// `self * w`, as the in-width limbs and the word that overflows
-    /// the top.
-    pub(crate) fn mul_word(&self, w: u64) -> (Self, u64) {
-        let mut out = [0u64; LIMBS];
-        let mut carry = 0u64;
-        for (o, limb) in out.iter_mut().zip(self.0) {
-            let v = u128::from(limb) * u128::from(w) + u128::from(carry);
-            *o = v as u64;
-            carry = (v >> 64) as u64;
-        }
-        (Uint(out), carry)
-    }
-
-    /// `(top * 2^width + self) / w` and the remainder, by schoolbook
-    /// long division; the quotient must fit the width.
-    pub(crate) fn div_rem_word(&self, top: u64, w: u64) -> (Self, u64) {
-        debug_assert!(w != 0 && top < w);
-        let mut out = [0u64; LIMBS];
-        let mut rem = u128::from(top);
-        for i in (0..LIMBS).rev() {
-            let cur = (rem << 64) | u128::from(self.0[i]);
-            out[i] = (cur / u128::from(w)) as u64;
-            rem = cur % u128::from(w);
-        }
-        (Uint(out), rem as u64)
-    }
-
-    /// The remainder modulo a single word.
-    pub(crate) fn rem_word(&self, w: u64) -> u64 {
-        debug_assert!(w != 0);
-        let mut rem = 0u128;
-        for limb in self.0.iter().rev() {
-            rem = ((rem << 64) | u128::from(*limb)) % u128::from(w);
-        }
-        rem as u64
-    }
-
-    /// The remainder modulo `m`, which may be narrower and need not
-    /// be odd: one shift-and-subtract per bit, every bit taking the
-    /// same operations, so a secret value stays out of the timing.
-    pub(crate) fn rem_wide<const OUT: usize>(
-        &self,
-        m: &Uint<OUT>,
-    ) -> Uint<OUT> {
-        debug_assert!(!m.is_zero());
-        let mut r = Uint::<OUT>::ZERO;
-        for i in (0..64 * LIMBS).rev() {
-            let bit = (self.0[i / 64] >> (i % 64)) & 1;
-            // r = 2r + bit, then one subtraction of m settles it,
-            // because r was below m.
-            let (doubled, carry) = r.add_carry(&r);
-            let mut with_bit = doubled;
-            with_bit.0[0] |= bit;
-            let (reduced, borrow) = with_bit.sub_borrow(m);
-            let take = carry | (1 - borrow);
-            r = with_bit;
-            r.cmov(&reduced, take);
-        }
-        r
     }
 }
 
@@ -322,46 +209,10 @@ mod tests {
     }
 
     #[test]
-    fn sizes_and_shifts() {
+    fn shifts_across_limbs() {
         let x = Uint::<2>([0, 0b1100]);
-        assert_eq!(x.bit_length(), 68);
-        assert_eq!(x.trailing_zeros(), 66);
         assert_eq!(x.shr(66).0, [0b11, 0]);
         assert_eq!(x.shr(2).0, [0, 0b11]);
-        assert_eq!(Uint::<2>::ZERO.bit_length(), 0);
-        assert_eq!(Uint::<2>::ZERO.trailing_zeros(), 128);
-    }
-
-    #[test]
-    fn word_multiply_and_divide_invert() {
-        let x = Uint::<2>([0x123456789abcdef0, 0xfedcba9876543210]);
-        let (product, top) = x.mul_word(0xdeadbeef);
-        let (back, rem) = product.div_rem_word(top, 0xdeadbeef);
-        assert_eq!(back.0, x.0);
-        assert_eq!(rem, 0);
-        // And a remainder that is genuinely there.
-        assert_eq!(Uint::<1>([1000]).rem_word(7), 1000 % 7);
-        assert_eq!(x.rem_word(65537), {
-            // Independently: fold bytes via modular arithmetic.
-            let mut r = 0u128;
-            for limb in x.0.iter().rev() {
-                r = ((r << 64) | u128::from(*limb)) % 65537;
-            }
-            r as u64
-        });
-    }
-
-    #[test]
-    fn wide_remainder_matches_narrow_arithmetic() {
-        // A 256-bit value modulo a 64-bit modulus, against the
-        // word-sized path.
-        let x = Uint::<4>([0x1111, 0x2222, 0x3333, 0x4444]);
-        let m = 0x1234567891u64;
-        assert_eq!(x.rem_wide::<1>(&Uint([m])).0, [x.rem_word(m)]);
-        // An even modulus, which the Montgomery arithmetic cannot
-        // take, works here.
-        let m = 0x100000006u64;
-        assert_eq!(x.rem_wide::<1>(&Uint([m])).0, [x.rem_word(m)]);
     }
 
     #[test]

@@ -6,12 +6,15 @@
 //! Curve25519, shared by X25519 and Ed25519. [`uint`] is an unsigned
 //! integer of any fixed width, and [`montgomery`] the multiplication
 //! and exponentiation modulo an odd number built on it, which is the
+//! arithmetic under the prime curves. [`limbs`] is the same
+//! arithmetic over a length known only at run time, which is the
 //! arithmetic under RSA. [`rsa`] is the key machinery itself,
 //! shared by the RSA signature and encryption schemes, and [`ec`]
 //! the same for the NIST prime curves, shared by ECDH and ECDSA.
 
 pub(crate) mod ec;
 pub(crate) mod fe25519;
+pub(crate) mod limbs;
 pub(crate) mod montgomery;
 pub(crate) mod natural;
 pub(crate) mod rsa;

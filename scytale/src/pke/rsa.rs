@@ -23,13 +23,20 @@
 //! key should do one or the other: a key that both signs and
 //! decrypts hands an attacker two oracles against the same secret.
 //!
-//! The width of a key is part of its type: [`Rsa2048PrivateKey`]
-//! holds a 2048-bit modulus, and the general [`PrivateKey`] takes
-//! the limb and byte counts for any other width, with no ceiling.
-//! Keys are imported from their integer parts, or generated fresh by
-//! [`PrivateKey::generate`]; the accessors on both key types hand
-//! the parts back for storage, and [`der_bytes`](PrivateKey::der_bytes)
-//! and [`pem_bytes`](PrivateKey::pem_bytes) write the key as PKCS#8,
+//! # Keys are measured in bits
+//!
+//! A key's length is a value, not a type: [`PrivateKey::generate`]
+//! takes the number of bits, any multiple of eight from [`MIN_BITS`]
+//! to [`MAX_BITS`], and an imported key is whatever length its
+//! modulus is. [`bits`](PublicKey::bits) says which, and
+//! [`modulus_len`](PublicKey::modulus_len) is the same in bytes,
+//! which is the length of every ciphertext. A [`Ciphertext`] carries
+//! its own length, so nothing has to be sized by the caller.
+//!
+//! Keys are imported from their integer parts, or generated fresh;
+//! the accessors on both key types hand the parts back for storage,
+//! and [`der_bytes`](PrivateKey::der_bytes) and
+//! [`pem_bytes`](PrivateKey::pem_bytes) write the key as PKCS#8,
 //! which [`try_from_der`](PrivateKey::try_from_der) and
 //! [`try_from_pem`](PrivateKey::try_from_pem) read back; the public
 //! half has the same four for `SubjectPublicKeyInfo`, and both have
@@ -40,14 +47,23 @@
 //! one faulty result factors the modulus (Boneh, DeMillo and
 //! Lipton).
 //!
+//! # Memory the caller owns
+//!
+//! [`PublicKey`] and [`PrivateKey`] own their words and keep an
+//! operation's temporaries on the stack, about twenty-four
+//! kilobytes, whatever the key's length. [`PublicKeyRef`] and
+//! [`PrivateKeyRef`] are the same keys as views over a `[u64]` the
+//! caller brings, with a scratch slice handed to each operation; see
+//! the signature module, which lays this out in full.
+//!
 //! ```
 //! use scytale::hash::sha2::Sha256;
-//! use scytale::pke::rsa::Rsa2048PrivateKey;
+//! use scytale::pke::rsa::PrivateKey;
 //! use scytale::random::CtrDrbg;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! let mut rng = CtrDrbg::from_system()?;
-//! let key = Rsa2048PrivateKey::generate(&mut rng)?;
+//! let key = PrivateKey::generate(&mut rng, 2048)?;
 //!
 //! // The sender encrypts a session key to the public half.
 //! let session_key = [0x42u8; 32];
@@ -57,13 +73,14 @@
 //!
 //! // The key holder recovers it.
 //! let mut out = [0u8; 256];
-//! let n = key.decrypt_oaep::<Sha256>(b"", &sealed, &mut out)?;
+//! let n = key.decrypt_oaep::<Sha256>(b"", sealed.as_ref(), &mut out)?;
 //! assert_eq!(&out[..n], &session_key);
 //!
 //! // Stored as PKCS#8 in PEM, the way OpenSSL writes it.
 //! let mut pem = [0u8; 8 * 256];
 //! let n = key.pem_bytes(&mut pem)?;
-//! let key = Rsa2048PrivateKey::try_from_pem(&pem[..n])?;
+//! let key = PrivateKey::try_from_pem(&pem[..n])?;
+//! assert_eq!(key.bits(), 2048);
 //! # Ok(())
 //! # }
 //! ```
@@ -74,110 +91,216 @@
 //! whose reads never depend on `d` or the primes, and unpadding
 //! checks everything in one pass with one verdict: an error that
 //! says *where* decryption failed gives an attacker the message one
-//! query at a time (Manger's attack).
+//! query at a time (Manger's attack). Generation is the one
+//! operation whose time varies with its secrets: how many candidates
+//! fall to the primality tests depends on the randomness drawn.
 
-use zeroize::Zeroize;
+use core::fmt;
+
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::Error;
 use crate::Random;
 use crate::hash::Hash;
 use crate::math::rsa::{Private, Public, mgf1_xor};
-use crate::math::uint::Uint;
 
-/// An RSA encryption key of `LIMBS` 64-bit words; `BYTES` is the
-/// same width in bytes, 8 times `LIMBS`, and is the length of every
-/// ciphertext. The width aliases below fill both in.
-pub struct PublicKey<const LIMBS: usize, const BYTES: usize> {
-    raw: Public<LIMBS, BYTES>,
-}
+pub use crate::math::rsa::{
+    MAX_BITS, MIN_BITS, private_words, public_words, scratch_words,
+};
 
-/// An RSA decryption key. The public half rides along, and every
-/// private part is wiped on drop.
+/// The length of the widest ciphertext, and of the buffer behind a
+/// [`Ciphertext`].
+const MAX_LEN: usize = MAX_BITS / 8;
+
+/// Words in an owned public key: enough for the widest.
+const PUBLIC_WORDS: usize = public_words(MAX_BITS);
+
+/// Words in an owned private key: enough for the widest.
+const PRIVATE_WORDS: usize = private_words(MAX_BITS);
+
+/// Scratch an owned key keeps on the stack for an operation.
+const SCRATCH_WORDS: usize = scratch_words(MAX_BITS);
+
+/// A ciphertext, as long as the key's modulus.
 ///
-/// `HALF` is the width of one prime, half of `LIMBS`; the aliases
-/// fill it in. It is a parameter only because the language cannot
-/// yet derive it.
-pub struct PrivateKey<const LIMBS: usize, const BYTES: usize, const HALF: usize>
-{
-    public: PublicKey<LIMBS, BYTES>,
-    raw: Private<LIMBS, BYTES, HALF>,
+/// Held by value so that nothing has to be sized by the caller; the
+/// bytes are [`as_ref`](AsRef::as_ref), and go on the wire as they
+/// are.
+#[derive(Clone, Copy)]
+pub struct Ciphertext {
+    bytes: [u8; MAX_LEN],
+    len: usize,
 }
 
-/// A 2048-bit encryption key.
-pub type Rsa2048PublicKey = PublicKey<32, 256>;
-/// A 2048-bit decryption key.
-pub type Rsa2048PrivateKey = PrivateKey<32, 256, 16>;
-/// A 3072-bit encryption key.
-pub type Rsa3072PublicKey = PublicKey<48, 384>;
-/// A 3072-bit decryption key.
-pub type Rsa3072PrivateKey = PrivateKey<48, 384, 24>;
-/// A 4096-bit encryption key.
-pub type Rsa4096PublicKey = PublicKey<64, 512>;
-/// A 4096-bit decryption key.
-pub type Rsa4096PrivateKey = PrivateKey<64, 512, 32>;
-/// An 8192-bit encryption key: slow, and rare outside long-lived
-/// roots.
-pub type Rsa8192PublicKey = PublicKey<128, 1024>;
-/// An 8192-bit decryption key.
-pub type Rsa8192PrivateKey = PrivateKey<128, 1024, 64>;
-/// A 1024-bit encryption key: legacy interoperation only, too small
-/// for new uses.
-pub type Rsa1024PublicKey = PublicKey<16, 128>;
-/// A 1024-bit decryption key: legacy interoperation only.
-pub type Rsa1024PrivateKey = PrivateKey<16, 128, 8>;
+impl Ciphertext {
+    fn zeroed(len: usize) -> Self {
+        Ciphertext {
+            bytes: [0; MAX_LEN],
+            len,
+        }
+    }
 
-impl<const LIMBS: usize, const BYTES: usize> PublicKey<LIMBS, BYTES> {
-    /// An encryption key from its big-endian parts.
-    ///
-    /// The modulus must be exactly the type's width, top bit set,
-    /// and odd. The exponent must be odd, at least 3, and fit eight
-    /// bytes, which every deployed key's does.
-    pub fn try_new(n: &[u8], e: &[u8]) -> Result<Self, Error> {
-        Ok(PublicKey {
-            raw: Public::try_new(n, e)?,
+    /// The length in bytes, which is the key's
+    /// [`modulus_len`](PublicKey::modulus_len).
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Never: a ciphertext is at least [`MIN_BITS`] / 8 bytes.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn as_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes[..self.len]
+    }
+}
+
+impl AsRef<[u8]> for Ciphertext {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+impl PartialEq for Ciphertext {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_ref() == other.as_ref()
+    }
+}
+
+impl Eq for Ciphertext {}
+
+impl fmt::Debug for Ciphertext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Ciphertext")
+            .field("len", &self.len)
+            .finish()
+    }
+}
+
+/// An encryption key as a view over words the caller owns; see
+/// [`sig::rsa::PublicKeyRef`](crate::sig::rsa::PublicKeyRef) for
+/// the shape, which is the same here.
+#[derive(Clone, Copy)]
+pub struct PublicKeyRef<'a> {
+    raw: Public<'a>,
+}
+
+/// A decryption key as a view over words the caller owns; see
+/// [`sig::rsa::PrivateKeyRef`](crate::sig::rsa::PrivateKeyRef). The
+/// words are the caller's to wipe; [`PrivateKey`] does so on drop.
+#[derive(Clone, Copy)]
+pub struct PrivateKeyRef<'a> {
+    raw: Private<'a>,
+}
+
+/// An encryption key that owns its words, laid out for the widest
+/// key whatever its own length; [`bits`](Self::bits) says which.
+#[derive(Clone)]
+pub struct PublicKey {
+    words: [u64; PUBLIC_WORDS],
+    bits: usize,
+}
+
+/// A decryption key that owns its words, with the public half in
+/// front. Every private part is wiped on drop.
+#[derive(Clone)]
+pub struct PrivateKey {
+    words: [u64; PRIVATE_WORDS],
+    bits: usize,
+}
+
+impl<'a> PublicKeyRef<'a> {
+    /// Lays out an encryption key from its big-endian parts in
+    /// `storage`, returning the words it took; see
+    /// [`PublicKey::try_new`] for what is checked.
+    pub fn fill(
+        n: &[u8],
+        e: &[u8],
+        storage: &mut [u64],
+    ) -> Result<usize, Error> {
+        Public::fill(n, e, storage)
+    }
+
+    /// Lays out a key from its DER `SubjectPublicKeyInfo`, as
+    /// [`PublicKey::try_from_der`] reads it.
+    pub fn fill_from_der(
+        der: &[u8],
+        storage: &mut [u64],
+    ) -> Result<usize, Error> {
+        Public::fill_from_spki(der, false, storage)
+    }
+
+    /// Lays out a key from the bare PKCS#1 `RSAPublicKey`, as
+    /// [`PublicKey::try_from_pkcs1`] reads it.
+    pub fn fill_from_pkcs1(
+        der: &[u8],
+        storage: &mut [u64],
+    ) -> Result<usize, Error> {
+        Public::fill_from_pkcs1(der, storage)
+    }
+
+    /// Lays out a key from a PEM block, as
+    /// [`PublicKey::try_from_pem`] reads it.
+    pub fn fill_from_pem(
+        pem: &[u8],
+        storage: &mut [u64],
+    ) -> Result<usize, Error> {
+        Public::fill_from_pem(pem, false, storage)
+    }
+
+    /// The view over words a `fill` laid out. Words that do not hold
+    /// a key are [`Error::InvalidPublicKey`].
+    pub fn new(storage: &'a [u64]) -> Result<Self, Error> {
+        Ok(PublicKeyRef {
+            raw: Public::new(storage)?,
         })
     }
 
-    /// The RSA encryption primitive, RSAEP of RFC 8017: raises
-    /// `message` to the public exponent, with no padding applied.
-    ///
-    /// # This is not encryption
-    ///
-    /// Raw RSA is deterministic and malleable, so a message enciphered
-    /// this way leaks equality and can be mauled in transit. Use
-    /// [`encrypt_oaep`](Self::encrypt_oaep) unless you are
-    /// implementing a scheme it does not cover, or driving the
-    /// component test suites that exercise the primitive on its own.
-    ///
-    /// Returns [`Error::MessageTooLong`] when the representative is
-    /// at or above the modulus, which is the only input the primitive
-    /// refuses.
-    pub fn encrypt_primitive(
-        &self,
-        message: &[u8; BYTES],
-    ) -> Result<[u8; BYTES], Error> {
-        self.raw.apply(message).ok_or(Error::MessageTooLong)
+    /// The modulus length in bits.
+    pub fn bits(&self) -> usize {
+        self.raw.bits()
     }
 
-    /// Encrypts `message` with OAEP, which must fit the key: at
-    /// most the width minus two digest lengths and two bytes. The
-    /// label is rarely wanted and usually empty; whatever it is,
-    /// decryption must present the same one.
+    /// The modulus length in bytes: the length of every ciphertext.
+    pub fn modulus_len(&self) -> usize {
+        self.raw.modulus_len()
+    }
+
+    /// The encryption primitive; see
+    /// [`PublicKey::encrypt_primitive`]. `message` and `out` are the
+    /// modulus length.
+    pub fn encrypt_primitive(
+        &self,
+        message: &[u8],
+        out: &mut [u8],
+        scratch: &mut [u64],
+    ) -> Result<(), Error> {
+        if !self.raw.in_range(message) || out.len() != self.modulus_len() {
+            return Err(Error::MessageTooLong);
+        }
+        self.raw.apply(message, out, scratch)
+    }
+
+    /// Encrypts with OAEP; see [`PublicKey::encrypt_oaep`].
     pub fn encrypt_oaep<H: Hash, R: Random>(
         &self,
         rng: &mut R,
         label: &[u8],
         message: &[u8],
-    ) -> Result<[u8; BYTES], Error> {
-        // The seed is one digest long; the key is longer than two.
+        scratch: &mut [u64],
+    ) -> Result<Ciphertext, Error> {
+        // The seed is one digest long, and a digest is the only
+        // value of that length generic code can make.
         let h_len = size_of::<H::Output>();
-        if BYTES < 2 * h_len + 2 {
+        if self.modulus_len() < 2 * h_len + 2 {
             return Err(Error::MessageTooLong);
         }
-        let mut seed = [0u8; BYTES];
-        rng.fill(&mut seed[..h_len])?;
-        let ciphertext = self.oaep_encode::<H>(&seed[..h_len], label, message);
-        seed.zeroize();
+        let mut seed = H::digest(&[])?;
+        rng.fill(seed.as_mut())?;
+        let ciphertext =
+            self.oaep_encode::<H>(seed.as_ref(), label, message, scratch);
+        seed.as_mut().zeroize();
         ciphertext
     }
 
@@ -188,15 +311,18 @@ impl<const LIMBS: usize, const BYTES: usize> PublicKey<LIMBS, BYTES> {
         seed: &[u8],
         label: &[u8],
         message: &[u8],
-    ) -> Result<[u8; BYTES], Error> {
+        scratch: &mut [u64],
+    ) -> Result<Ciphertext, Error> {
+        let len = self.modulus_len();
         let h_len = size_of::<H::Output>();
-        if BYTES < 2 * h_len + 2 || message.len() > BYTES - 2 * h_len - 2 {
+        if len < 2 * h_len + 2 || message.len() > len - 2 * h_len - 2 {
             return Err(Error::MessageTooLong);
         }
         // EM = 0x00 || maskedSeed || maskedDB, where
         // DB = lHash || zeros || 0x01 || message.
-        let mut em = [0u8; BYTES];
-        let db_len = BYTES - h_len - 1;
+        let mut em = [0u8; MAX_LEN];
+        let em = &mut em[..len];
+        let db_len = len - h_len - 1;
         {
             let db = &mut em[1 + h_len..];
             db[..h_len].copy_from_slice(H::digest(label)?.as_ref());
@@ -211,16 +337,24 @@ impl<const LIMBS: usize, const BYTES: usize> PublicKey<LIMBS, BYTES> {
         let (head, db) = em.split_at_mut(1 + h_len);
         mgf1_xor::<H>(db, &mut head[1..])?;
 
-        // The encoded message is below the modulus by construction,
-        // so the public operation cannot refuse it.
-        let out = self.raw.apply(&em).ok_or(Error::MessageTooLong);
+        // The encoded message is below the modulus by construction:
+        // its first byte is zero, and a modulus of these bits has
+        // its top bit within the first byte.
+        let mut out = Ciphertext::zeroed(len);
+        let result = self.raw.apply(em, out.as_mut(), scratch);
         em.zeroize();
-        out
+        result.map(|()| out)
     }
 
-    /// The modulus, big-endian.
-    pub fn modulus_bytes(&self) -> [u8; BYTES] {
-        self.raw.modulus_bytes()
+    /// The modulus, big-endian, into the front of `out`; the length
+    /// written, or [`Error::OutputTooSmall`] with the length needed.
+    pub fn modulus_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        let len = self.modulus_len();
+        let Some(out) = out.get_mut(..len) else {
+            return Err(Error::OutputTooSmall(len));
+        };
+        self.raw.write_modulus(out);
+        Ok(len)
     }
 
     /// The public exponent, big-endian in eight bytes.
@@ -228,57 +362,19 @@ impl<const LIMBS: usize, const BYTES: usize> PublicKey<LIMBS, BYTES> {
         self.raw.exponent_bytes()
     }
 
-    /// An encryption key from its DER `SubjectPublicKeyInfo` (RFC
-    /// 5280), the form under `PUBLIC KEY` in a PEM file. The algorithm must be
-    /// `rsaEncryption`: a key marked `id-RSASSA-PSS` is a signing
-    /// key, and is refused.
-    ///
-    /// The modulus must be the type's width, as with
-    /// [`try_new`](Self::try_new); anything else wrong with the
-    /// bytes is [`Error::InvalidEncoding`].
-    pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
-        Ok(PublicKey {
-            raw: Public::from_spki(der, false)?,
-        })
-    }
-
-    /// Writes the key as a `SubjectPublicKeyInfo` under
-    /// `rsaEncryption` into the front of `out`, returning the
-    /// length. `2 * BYTES` always suffices; a buffer too small gets
-    /// [`Error::OutputTooSmall`] with the exact need.
+    /// The key as a `SubjectPublicKeyInfo`; see
+    /// [`PublicKey::der_bytes`].
     pub fn der_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
         self.raw.spki_bytes(out)
     }
 
-    /// An encryption key from the bare PKCS#1 `RSAPublicKey` (RFC 8017
-    /// A.1.1), the form under `RSA PUBLIC KEY`, which is what the
-    /// `SubjectPublicKeyInfo` wraps.
-    pub fn try_from_pkcs1(der: &[u8]) -> Result<Self, Error> {
-        Ok(PublicKey {
-            raw: Public::from_pkcs1(der)?,
-        })
-    }
-
-    /// Writes the bare `RSAPublicKey`, as [`der_bytes`](Self::der_bytes)
-    /// does the wrapped one.
+    /// The bare `RSAPublicKey`; see [`PublicKey::pkcs1_bytes`].
     pub fn pkcs1_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
         self.raw.pkcs1_bytes(out)
     }
 
-    /// An encryption key from a PEM block (RFC 7468) labelled `PUBLIC KEY`
-    /// or `RSA PUBLIC KEY`, holding the matching DER form above.
-    /// Whitespace and line ends are read leniently; anything else
-    /// that is not exactly one well-formed block is
-    /// [`Error::InvalidEncoding`].
-    pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
-        Ok(PublicKey {
-            raw: Public::from_pem(pem, false)?,
-        })
-    }
-
-    /// Writes the key as a `PUBLIC KEY` PEM block, ASCII with LF line
-    /// ends, into the front of `out`, returning the length.
-    /// `3 * BYTES` always suffices.
+    /// The key as a `PUBLIC KEY` PEM block; see
+    /// [`PublicKey::pem_bytes`].
     pub fn pem_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
         self.raw.pem_bytes(out, false)
     }
@@ -289,32 +385,24 @@ impl<const LIMBS: usize, const BYTES: usize> PublicKey<LIMBS, BYTES> {
     }
 }
 
-impl<const LIMBS: usize, const BYTES: usize, const HALF: usize>
-    PrivateKey<LIMBS, BYTES, HALF>
-{
-    /// A decryption key from its big-endian parts: the public
-    /// modulus and exponent, then the private exponent, which must
-    /// be nonzero and below the modulus. A key that carries its
-    /// primes should come in through
-    /// [`try_new_crt`](PrivateKey::try_new_crt) instead.
-    pub fn try_new(n: &[u8], e: &[u8], d: &[u8]) -> Result<Self, Error> {
-        let public = PublicKey::try_new(n, e)?;
-        let raw = Private::try_new(&public.raw, d)?;
-        Ok(PrivateKey { public, raw })
+impl<'a> PrivateKeyRef<'a> {
+    /// Lays out a decryption key from its big-endian parts in
+    /// `storage`, returning the words it took; see
+    /// [`PrivateKey::try_new`].
+    pub fn fill(
+        n: &[u8],
+        e: &[u8],
+        d: &[u8],
+        storage: &mut [u64],
+    ) -> Result<usize, Error> {
+        Private::fill(n, e, d, storage)
     }
 
-    /// A decryption key with its Chinese remainder pieces, in the
-    /// order the PKCS#1 `RSAPrivateKey` structure carries them: `p`
-    /// and `q` exactly half the modulus wide with their top bits
-    /// set, the reduced exponents `dp` and `dq`, and `qinv`, the
-    /// inverse of `q` modulo `p`.
-    ///
-    /// The pieces are checked against one another: the primes must
-    /// multiply to the modulus and `qinv` must invert `q`. A wrong
-    /// `dp` or `dq` cannot be caught here, and is caught instead by
-    /// the check every CRT result gets before it is used.
+    /// Lays out a decryption key with its Chinese remainder pieces;
+    /// see [`PrivateKey::try_new_crt`]. The checks on the pieces
+    /// need `scratch`.
     #[allow(clippy::too_many_arguments)]
-    pub fn try_new_crt(
+    pub fn fill_crt(
         n: &[u8],
         e: &[u8],
         d: &[u8],
@@ -323,193 +411,121 @@ impl<const LIMBS: usize, const BYTES: usize, const HALF: usize>
         dp: &[u8],
         dq: &[u8],
         qinv: &[u8],
-    ) -> Result<Self, Error> {
-        let public = PublicKey::try_new(n, e)?;
-        let raw = Private::try_new_crt(&public.raw, d, p, q, dp, dq, qinv)?;
-        Ok(PrivateKey { public, raw })
+        storage: &mut [u64],
+        scratch: &mut [u64],
+    ) -> Result<usize, Error> {
+        Private::fill_crt(n, e, d, p, q, dp, dq, qinv, storage, scratch)
     }
 
-    /// The public half.
-    pub fn public_key(&self) -> &PublicKey<LIMBS, BYTES> {
-        &self.public
+    /// Lays out a key from its DER PKCS#8 `PrivateKeyInfo`, as
+    /// [`PrivateKey::try_from_der`] reads it.
+    pub fn fill_from_der(
+        der: &[u8],
+        storage: &mut [u64],
+        scratch: &mut [u64],
+    ) -> Result<usize, Error> {
+        Private::fill_from_pkcs8(der, false, storage, scratch)
     }
 
-    /// Generates a fresh decryption key, with the public exponent
-    /// 65537 and every Chinese remainder piece in place.
-    ///
-    /// The primes are random probable primes: trial division, then
-    /// Miller-Rabin with random witnesses, with round counts read
-    /// from FIPS 186-5 for random candidates of 1024 bits and up.
-    /// Widths below [`Rsa2048PrivateKey`] are for interoperation
-    /// and tests, not for new keys. Generation is the one operation
-    /// here whose time varies with its secrets: how many candidates
-    /// fall to the primality tests depends on the randomness drawn.
-    pub fn generate<R: Random>(rng: &mut R) -> Result<Self, Error> {
-        let (public, raw) = Private::generate(rng)?;
-        Ok(PrivateKey {
-            public: PublicKey { raw: public },
-            raw,
+    /// Lays out a key from the bare PKCS#1 `RSAPrivateKey`, as
+    /// [`PrivateKey::try_from_pkcs1`] reads it.
+    pub fn fill_from_pkcs1(
+        der: &[u8],
+        storage: &mut [u64],
+        scratch: &mut [u64],
+    ) -> Result<usize, Error> {
+        Private::fill_from_pkcs1(der, storage, scratch)
+    }
+
+    /// Lays out a key from a PEM block, as
+    /// [`PrivateKey::try_from_pem`] reads it.
+    pub fn fill_from_pem(
+        pem: &[u8],
+        storage: &mut [u64],
+        scratch: &mut [u64],
+    ) -> Result<usize, Error> {
+        Private::fill_from_pem(pem, false, storage, scratch)
+    }
+
+    /// Generates a fresh key of `bits` in `storage`, returning the
+    /// words it took; see [`PrivateKey::generate`].
+    pub fn generate<R: Random>(
+        rng: &mut R,
+        bits: usize,
+        storage: &mut [u64],
+        scratch: &mut [u64],
+    ) -> Result<usize, Error> {
+        Private::generate(rng, bits, storage, scratch)
+    }
+
+    /// The view over words a `fill` laid out. Words that do not hold
+    /// a key are [`Error::InvalidPrivateKey`].
+    pub fn new(storage: &'a [u64]) -> Result<Self, Error> {
+        Ok(PrivateKeyRef {
+            raw: Private::new(storage)?,
         })
     }
 
-    /// The private exponent, big-endian. The caller holds a secret
-    /// now, and should wipe it when done.
-    pub fn d_bytes(&self) -> [u8; BYTES] {
-        self.raw.d_bytes()
+    /// The public half, as a view over the front of the same words.
+    pub fn public_key(&self) -> PublicKeyRef<'a> {
+        PublicKeyRef {
+            raw: self.raw.public(),
+        }
     }
 
-    /// Writes the Chinese remainder pieces, big-endian, into five
-    /// buffers of half the modulus width each. Fails with
-    /// [`Error::InvalidPrivateKey`] on a key imported without them,
-    /// and [`Error::InvalidLength`] on a buffer of the wrong size.
-    /// The caller holds secrets now, and should wipe them when done.
-    pub fn crt_bytes(
-        &self,
-        p: &mut [u8],
-        q: &mut [u8],
-        dp: &mut [u8],
-        dq: &mut [u8],
-        qinv: &mut [u8],
-    ) -> Result<(), Error> {
-        self.raw.crt_bytes(p, q, dp, dq, qinv)
+    /// The modulus length in bits.
+    pub fn bits(&self) -> usize {
+        self.raw.public().bits()
     }
 
-    /// A decryption key from its DER PKCS#8 `PrivateKeyInfo` (RFC 5208;
-    /// the RFC 5958 form with a public key attached reads too), the
-    /// form under `PRIVATE KEY` in a PEM file. The algorithm must be
-    /// `rsaEncryption`, as for [`PublicKey::try_from_der`].
-    ///
-    /// The `RSAPrivateKey` inside carries the primes, so the key
-    /// comes in as if through [`try_new_crt`](Self::try_new_crt),
-    /// with the same checks. A multi-prime key, or anything else
-    /// wrong with the bytes, is [`Error::InvalidEncoding`]; a
-    /// modulus of another width is [`Error::InvalidKeyLength`].
-    pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
-        let (public, raw) = Private::from_pkcs8(der, false)?;
-        Ok(PrivateKey {
-            public: PublicKey { raw: public },
-            raw,
-        })
+    /// The modulus length in bytes: the length of every ciphertext.
+    pub fn modulus_len(&self) -> usize {
+        self.raw.public().modulus_len()
     }
 
-    /// Writes the key as a `PrivateKeyInfo` under `rsaEncryption`
-    /// into the front of `out`, returning the length. `5 * BYTES`
-    /// suffices for any key of 1024 bits or more; a buffer too
-    /// small gets [`Error::OutputTooSmall`] with the exact need.
-    ///
-    /// Fails with [`Error::InvalidPrivateKey`] on a key imported
-    /// without its primes, as [`crt_bytes`](Self::crt_bytes) does:
-    /// the structure has no place for their absence. The output is
-    /// a secret, and the caller should wipe it when done.
-    pub fn der_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
-        self.raw.pkcs8_bytes(&self.public.raw, out)
-    }
-
-    /// A decryption key from the bare PKCS#1 `RSAPrivateKey` (RFC 8017
-    /// A.1.2), the form under `RSA PRIVATE KEY`, which is what the
-    /// `PrivateKeyInfo` wraps.
-    pub fn try_from_pkcs1(der: &[u8]) -> Result<Self, Error> {
-        let (public, raw) = Private::from_pkcs1(der)?;
-        Ok(PrivateKey {
-            public: PublicKey { raw: public },
-            raw,
-        })
-    }
-
-    /// Writes the bare `RSAPrivateKey`, as [`der_bytes`](Self::der_bytes)
-    /// does the wrapped one, with the same needs and the same
-    /// refusal.
-    pub fn pkcs1_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
-        self.raw.pkcs1_bytes(&self.public.raw, out)
-    }
-
-    /// A decryption key from a PEM block (RFC 7468) labelled `PRIVATE KEY`
-    /// or `RSA PRIVATE KEY`, holding the matching DER form above.
-    /// Whitespace and line ends are read leniently; anything else
-    /// that is not exactly one well-formed block, an encrypted key
-    /// included, is [`Error::InvalidEncoding`].
-    pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
-        let (public, raw) = Private::from_pem(pem, false)?;
-        Ok(PrivateKey {
-            public: PublicKey { raw: public },
-            raw,
-        })
-    }
-
-    /// Writes the key as a `PRIVATE KEY` PEM block, ASCII with LF
-    /// line ends, into the front of `out`, returning the length.
-    /// `8 * BYTES` suffices for any key of 1024 bits or more. The
-    /// same refusal as [`der_bytes`](Self::der_bytes), and the same
-    /// secret to wipe.
-    pub fn pem_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
-        self.raw.pem_bytes(&self.public.raw, out, false)
-    }
-
-    /// The same as an `RSA PRIVATE KEY` block, around the PKCS#1
-    /// form.
-    pub fn pkcs1_pem_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
-        self.raw.pem_bytes(&self.public.raw, out, true)
-    }
-
-    /// The RSA decryption primitive, RSADP of RFC 8017: raises
-    /// `ciphertext` to the private exponent, through the primes when
-    /// the key carries them, with no padding removed.
-    ///
-    /// # This is not decryption
-    ///
-    /// Nothing here authenticates the ciphertext or checks any
-    /// padding, and a scheme built on this without care is where
-    /// Bleichenbacher's and Manger's attacks live. Use
-    /// [`decrypt_oaep`](Self::decrypt_oaep) unless you are
-    /// implementing a scheme it does not cover, or driving the
-    /// component test suites that exercise the primitive on its own.
-    ///
-    /// Returns [`Error::DecryptionFailed`] when the ciphertext is at
-    /// or above the modulus. As everywhere else in the crate, a
-    /// result computed through the primes is checked with the public
-    /// exponent before it is returned.
+    /// The decryption primitive; see
+    /// [`PrivateKey::decrypt_primitive`]. `ciphertext` and `out` are
+    /// the modulus length.
     pub fn decrypt_primitive(
         &self,
-        ciphertext: &[u8; BYTES],
-    ) -> Result<[u8; BYTES], Error> {
+        ciphertext: &[u8],
+        out: &mut [u8],
+        scratch: &mut [u64],
+    ) -> Result<(), Error> {
         // The scheme owns this check everywhere else; the primitive
         // has no scheme above it, so it makes the check itself.
-        if !self.public.raw.in_range(ciphertext) {
+        if !self.raw.public().in_range(ciphertext)
+            || out.len() != self.modulus_len()
+        {
             return Err(Error::DecryptionFailed);
         }
-        self.raw.apply(&self.public.raw, ciphertext)
+        self.raw.apply(ciphertext, out, scratch)
     }
 
-    /// Decrypts an OAEP ciphertext made under the same hash and
-    /// label, writing the message into the front of `out`, which
-    /// must hold the largest message the key can carry, and
-    /// returning its length.
-    ///
-    /// Every way the padding can be wrong is one error, found in one
-    /// constant-time pass: an oracle that says *where* decryption
-    /// failed gives an attacker the message one query at a time
-    /// (Manger's attack), so nothing here branches on secret bytes
-    /// until the single verdict.
+    /// Decrypts an OAEP ciphertext; see [`PrivateKey::decrypt_oaep`].
     pub fn decrypt_oaep<H: Hash>(
         &self,
         label: &[u8],
-        ciphertext: &[u8; BYTES],
+        ciphertext: &[u8],
         out: &mut [u8],
+        scratch: &mut [u64],
     ) -> Result<usize, Error> {
+        let len = self.modulus_len();
         let h_len = size_of::<H::Output>();
-        if BYTES < 2 * h_len + 2 {
+        if len < 2 * h_len + 2 {
             return Err(Error::DecryptionFailed);
         }
-        let longest = BYTES - 2 * h_len - 2;
+        let longest = len - 2 * h_len - 2;
         if out.len() < longest {
             return Err(Error::OutputTooSmall(longest));
         }
         // The range check is on the public ciphertext.
-        let c = Uint::<LIMBS>::from_be_bytes(ciphertext);
-        if c.less_than(self.public.raw.m.modulus()) == 0 {
+        if !self.raw.public().in_range(ciphertext) {
             return Err(Error::DecryptionFailed);
         }
-        let mut em = self.raw.apply(&self.public.raw, ciphertext)?;
+        let mut em = [0u8; MAX_LEN];
+        let em = &mut em[..len];
+        self.raw.apply(ciphertext, em, scratch)?;
 
         // Unmask: the seed under the masked DB, then DB under the
         // seed.
@@ -546,6 +562,533 @@ impl<const LIMBS: usize, const BYTES: usize, const HALF: usize>
         let length = message.len();
         em.zeroize();
         Ok(length)
+    }
+
+    /// The private exponent, big-endian, into the front of `out`;
+    /// the length written, or [`Error::OutputTooSmall`] with the
+    /// length needed. The caller holds a secret now, and should wipe
+    /// it when done.
+    pub fn d_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        let len = self.modulus_len();
+        let Some(out) = out.get_mut(..len) else {
+            return Err(Error::OutputTooSmall(len));
+        };
+        self.raw.write_d(out);
+        Ok(len)
+    }
+
+    /// The length of a prime in bytes, which each Chinese remainder
+    /// piece is written in.
+    pub fn prime_len(&self) -> usize {
+        self.raw.prime_len()
+    }
+
+    /// The Chinese remainder pieces; see [`PrivateKey::crt_bytes`].
+    pub fn crt_bytes(
+        &self,
+        p: &mut [u8],
+        q: &mut [u8],
+        dp: &mut [u8],
+        dq: &mut [u8],
+        qinv: &mut [u8],
+    ) -> Result<(), Error> {
+        self.raw.crt_bytes(p, q, dp, dq, qinv)
+    }
+
+    /// The key as a PKCS#8 `PrivateKeyInfo`; see
+    /// [`PrivateKey::der_bytes`].
+    pub fn der_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.raw.pkcs8_bytes(out)
+    }
+
+    /// The bare `RSAPrivateKey`; see [`PrivateKey::pkcs1_bytes`].
+    pub fn pkcs1_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.raw.pkcs1_bytes(out)
+    }
+
+    /// The key as a `PRIVATE KEY` PEM block; see
+    /// [`PrivateKey::pem_bytes`].
+    pub fn pem_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.raw.pem_bytes(out, false)
+    }
+
+    /// The same as an `RSA PRIVATE KEY` block, around the PKCS#1
+    /// form.
+    pub fn pkcs1_pem_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.raw.pem_bytes(out, true)
+    }
+}
+
+impl PublicKey {
+    /// The key laid out by `fill` in a fresh array.
+    fn filled(
+        fill: impl FnOnce(&mut [u64]) -> Result<usize, Error>,
+    ) -> Result<Self, Error> {
+        let mut key = PublicKey {
+            words: [0; PUBLIC_WORDS],
+            bits: 0,
+        };
+        fill(&mut key.words)?;
+        key.bits = Public::new(&key.words)?.bits();
+        Ok(key)
+    }
+
+    /// The view the operations run through. The words were laid out
+    /// by this type, so they hold a key of the bits it remembers.
+    fn view(&self) -> PublicKeyRef<'_> {
+        PublicKeyRef {
+            raw: Public::over(&self.words, self.bits),
+        }
+    }
+
+    /// An encryption key from its big-endian parts.
+    ///
+    /// The modulus must be odd and, with its leading zeros dropped,
+    /// between [`MIN_BITS`] and [`MAX_BITS`] bits; anything else is
+    /// [`Error::InvalidKeyLength`] with the length found. Any length
+    /// in that range is a key, a multiple of eight or not. The
+    /// exponent must be odd, at least 3, and fit eight bytes, which
+    /// every deployed key's does.
+    pub fn try_new(n: &[u8], e: &[u8]) -> Result<Self, Error> {
+        Self::filled(|words| PublicKeyRef::fill(n, e, words))
+    }
+
+    /// An encryption key from its DER `SubjectPublicKeyInfo` (RFC
+    /// 5280), the form under `PUBLIC KEY` in a PEM file. The
+    /// algorithm must be `rsaEncryption`: a key marked
+    /// `id-RSASSA-PSS` is a signing key, and is refused.
+    ///
+    /// The modulus is checked as [`try_new`](Self::try_new) checks
+    /// it; anything else wrong with the bytes is
+    /// [`Error::InvalidEncoding`].
+    pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
+        Self::filled(|words| PublicKeyRef::fill_from_der(der, words))
+    }
+
+    /// An encryption key from the bare PKCS#1 `RSAPublicKey` (RFC
+    /// 8017 A.1.1), the form under `RSA PUBLIC KEY`, which is what
+    /// the `SubjectPublicKeyInfo` wraps.
+    pub fn try_from_pkcs1(der: &[u8]) -> Result<Self, Error> {
+        Self::filled(|words| PublicKeyRef::fill_from_pkcs1(der, words))
+    }
+
+    /// An encryption key from a PEM block (RFC 7468) labelled
+    /// `PUBLIC KEY` or `RSA PUBLIC KEY`, holding the matching DER
+    /// form above. Whitespace and line ends are read leniently;
+    /// anything else that is not exactly one well-formed block is
+    /// [`Error::InvalidEncoding`].
+    pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
+        Self::filled(|words| PublicKeyRef::fill_from_pem(pem, words))
+    }
+
+    /// The modulus length in bits.
+    pub fn bits(&self) -> usize {
+        self.bits
+    }
+
+    /// The modulus length in bytes: the length of every ciphertext.
+    pub fn modulus_len(&self) -> usize {
+        self.view().modulus_len()
+    }
+
+    /// The RSA encryption primitive, RSAEP of RFC 8017: raises
+    /// `message` to the public exponent into `out`, both of the
+    /// modulus length, with no padding applied.
+    ///
+    /// # This is not encryption
+    ///
+    /// Raw RSA is deterministic and malleable, so a message enciphered
+    /// this way leaks equality and can be mauled in transit. Use
+    /// [`encrypt_oaep`](Self::encrypt_oaep) unless you are
+    /// implementing a scheme it does not cover, or driving the
+    /// component test suites that exercise the primitive on its own.
+    ///
+    /// Returns [`Error::MessageTooLong`] when the representative is
+    /// at or above the modulus, or either buffer is not the modulus
+    /// length, which is all the primitive refuses.
+    pub fn encrypt_primitive(
+        &self,
+        message: &[u8],
+        out: &mut [u8],
+    ) -> Result<(), Error> {
+        let mut scratch = Scratch::new();
+        self.view().encrypt_primitive(message, out, &mut scratch.0)
+    }
+
+    /// Encrypts `message` with OAEP, which must fit the key: at
+    /// most the modulus length minus two digest lengths and two
+    /// bytes. The label is rarely wanted and usually empty; whatever
+    /// it is, decryption must present the same one.
+    pub fn encrypt_oaep<H: Hash, R: Random>(
+        &self,
+        rng: &mut R,
+        label: &[u8],
+        message: &[u8],
+    ) -> Result<Ciphertext, Error> {
+        let mut scratch = Scratch::new();
+        self.view()
+            .encrypt_oaep::<H, R>(rng, label, message, &mut scratch.0)
+    }
+
+    /// The encoding half of OAEP with the seed pinned, for the tests.
+    #[cfg(test)]
+    fn oaep_encode<H: Hash>(
+        &self,
+        seed: &[u8],
+        label: &[u8],
+        message: &[u8],
+    ) -> Result<Ciphertext, Error> {
+        let mut scratch = Scratch::new();
+        self.view()
+            .oaep_encode::<H>(seed, label, message, &mut scratch.0)
+    }
+
+    /// The modulus, big-endian, into the front of `out`; the length
+    /// written, or [`Error::OutputTooSmall`] with the length needed.
+    pub fn modulus_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.view().modulus_bytes(out)
+    }
+
+    /// The public exponent, big-endian in eight bytes.
+    pub fn exponent_bytes(&self) -> [u8; 8] {
+        self.view().exponent_bytes()
+    }
+
+    /// Writes the key as a `SubjectPublicKeyInfo` under
+    /// `rsaEncryption` into the front of `out`, returning the
+    /// length. Twice the modulus length always suffices; a buffer
+    /// too small gets [`Error::OutputTooSmall`] with the exact need.
+    pub fn der_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.view().der_bytes(out)
+    }
+
+    /// Writes the bare `RSAPublicKey`, as [`der_bytes`](Self::der_bytes)
+    /// does the wrapped one.
+    pub fn pkcs1_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.view().pkcs1_bytes(out)
+    }
+
+    /// Writes the key as a `PUBLIC KEY` PEM block, ASCII with LF line
+    /// ends, into the front of `out`, returning the length. Three
+    /// times the modulus length always suffices.
+    pub fn pem_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.view().pem_bytes(out)
+    }
+
+    /// The same as an `RSA PUBLIC KEY` block, around the PKCS#1 form.
+    pub fn pkcs1_pem_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.view().pkcs1_pem_bytes(out)
+    }
+}
+
+impl PrivateKey {
+    /// The key laid out by `fill` in a fresh array, with the scratch
+    /// the checks need.
+    fn filled(
+        fill: impl FnOnce(&mut [u64], &mut [u64]) -> Result<usize, Error>,
+    ) -> Result<Self, Error> {
+        let mut key = PrivateKey {
+            words: [0; PRIVATE_WORDS],
+            bits: 0,
+        };
+        let mut scratch = Scratch::new();
+        fill(&mut key.words, &mut scratch.0)?;
+        key.bits = Private::new(&key.words)?.public().bits();
+        Ok(key)
+    }
+
+    /// The view the operations run through. The words were laid out
+    /// by this type, so they hold a key of the bits it remembers.
+    fn view(&self) -> PrivateKeyRef<'_> {
+        PrivateKeyRef {
+            raw: Private::over(&self.words, self.bits),
+        }
+    }
+
+    /// A decryption key from its big-endian parts: the public
+    /// modulus and exponent, then the private exponent, which must
+    /// be nonzero and below the modulus. A key that carries its
+    /// primes should come in through
+    /// [`try_new_crt`](PrivateKey::try_new_crt) instead, which
+    /// decrypts three times faster.
+    pub fn try_new(n: &[u8], e: &[u8], d: &[u8]) -> Result<Self, Error> {
+        Self::filled(|words, _| PrivateKeyRef::fill(n, e, d, words))
+    }
+
+    /// A decryption key with its Chinese remainder pieces, in the
+    /// order the PKCS#1 `RSAPrivateKey` structure carries them: `p`
+    /// and `q`, each half the modulus's bits and within one bit of
+    /// each other, the reduced exponents `dp` and `dq`, and `qinv`,
+    /// the inverse of `q` modulo `p`.
+    ///
+    /// The pieces are checked against one another: the primes must
+    /// multiply to the modulus and `qinv` must invert `q`. A wrong
+    /// `dp` or `dq` cannot be caught here, and is caught instead by
+    /// the check every CRT result gets before it is used.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_crt(
+        n: &[u8],
+        e: &[u8],
+        d: &[u8],
+        p: &[u8],
+        q: &[u8],
+        dp: &[u8],
+        dq: &[u8],
+        qinv: &[u8],
+    ) -> Result<Self, Error> {
+        Self::filled(|words, scratch| {
+            PrivateKeyRef::fill_crt(n, e, d, p, q, dp, dq, qinv, words, scratch)
+        })
+    }
+
+    /// Generates a fresh decryption key of `bits`, which must be a
+    /// multiple of eight from [`MIN_BITS`] to [`MAX_BITS`], with the
+    /// public exponent 65537 and every Chinese remainder piece in
+    /// place. Anything else is [`Error::InvalidKeyLength`].
+    ///
+    /// The primes are random probable primes: trial division, then
+    /// Miller-Rabin with random witnesses, with round counts read
+    /// from FIPS 186-5 for random candidates of 1024 bits and up.
+    /// 2048 bits is the least anyone should make a new key at;
+    /// narrower ones are for interoperation and tests.
+    pub fn generate<R: Random>(
+        rng: &mut R,
+        bits: usize,
+    ) -> Result<Self, Error> {
+        Self::filled(|words, scratch| {
+            PrivateKeyRef::generate(rng, bits, words, scratch)
+        })
+    }
+
+    /// A decryption key from its DER PKCS#8 `PrivateKeyInfo` (RFC
+    /// 5208; the RFC 5958 form with a public key attached reads
+    /// too), the form under `PRIVATE KEY` in a PEM file. The
+    /// algorithm must be `rsaEncryption`, as for
+    /// [`PublicKey::try_from_der`].
+    ///
+    /// The `RSAPrivateKey` inside carries the primes, so the key
+    /// comes in as if through [`try_new_crt`](Self::try_new_crt),
+    /// with the same checks. A multi-prime key, or anything else
+    /// wrong with the bytes, is [`Error::InvalidEncoding`].
+    pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
+        Self::filled(|words, scratch| {
+            PrivateKeyRef::fill_from_der(der, words, scratch)
+        })
+    }
+
+    /// A decryption key from the bare PKCS#1 `RSAPrivateKey` (RFC
+    /// 8017 A.1.2), the form under `RSA PRIVATE KEY`, which is what
+    /// the `PrivateKeyInfo` wraps.
+    pub fn try_from_pkcs1(der: &[u8]) -> Result<Self, Error> {
+        Self::filled(|words, scratch| {
+            PrivateKeyRef::fill_from_pkcs1(der, words, scratch)
+        })
+    }
+
+    /// A decryption key from a PEM block (RFC 7468) labelled
+    /// `PRIVATE KEY` or `RSA PRIVATE KEY`, holding the matching DER
+    /// form above. Whitespace and line ends are read leniently;
+    /// anything else that is not exactly one well-formed block, an
+    /// encrypted key included, is [`Error::InvalidEncoding`].
+    pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
+        Self::filled(|words, scratch| {
+            PrivateKeyRef::fill_from_pem(pem, words, scratch)
+        })
+    }
+
+    /// The public half, as a key of its own.
+    pub fn public_key(&self) -> PublicKey {
+        let mut public = PublicKey {
+            words: [0; PUBLIC_WORDS],
+            bits: self.bits,
+        };
+        let used = public_words(self.bits);
+        public.words[..used].copy_from_slice(&self.words[..used]);
+        public
+    }
+
+    /// The modulus length in bits.
+    pub fn bits(&self) -> usize {
+        self.bits
+    }
+
+    /// The modulus length in bytes: the length of every ciphertext.
+    pub fn modulus_len(&self) -> usize {
+        self.view().modulus_len()
+    }
+
+    /// The RSA decryption primitive, RSADP of RFC 8017: raises
+    /// `ciphertext` to the private exponent, through the primes when
+    /// the key carries them, into `out`, both of the modulus length,
+    /// with no padding removed.
+    ///
+    /// # This is not decryption
+    ///
+    /// Nothing here authenticates the ciphertext or checks any
+    /// padding, and a scheme built on this without care is where
+    /// Bleichenbacher's and Manger's attacks live. Use
+    /// [`decrypt_oaep`](Self::decrypt_oaep) unless you are
+    /// implementing a scheme it does not cover, or driving the
+    /// component test suites that exercise the primitive on its own.
+    ///
+    /// Returns [`Error::DecryptionFailed`] when the ciphertext is at
+    /// or above the modulus, or either buffer is not the modulus
+    /// length. As everywhere else in the crate, a result computed
+    /// through the primes is checked with the public exponent before
+    /// it is returned.
+    pub fn decrypt_primitive(
+        &self,
+        ciphertext: &[u8],
+        out: &mut [u8],
+    ) -> Result<(), Error> {
+        let mut scratch = Scratch::new();
+        self.view()
+            .decrypt_primitive(ciphertext, out, &mut scratch.0)
+    }
+
+    /// Decrypts an OAEP ciphertext made under the same hash and
+    /// label, writing the message into the front of `out`, which
+    /// must hold the largest message the key can carry, and
+    /// returning its length.
+    ///
+    /// Every way the padding can be wrong is one error, found in one
+    /// constant-time pass: an oracle that says *where* decryption
+    /// failed gives an attacker the message one query at a time
+    /// (Manger's attack), so nothing here branches on secret bytes
+    /// until the single verdict.
+    pub fn decrypt_oaep<H: Hash>(
+        &self,
+        label: &[u8],
+        ciphertext: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        let mut scratch = Scratch::new();
+        self.view()
+            .decrypt_oaep::<H>(label, ciphertext, out, &mut scratch.0)
+    }
+
+    /// The private exponent, big-endian, into the front of `out`;
+    /// the length written, or [`Error::OutputTooSmall`] with the
+    /// length needed. The caller holds a secret now, and should wipe
+    /// it when done.
+    pub fn d_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.view().d_bytes(out)
+    }
+
+    /// The length of a prime in bytes, which each Chinese remainder
+    /// piece is written in: half the modulus, rounded up.
+    pub fn prime_len(&self) -> usize {
+        self.view().prime_len()
+    }
+
+    /// Writes the Chinese remainder pieces, big-endian, into five
+    /// buffers of [`prime_len`](Self::prime_len) bytes each. Fails
+    /// with [`Error::InvalidPrivateKey`] on a key imported without
+    /// them, and [`Error::InvalidLength`] on a buffer of the wrong
+    /// size. The caller holds secrets now, and should wipe them when
+    /// done.
+    pub fn crt_bytes(
+        &self,
+        p: &mut [u8],
+        q: &mut [u8],
+        dp: &mut [u8],
+        dq: &mut [u8],
+        qinv: &mut [u8],
+    ) -> Result<(), Error> {
+        self.view().crt_bytes(p, q, dp, dq, qinv)
+    }
+
+    /// Writes the key as a `PrivateKeyInfo` under `rsaEncryption`
+    /// into the front of `out`, returning the length. Five times the
+    /// modulus length always suffices; a buffer too small gets
+    /// [`Error::OutputTooSmall`] with the exact need.
+    ///
+    /// Fails with [`Error::InvalidPrivateKey`] on a key imported
+    /// without its primes, as [`crt_bytes`](Self::crt_bytes) does:
+    /// the structure has no place for their absence. The output is
+    /// a secret, and the caller should wipe it when done.
+    pub fn der_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.view().der_bytes(out)
+    }
+
+    /// Writes the bare `RSAPrivateKey`, as [`der_bytes`](Self::der_bytes)
+    /// does the wrapped one, with the same needs and the same
+    /// refusal.
+    pub fn pkcs1_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.view().pkcs1_bytes(out)
+    }
+
+    /// Writes the key as a `PRIVATE KEY` PEM block, ASCII with LF
+    /// line ends, into the front of `out`, returning the length.
+    /// Eight times the modulus length always suffices. The same
+    /// refusal as [`der_bytes`](Self::der_bytes), and the same secret
+    /// to wipe.
+    pub fn pem_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.view().pem_bytes(out)
+    }
+
+    /// The same as an `RSA PRIVATE KEY` block, around the PKCS#1
+    /// form.
+    pub fn pkcs1_pem_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
+        self.view().pkcs1_pem_bytes(out)
+    }
+}
+
+impl Drop for PrivateKey {
+    fn drop(&mut self) {
+        self.words.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for PrivateKey {}
+
+impl fmt::Debug for PublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PublicKey")
+            .field("bits", &self.bits())
+            .finish()
+    }
+}
+
+impl fmt::Debug for PrivateKey {
+    /// Deliberately omits the key material.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PrivateKey")
+            .field("bits", &self.bits())
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for PublicKeyRef<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PublicKeyRef")
+            .field("bits", &self.bits())
+            .finish()
+    }
+}
+
+impl fmt::Debug for PrivateKeyRef<'_> {
+    /// Deliberately omits the key material.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PrivateKeyRef")
+            .field("bits", &self.bits())
+            .finish_non_exhaustive()
+    }
+}
+
+/// The temporaries an owned key's operation uses, on the stack and
+/// wiped when the operation is over.
+struct Scratch([u64; SCRATCH_WORDS]);
+
+impl Scratch {
+    fn new() -> Self {
+        Scratch([0; SCRATCH_WORDS])
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }
 
@@ -605,12 +1148,12 @@ mod tests {
 
     const E: &[u8] = &[0x01, 0x00, 0x01];
 
-    fn key2048() -> Rsa2048PrivateKey {
+    fn key2048() -> PrivateKey {
         PrivateKey::try_new(&unhex::<256>(N2048), E, &unhex::<256>(D2048))
             .unwrap()
     }
 
-    fn key1024() -> Rsa1024PrivateKey {
+    fn key1024() -> PrivateKey {
         PrivateKey::try_new(&unhex::<128>(N1024), E, &unhex::<128>(D1024))
             .unwrap()
     }
@@ -668,18 +1211,22 @@ mod tests {
         let seed = unhex::<32>(OAEP_SEED256);
         let msg = b"attack at dawn";
         let mut out = [0u8; 256];
+        assert_eq!(key.bits(), 2048);
 
         let c = public.oaep_encode::<Sha256>(&seed, b"", msg).unwrap();
-        assert_eq!(c, unhex::<256>(OAEP_SHA256_NOLABEL));
-        let n = key.decrypt_oaep::<Sha256>(b"", &c, &mut out).unwrap();
+        assert_eq!(c.as_ref(), &unhex::<256>(OAEP_SHA256_NOLABEL)[..]);
+        assert_eq!(c.len(), 256);
+        let n = key
+            .decrypt_oaep::<Sha256>(b"", c.as_ref(), &mut out)
+            .unwrap();
         assert_eq!(&out[..n], msg);
 
         let c = public
             .oaep_encode::<Sha256>(&seed, b"the label", msg)
             .unwrap();
-        assert_eq!(c, unhex::<256>(OAEP_SHA256_LABEL));
+        assert_eq!(c.as_ref(), &unhex::<256>(OAEP_SHA256_LABEL)[..]);
         let n = key
-            .decrypt_oaep::<Sha256>(b"the label", &c, &mut out)
+            .decrypt_oaep::<Sha256>(b"the label", c.as_ref(), &mut out)
             .unwrap();
         assert_eq!(&out[..n], msg);
 
@@ -689,8 +1236,10 @@ mod tests {
             *byte = i as u8;
         }
         let c = public.oaep_encode::<Sha256>(&seed, b"", &big).unwrap();
-        assert_eq!(c, unhex::<256>(OAEP_SHA256_MAX));
-        let n = key.decrypt_oaep::<Sha256>(b"", &c, &mut out).unwrap();
+        assert_eq!(c.as_ref(), &unhex::<256>(OAEP_SHA256_MAX)[..]);
+        let n = key
+            .decrypt_oaep::<Sha256>(b"", c.as_ref(), &mut out)
+            .unwrap();
         assert_eq!(&out[..n], &big[..]);
     }
 
@@ -707,9 +1256,11 @@ mod tests {
             .public_key()
             .oaep_encode::<Sha512>(&seed, b"", msg)
             .unwrap();
-        assert_eq!(c, unhex::<256>(OAEP_SHA512));
+        assert_eq!(c.as_ref(), &unhex::<256>(OAEP_SHA512)[..]);
         let mut out = [0u8; 256];
-        let n = key.decrypt_oaep::<Sha512>(b"", &c, &mut out).unwrap();
+        let n = key
+            .decrypt_oaep::<Sha512>(b"", c.as_ref(), &mut out)
+            .unwrap();
         assert_eq!(&out[..n], msg);
     }
 
@@ -725,45 +1276,53 @@ mod tests {
         let c = public
             .encrypt_oaep::<Sha256, _>(&mut rng, b"", b"hello")
             .unwrap();
-        let n = key.decrypt_oaep::<Sha256>(b"", &c, &mut out).unwrap();
+        let n = key
+            .decrypt_oaep::<Sha256>(b"", c.as_ref(), &mut out)
+            .unwrap();
         assert_eq!(&out[..n], b"hello");
         let c = public
             .encrypt_oaep::<Sha256, _>(&mut rng, b"", b"")
             .unwrap();
-        let n = key.decrypt_oaep::<Sha256>(b"", &c, &mut out).unwrap();
+        let n = key
+            .decrypt_oaep::<Sha256>(b"", c.as_ref(), &mut out)
+            .unwrap();
         assert_eq!(n, 0);
     }
 
     /// A generated key encrypts and decrypts, and round-trips its
-    /// parts through export and CRT import.
+    /// parts through export and CRT import, at a length that is not
+    /// a power of two.
     #[test]
     fn generated_key_round_trips() {
         use crate::random::CtrDrbg;
         let mut rng = CtrDrbg::from_system().unwrap();
-        let key = Rsa1024PrivateKey::generate(&mut rng).unwrap();
-        let mut out = [0u8; 128];
+        let key = PrivateKey::generate(&mut rng, 1200).unwrap();
+        assert_eq!(key.bits(), 1200);
+        assert_eq!(key.modulus_len(), 150);
+        let mut out = [0u8; 150];
         let c = key
             .public_key()
             .encrypt_oaep::<Sha256, _>(&mut rng, b"", b"session key")
             .unwrap();
-        let n = key.decrypt_oaep::<Sha256>(b"", &c, &mut out).unwrap();
+        assert_eq!(c.len(), 150);
+        let n = key
+            .decrypt_oaep::<Sha256>(b"", c.as_ref(), &mut out)
+            .unwrap();
         assert_eq!(&out[..n], b"session key");
 
-        let nb = key.public_key().modulus_bytes();
+        let mut nb = [0u8; 150];
+        let mut d = [0u8; 150];
+        key.public_key().modulus_bytes(&mut nb).unwrap();
+        key.d_bytes(&mut d).unwrap();
         let e = key.public_key().exponent_bytes();
-        let d = key.d_bytes();
-        let mut p = [0u8; 64];
-        let mut q = [0u8; 64];
-        let mut dp = [0u8; 64];
-        let mut dq = [0u8; 64];
-        let mut qinv = [0u8; 64];
-        key.crt_bytes(&mut p, &mut q, &mut dp, &mut dq, &mut qinv)
+        let mut parts = [[0u8; 75]; 5];
+        let [p, q, dp, dq, qinv] = &mut parts;
+        key.crt_bytes(p, q, dp, dq, qinv).unwrap();
+        let again =
+            PrivateKey::try_new_crt(&nb, &e, &d, p, q, dp, dq, qinv).unwrap();
+        let n = again
+            .decrypt_oaep::<Sha256>(b"", c.as_ref(), &mut out)
             .unwrap();
-        let again = Rsa1024PrivateKey::try_new_crt(
-            &nb, &e, &d, &p, &q, &dp, &dq, &qinv,
-        )
-        .unwrap();
-        let n = again.decrypt_oaep::<Sha256>(b"", &c, &mut out).unwrap();
         assert_eq!(&out[..n], b"session key");
     }
 
@@ -793,9 +1352,14 @@ mod tests {
             key.decrypt_oaep::<Sha512>(b"", &c, &mut out),
             Err(Error::DecryptionFailed),
         );
-        // A representative at or above the modulus.
+        // A representative at or above the modulus, and the wrong
+        // length.
         assert_eq!(
             key.decrypt_oaep::<Sha256>(b"", &[0xff; 256], &mut out),
+            Err(Error::DecryptionFailed),
+        );
+        assert_eq!(
+            key.decrypt_oaep::<Sha256>(b"", &c[1..], &mut out),
             Err(Error::DecryptionFailed),
         );
         // Too small an output buffer is its own, public error.
@@ -805,12 +1369,10 @@ mod tests {
         );
         // A message the key cannot carry.
         assert_eq!(
-            key.public_key().oaep_encode::<Sha256>(
-                &seed,
-                b"",
-                &[0u8; 256 - 64 - 1],
-            ),
-            Err(Error::MessageTooLong),
+            key.public_key()
+                .oaep_encode::<Sha256>(&seed, b"", &[0u8; 256 - 64 - 1])
+                .err(),
+            Some(Error::MessageTooLong),
         );
     }
 
@@ -824,9 +1386,12 @@ mod tests {
         m[0] = 0x01;
         m[255] = 0x42;
 
-        let c = public.encrypt_primitive(&m).unwrap();
+        let mut c = [0u8; 256];
+        public.encrypt_primitive(&m, &mut c).unwrap();
         assert_ne!(c, m, "the primitive did nothing");
-        assert_eq!(key.decrypt_primitive(&c).unwrap(), m);
+        let mut back = [0u8; 256];
+        key.decrypt_primitive(&c, &mut back).unwrap();
+        assert_eq!(back, m);
     }
 
     /// A representative at or above the modulus is refused by both
@@ -836,13 +1401,20 @@ mod tests {
         let key = key2048();
         let public = key.public_key();
         let n = unhex::<256>(N2048);
-        assert_eq!(public.encrypt_primitive(&n), Err(Error::MessageTooLong));
-        assert_eq!(key.decrypt_primitive(&n), Err(Error::DecryptionFailed));
+        let mut out = [0u8; 256];
+        assert_eq!(
+            public.encrypt_primitive(&n, &mut out),
+            Err(Error::MessageTooLong)
+        );
+        assert_eq!(
+            key.decrypt_primitive(&n, &mut out),
+            Err(Error::DecryptionFailed)
+        );
 
         let mut under = n;
         under[255] -= 1;
-        assert!(public.encrypt_primitive(&under).is_ok());
-        assert!(key.decrypt_primitive(&under).is_ok());
+        assert!(public.encrypt_primitive(&under, &mut out).is_ok());
+        assert!(key.decrypt_primitive(&under, &mut out).is_ok());
     }
 
     /// OAEP is built on the primitive: undoing the transport by hand
@@ -854,7 +1426,8 @@ mod tests {
             .public_key()
             .oaep_encode::<Sha256>(&unhex::<32>(OAEP_SEED256), b"", b"hello")
             .unwrap();
-        let em = key.decrypt_primitive(&sealed).unwrap();
+        let mut em = [0u8; 256];
+        key.decrypt_primitive(sealed.as_ref(), &mut em).unwrap();
         // OAEP's encoded message always has a zero leading byte.
         assert_eq!(em[0], 0);
     }
@@ -865,60 +1438,67 @@ mod tests {
     #[test]
     fn formats_round_trip() {
         let mut rng = crate::random::CtrDrbg::from_system().unwrap();
-        let key = Rsa1024PrivateKey::generate(&mut rng).unwrap();
+        let key = PrivateKey::generate(&mut rng, 1024).unwrap();
         let sealed = key
             .public_key()
             .encrypt_oaep::<Sha256, _>(&mut rng, b"", b"session key")
             .unwrap();
         let mut out = [0u8; 8 * 128];
         let mut msg = [0u8; 128];
+        let mut d = [0u8; 128];
+        key.d_bytes(&mut d).unwrap();
 
         let n = key.der_bytes(&mut out).unwrap();
         let backs = [
-            Rsa1024PrivateKey::try_from_der(&out[..n]).unwrap(),
+            PrivateKey::try_from_der(&out[..n]).unwrap(),
             {
                 let n = key.pkcs1_bytes(&mut out).unwrap();
-                Rsa1024PrivateKey::try_from_pkcs1(&out[..n]).unwrap()
+                PrivateKey::try_from_pkcs1(&out[..n]).unwrap()
             },
             {
                 let n = key.pem_bytes(&mut out).unwrap();
-                Rsa1024PrivateKey::try_from_pem(&out[..n]).unwrap()
+                PrivateKey::try_from_pem(&out[..n]).unwrap()
             },
             {
                 let n = key.pkcs1_pem_bytes(&mut out).unwrap();
-                Rsa1024PrivateKey::try_from_pem(&out[..n]).unwrap()
+                PrivateKey::try_from_pem(&out[..n]).unwrap()
             },
         ];
         for back in &backs {
-            assert_eq!(back.d_bytes(), key.d_bytes());
-            let n =
-                back.decrypt_oaep::<Sha256>(b"", &sealed, &mut msg).unwrap();
+            let mut again = [0u8; 128];
+            back.d_bytes(&mut again).unwrap();
+            assert_eq!(again, d);
+            let n = back
+                .decrypt_oaep::<Sha256>(b"", sealed.as_ref(), &mut msg)
+                .unwrap();
             assert_eq!(&msg[..n], b"session key");
         }
 
         let public = key.public_key();
         let n = public.der_bytes(&mut out).unwrap();
         let backs = [
-            Rsa1024PublicKey::try_from_der(&out[..n]).unwrap(),
+            PublicKey::try_from_der(&out[..n]).unwrap(),
             {
                 let n = public.pkcs1_bytes(&mut out).unwrap();
-                Rsa1024PublicKey::try_from_pkcs1(&out[..n]).unwrap()
+                PublicKey::try_from_pkcs1(&out[..n]).unwrap()
             },
             {
                 let n = public.pem_bytes(&mut out).unwrap();
-                Rsa1024PublicKey::try_from_pem(&out[..n]).unwrap()
+                PublicKey::try_from_pem(&out[..n]).unwrap()
             },
             {
                 let n = public.pkcs1_pem_bytes(&mut out).unwrap();
-                Rsa1024PublicKey::try_from_pem(&out[..n]).unwrap()
+                PublicKey::try_from_pem(&out[..n]).unwrap()
             },
         ];
         for back in &backs {
-            assert_eq!(back.modulus_bytes(), public.modulus_bytes());
+            assert_eq!(back.bits(), 1024);
             let sealed = back
                 .encrypt_oaep::<Sha256, _>(&mut rng, b"", b"again")
                 .unwrap();
-            let n = key.decrypt_oaep::<Sha256>(b"", &sealed, &mut msg).unwrap();
+            let n = key
+                .decrypt_oaep::<Sha256>(b"", sealed.as_ref(), &mut msg)
+                .unwrap();
             assert_eq!(&msg[..n], b"again");
         }
     }
@@ -928,7 +1508,7 @@ mod tests {
     #[test]
     fn pss_keys_and_plain_keys_are_refused() {
         let mut rng = crate::random::CtrDrbg::from_system().unwrap();
-        let key = Rsa1024PrivateKey::generate(&mut rng).unwrap();
+        let key = PrivateKey::generate(&mut rng, 1024).unwrap();
         let mut out = [0u8; 8 * 128];
         let n = key.der_bytes(&mut out).unwrap();
         let oid_end = out[..n]
@@ -938,7 +1518,7 @@ mod tests {
             + 8;
         out[oid_end] = 0x0a;
         assert_eq!(
-            Rsa1024PrivateKey::try_from_der(&out[..n]).err(),
+            PrivateKey::try_from_der(&out[..n]).err(),
             Some(Error::InvalidEncoding)
         );
         let n = key.public_key().der_bytes(&mut out).unwrap();
@@ -949,12 +1529,55 @@ mod tests {
             + 8;
         out[oid_end] = 0x0a;
         assert_eq!(
-            Rsa1024PublicKey::try_from_der(&out[..n]).err(),
+            PublicKey::try_from_der(&out[..n]).err(),
             Some(Error::InvalidEncoding)
         );
 
         let plain = key1024();
         assert_eq!(plain.der_bytes(&mut out), Err(Error::InvalidPrivateKey));
         assert_eq!(plain.pem_bytes(&mut out), Err(Error::InvalidPrivateKey));
+    }
+
+    /// The borrowed form decrypts what the owned form encrypted, and
+    /// the same ciphertext comes out of both for a pinned seed.
+    #[test]
+    fn the_borrowed_key_is_the_same_key() {
+        let owned = key2048();
+        let seed = unhex::<32>(OAEP_SEED256);
+        let want = owned
+            .public_key()
+            .oaep_encode::<Sha256>(&seed, b"", b"hello")
+            .unwrap();
+
+        let mut storage = [0u64; private_words(2048)];
+        let mut scratch = [0u64; scratch_words(2048)];
+        PrivateKeyRef::fill(
+            &unhex::<256>(N2048),
+            E,
+            &unhex::<256>(D2048),
+            &mut storage,
+        )
+        .unwrap();
+        let key = PrivateKeyRef::new(&storage).unwrap();
+        let got = key
+            .public_key()
+            .oaep_encode::<Sha256>(&seed, b"", b"hello", &mut scratch)
+            .unwrap();
+        assert_eq!(got, want);
+        let mut out = [0u8; 256];
+        let n = key
+            .decrypt_oaep::<Sha256>(b"", got.as_ref(), &mut out, &mut scratch)
+            .unwrap();
+        assert_eq!(&out[..n], b"hello");
+        assert_eq!(
+            key.decrypt_oaep::<Sha256>(
+                b"",
+                got.as_ref(),
+                &mut out,
+                &mut [0; 8]
+            )
+            .err(),
+            Some(Error::ScratchTooSmall(scratch_words(2048)))
+        );
     }
 }

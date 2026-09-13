@@ -61,6 +61,9 @@ pub enum Error {
     /// The output buffer is too small. The number is the length it
     /// needs to be.
     OutputTooSmall(usize),
+    /// The scratch or storage slice handed to an RSA key is too
+    /// short. The number is the length in words it needs to be.
+    ScratchTooSmall(usize),
     /// The count of trailing bits is not 1 to 7.
     InvalidBitCount(u32),
     /// The seed is shorter than the generator requires.
@@ -148,6 +151,9 @@ impl fmt::Display for Error {
             }
             Error::OutputTooSmall(n) => {
                 write!(f, "output buffer too small: {n} bytes needed")
+            }
+            Error::ScratchTooSmall(n) => {
+                write!(f, "scratch slice too small: {n} words needed")
             }
             Error::InvalidBitCount(n) => {
                 write!(f, "invalid trailing bit count: {n}")

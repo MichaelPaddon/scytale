@@ -27,7 +27,7 @@ use super::{hex, load};
 use crate::hash::Hash;
 use crate::hash::sha1::Sha1;
 use crate::hash::sha2::Sha512;
-use crate::pke::rsa::Rsa2048PrivateKey;
+use crate::pke::rsa::PrivateKey;
 use serde_json::Value;
 
 const FILE: &str = "KTS-IFC-Sp800-56Br2/internalProjection.json";
@@ -90,9 +90,9 @@ fn label(group: &Value, t: &Value) -> Vec<u8> {
 }
 
 fn decrypt<H: Hash>(
-    key: &Rsa2048PrivateKey,
+    key: &PrivateKey,
     label: &[u8],
-    ciphertext: &[u8; 256],
+    ciphertext: &[u8],
     out: &mut [u8; 256],
 ) -> usize {
     key.decrypt_oaep::<H>(label, ciphertext, out)
@@ -128,14 +128,11 @@ pub fn run() {
             } else {
                 ("serverN", "serverE", "serverD", "iutC", "iutK")
             };
-            let key = Rsa2048PrivateKey::try_new(
-                &hex(&t[n]),
-                &hex(&t[e]),
-                &hex(&t[d]),
-            )
-            .expect("private key");
-            let ciphertext: [u8; 256] =
-                hex(&t[c]).try_into().expect("ciphertext");
+            let key =
+                PrivateKey::try_new(&hex(&t[n]), &hex(&t[e]), &hex(&t[d]))
+                    .expect("private key");
+            assert_eq!(key.bits(), 2048, "{tag} modulus length");
+            let ciphertext = hex(&t[c]);
 
             let label = label(group, t);
             let mut out = [0u8; 256];
