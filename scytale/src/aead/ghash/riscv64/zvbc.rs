@@ -37,10 +37,21 @@
 //! that no product needs shifting afterwards. See [`zbc`] and the
 //! longer note in the x86 one.
 //!
+//! # The reduction is in the block
+//!
+//! The scalar backend reduces in Rust, with one `clmul` pair per
+//! fold taken from a general-register instruction. There is no such
+//! instruction here: a single-lane product means a vector multiply,
+//! and getting its operands in and its result out through memory,
+//! which an earlier version of this file did, cost more than the
+//! reduction it was for. So the six thirds of the product stay in
+//! vector registers and the two folds are done there, at a vector
+//! length of one, and only the two words of the answer come out.
+//!
 //! [`zbc`]: super::zbc
 
 use super::super::{BLOCK, MAX_GROUP, divide_by_x};
-use super::finish;
+use super::POLYNOMIAL;
 use crate::arch::riscv64::{EXT_ZVBB, EXT_ZVBC, EXT_ZVKB, IMA_V};
 
 /// How many blocks the group multiply takes at once. Eight fills the
@@ -62,87 +73,107 @@ pub(super) fn prepare(h: &[u64; 2]) -> [u64; 2] {
     divide_by_x(h)
 }
 
-/// The carry-less products of four pairs, the low halves in the first
-/// array and the high halves in the second.
-///
-/// # Safety
-/// Requires the vector extension and Zvbc with `VLEN >= 128`.
-#[allow(unsafe_code)]
-unsafe fn wides(a: &[u64; 4], b: &[u64; 4]) -> ([u64; 4], [u64; 4]) {
-    let mut lo = [0u64; 4];
-    let mut hi = [0u64; 4];
-    // SAFETY: the caller has confirmed the instructions; the asm
-    // reads eight words through the two pointers and writes eight
-    // through the other two, all of which are whole arrays here.
-    unsafe {
-        core::arch::asm!(
-            ".option push",
-            ".option arch, +v, +zvbc",
-            "vsetivli zero, 4, e64, m4, ta, ma",
-            "vle64.v v4, ({a})",
-            "vle64.v v8, ({b})",
-            "vclmul.vv v12, v4, v8",
-            "vclmulh.vv v16, v4, v8",
-            "vse64.v v12, ({lo})",
-            "vse64.v v16, ({hi})",
-            ".option pop",
-            a = in(reg) a.as_ptr(),
-            b = in(reg) b.as_ptr(),
-            lo = in(reg) lo.as_mut_ptr(),
-            hi = in(reg) hi.as_mut_ptr(),
-            out("v4") _, out("v5") _, out("v6") _, out("v7") _,
-            out("v8") _, out("v9") _, out("v10") _, out("v11") _,
-            out("v12") _, out("v13") _, out("v14") _, out("v15") _,
-            out("v16") _, out("v17") _, out("v18") _, out("v19") _,
-            options(nostack),
-        );
-    }
-    (lo, hi)
-}
-
-/// The carry-less product of one pair, least significant word first.
-///
-/// Only one lane of [`wides`] is wanted, which is what the reduction
-/// needs: its two steps depend on each other and cannot be batched.
-///
-/// # Safety
-/// As [`wides`].
-#[inline]
-#[allow(unsafe_code)]
-unsafe fn wide(a: u64, b: u64) -> [u64; 2] {
-    // SAFETY: the caller has confirmed the instructions.
-    let (lo, hi) = unsafe { wides(&[a, 0, 0, 0], &[b, 0, 0, 0]) };
-    [lo[0], hi[0]]
+/// The reduction, at a vector length of one: [`super::finish`]
+/// written in `vxor`, `vclmul` and `vclmulh`, on the six thirds of
+/// the product held in v5/v6 (low), v7/v13 (middle) and v14/v15
+/// (high), with the field polynomial in v4 and v8/v9 as scratch.
+/// Leaves the two words of the answer in v14 and v15. The caller has
+/// set `vl = 1` with 64-bit elements.
+macro_rules! reduce {
+    () => {
+        concat!(
+            // Karatsuba's middle term is the sum of the cross
+            // products, recovered from the product of the sums, and
+            // belongs half in each end of the 256-bit result.
+            "vxor.vv v7, v7, v5\n",
+            "vxor.vv v7, v7, v14\n",
+            "vxor.vv v13, v13, v6\n",
+            "vxor.vv v13, v13, v15\n",
+            "vxor.vv v6, v6, v7\n",
+            "vxor.vv v14, v14, v13\n",
+            // Fold the low half down in two steps, exchanging the
+            // halves in between so that the same step does both.
+            "vclmul.vv v8, v4, v5\n",
+            "vclmulh.vv v9, v4, v5\n",
+            "vxor.vv v6, v6, v8\n",
+            "vxor.vv v5, v5, v9\n",
+            "vclmul.vv v8, v4, v6\n",
+            "vclmulh.vv v9, v4, v6\n",
+            "vxor.vv v14, v14, v5\n",
+            "vxor.vv v14, v14, v8\n",
+            "vxor.vv v15, v15, v6\n",
+            "vxor.vv v15, v15, v9\n",
+        )
+    };
 }
 
 /// Multiplies `value` by the prepared subkey `h`, in place.
 ///
+/// One block, nothing through memory: the four words go in with
+/// `vmv.s.x`, the three products and the reduction happen at a
+/// vector length of one, and two words come out. This is the tail of
+/// a message; the lanes are for [`multiply_group`].
+///
 /// # Safety
-/// As [`wides`].
+/// Requires the vector extension and Zvbc.
 #[allow(unsafe_code)]
 pub(super) unsafe fn multiply(value: &mut [u64; 2], h: &[u64; 2]) {
+    // The words are held most significant first; the arithmetic
+    // wants them the other way round, which is the order the subkey
+    // already comes in from prepare.
+    let (xl, xh) = (value[1], value[0]);
+    let (hl, hh) = (h[0], h[1]);
+    let (out0, out1): (u64, u64);
+    // SAFETY: the caller has confirmed the instructions; the block
+    // touches no memory.
     unsafe {
-        // The words are held most significant first; the arithmetic
-        // wants them the other way round, which is the order the
-        // subkey already comes in from prepare.
-        let (xl, xh) = (value[1], value[0]);
-        let (hl, hh) = (h[0], h[1]);
-        // All three of Karatsuba's products in one pass.
-        let (lo, hi) = wides(&[xl, xl ^ xh, xh, 0], &[hl, hl ^ hh, hh, 0]);
-        let out =
-            finish([lo[0], hi[0]], [lo[1], hi[1]], [lo[2], hi[2]], |a, b| {
-                wide(a, b)
-            });
-        value[0] = out[1];
-        value[1] = out[0];
+        core::arch::asm!(
+            ".option push",
+            ".option arch, +v, +zvbc",
+            "vsetivli zero, 1, e64, m1, ta, ma",
+            "vmv.s.x v1, {xl}",
+            "vmv.s.x v2, {xh}",
+            "vmv.s.x v3, {hl}",
+            "vmv.s.x v10, {hh}",
+            "vmv.v.x v4, {poly}",
+            // The low, high and middle products, the middle from
+            // each operand's halves added together.
+            "vclmul.vv v5, v1, v3",
+            "vclmulh.vv v6, v1, v3",
+            "vclmul.vv v14, v2, v10",
+            "vclmulh.vv v15, v2, v10",
+            "vxor.vv v1, v1, v2",
+            "vxor.vv v3, v3, v10",
+            "vclmul.vv v7, v1, v3",
+            "vclmulh.vv v13, v1, v3",
+            reduce!(),
+            "vmv.x.s {out0}, v14",
+            "vmv.x.s {out1}, v15",
+            ".option pop",
+            xl = in(reg) xl,
+            xh = in(reg) xh,
+            hl = in(reg) hl,
+            hh = in(reg) hh,
+            poly = in(reg) POLYNOMIAL,
+            out0 = out(reg) out0,
+            out1 = out(reg) out1,
+            out("v1") _, out("v2") _, out("v3") _, out("v4") _,
+            out("v5") _, out("v6") _, out("v7") _, out("v8") _,
+            out("v9") _, out("v10") _, out("v13") _, out("v14") _,
+            out("v15") _,
+            options(nomem, nostack),
+        );
     }
+    value[0] = out1;
+    value[1] = out0;
 }
 
 /// Multiplies in the whole of `blocks`, which is [`GROUP`] blocks,
 /// leaving the running hash in `value`.
 ///
 /// # Safety
-/// As [`wides`], and `blocks` must be exactly [`GROUP`] blocks long.
+/// Requires the vector extension, Zvbc and a byte reverse, and
+/// `blocks` must be exactly [`GROUP`] blocks long.
 /// `powers` holds the prepared powers of the subkey, `H` first, so the
 /// first block meets `H^8` and the last meets `H`.
 #[allow(unsafe_code)]
@@ -153,7 +184,7 @@ pub(super) unsafe fn multiply_group(
 ) {
     unsafe {
         debug_assert_eq!(blocks.len(), GROUP * BLOCK);
-        let (lo0, lo1, m0, m1, hi0, hi1): (u64, u64, u64, u64, u64, u64);
+        let (out0, out1): (u64, u64);
         // The first block meets the highest power, so the powers are
         // walked backwards.
         let last = powers.as_ptr().add(GROUP - 1) as *const u64;
@@ -196,19 +227,31 @@ pub(super) unsafe fn multiply_group(
 
             // Add the lanes together: the blocks' products are terms
             // of one sum. v12 supplies the zero each starts from.
+            // Each sum lands in lane zero of v4 and is moved to a
+            // register of its own for the reduction; those live in
+            // v4's and v12's groups, so the tail is kept undisturbed
+            // rather than left to the reduction to overwrite.
             "vmv.v.i v12, 0",
+            "vsetivli zero, 8, e64, m4, tu, ma",
             "vredxor.vs v4, v20, v12",
-            "vmv.x.s {lo0}, v4",
+            "vmv1r.v v5, v4",
             "vredxor.vs v4, v24, v12",
-            "vmv.x.s {lo1}, v4",
+            "vmv1r.v v6, v4",
             "vredxor.vs v4, v8, v12",
-            "vmv.x.s {m0}, v4",
+            "vmv1r.v v7, v4",
             "vredxor.vs v4, v16, v12",
-            "vmv.x.s {m1}, v4",
+            "vmv1r.v v13, v4",
             "vredxor.vs v4, v28, v12",
-            "vmv.x.s {hi0}, v4",
+            "vmv1r.v v14, v4",
             "vredxor.vs v4, v0, v12",
-            "vmv.x.s {hi1}, v4",
+            "vmv1r.v v15, v4",
+
+            // Then the reduction on those six, one lane wide.
+            "vsetivli zero, 1, e64, m1, ta, ma",
+            "vmv.v.x v4, {poly}",
+            reduce!(),
+            "vmv.x.s {out0}, v14",
+            "vmv.x.s {out1}, v15",
             ".option pop",
             bhi = in(reg) blocks.as_ptr(),
             blo = in(reg) blocks.as_ptr().add(8),
@@ -218,12 +261,9 @@ pub(super) unsafe fn multiply_group(
             back = in(reg) -(BLOCK as isize),
             ylo = in(reg) value[1],
             yhi = in(reg) value[0],
-            lo0 = out(reg) lo0,
-            lo1 = out(reg) lo1,
-            m0 = out(reg) m0,
-            m1 = out(reg) m1,
-            hi0 = out(reg) hi0,
-            hi1 = out(reg) hi1,
+            poly = in(reg) POLYNOMIAL,
+            out0 = out(reg) out0,
+            out1 = out(reg) out1,
             out("v0") _, out("v1") _, out("v2") _, out("v3") _,
             out("v4") _, out("v5") _, out("v6") _, out("v7") _,
             out("v8") _, out("v9") _, out("v10") _, out("v11") _,
@@ -235,8 +275,7 @@ pub(super) unsafe fn multiply_group(
             options(nostack),
         );
 
-        let out = finish([lo0, lo1], [m0, m1], [hi0, hi1], |a, b| wide(a, b));
-        value[0] = out[1];
-        value[1] = out[0];
+        value[0] = out1;
+        value[1] = out0;
     }
 }

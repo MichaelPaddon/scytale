@@ -167,7 +167,9 @@ pub(crate) fn has_vector_ghash() -> bool {
 }
 
 /// Finishes a field multiplication from its three Karatsuba pieces,
-/// given a carry-less multiply.
+/// given a carry-less multiply. The scalar backend uses this; the
+/// vector one has no scalar multiply to give and reduces inside its
+/// own block instead.
 ///
 /// `lo`, `m` and `hi` are the products of the operands' low halves,
 /// of their halves added together, and of their high halves, each
