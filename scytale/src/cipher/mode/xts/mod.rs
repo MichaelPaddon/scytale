@@ -307,13 +307,12 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
     /// because that is the one it was encrypted with.
     fn steal(
         &self,
-        last: &mut [u8],
+        last: &mut [u8; BLOCK],
         short: &mut [u8],
         mask: u8,
         t: &mut [u8; BLOCK],
         encrypt: bool,
     ) {
-        let last: &mut [u8; BLOCK] = last.try_into().expect("one whole block");
         let mut first = *t;
         let mut second = *t;
         if encrypt {
@@ -373,14 +372,16 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
     fn split(
         data: &mut [u8],
         short: usize,
-    ) -> (&mut [u8], Option<(&mut [u8], &mut [u8])>) {
+    ) -> (&mut [u8], Option<(&mut [u8; BLOCK], &mut [u8])>) {
         if short == 0 {
             return (data, None);
         }
         let boundary = data.len() - short - BLOCK;
         let (whole, rest) = data.split_at_mut(boundary);
-        let (last, short) = rest.split_at_mut(BLOCK);
-        (whole, Some((last, short)))
+        // `rest` is a block and the short tail by the arithmetic
+        // above, so the block is always there; the type carries that
+        // to `steal` rather than a check inside it.
+        (whole, rest.split_first_chunk_mut::<BLOCK>())
     }
 
     /// Runs the blocks that need no stealing, in groups, advancing

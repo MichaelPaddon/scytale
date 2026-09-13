@@ -146,7 +146,7 @@ impl<const LIMBS: usize> Uint<LIMBS> {
 
     /// The full double-width product; `OUT` must be twice `LIMBS`.
     pub(crate) fn mul_wide<const OUT: usize>(&self, other: &Self) -> Uint<OUT> {
-        assert_eq!(OUT, 2 * LIMBS, "OUT must be 2 * LIMBS");
+        const { assert!(OUT == 2 * LIMBS, "OUT must be 2 * LIMBS") };
         let mut out = [0u64; OUT];
         for (i, &a) in self.0.iter().enumerate() {
             let mut carry = 0u64;
@@ -166,7 +166,7 @@ impl<const LIMBS: usize> Uint<LIMBS> {
 
     /// The value in a wider type; `OUT` must not be narrower.
     pub(crate) fn widen<const OUT: usize>(&self) -> Uint<OUT> {
-        assert!(OUT >= LIMBS, "OUT must not be narrower");
+        const { assert!(OUT >= LIMBS, "OUT must not be narrower") };
         let mut out = [0u64; OUT];
         out[..LIMBS].copy_from_slice(&self.0);
         Uint(out)

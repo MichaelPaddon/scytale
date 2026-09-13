@@ -193,21 +193,21 @@ impl Powers {
 /// the portable code keeps, so nothing outside this file has to know
 /// about the five.
 ///
-/// # Panics
-/// If `data` is not a whole number of groups, or is empty.
+/// `data` must be a whole number of groups, and at least one; the
+/// caller splits it so, and this is a debug check on that rather
+/// than a branch on every call.
 pub(super) fn bulk(h: &mut [u64; 3], powers: &Powers, data: &[u8]) {
-    assert!(!data.is_empty() && data.len().is_multiple_of(SPAN));
+    debug_assert!(!data.is_empty() && data.len().is_multiple_of(SPAN));
     let groups = data.len() / SPAN;
 
     // The first group is added here rather than in the loop, because
     // the running value joins the first block of it and a test for
     // that inside the loop would cost more than doing it outside.
     let (first, rest) = data.split_at(SPAN);
+    let (first, _) = first.as_chunks::<BLOCK>();
     let mut lanes = [[0u64; LANES]; LIMBS];
-    for (lane, block) in ORDER.iter().enumerate() {
-        let block: &[u8; BLOCK] =
-            first[block * BLOCK..][..BLOCK].try_into().expect("block");
-        let limbs = block_limbs(block, 1);
+    for (lane, &block) in ORDER.iter().enumerate() {
+        let limbs = block_limbs(&first[block], 1);
         for (limb, &value) in lanes.iter_mut().zip(&limbs) {
             limb[lane] = value;
         }

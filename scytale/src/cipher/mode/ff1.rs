@@ -66,6 +66,7 @@ use crate::KeyType;
 use crate::cipher::BLOCK;
 use crate::cipher::{BlockCipher, OneBlock};
 use crate::math::natural::Natural;
+use zeroize::ZeroizeOnDrop;
 
 /// Rounds of the Feistel network, fixed by the standard.
 const ROUNDS: usize = 10;
@@ -348,7 +349,11 @@ fn subtract_from(half: &mut [u16], step: &[u16; MAX_SYMBOLS], radix: u32) {
 /// A chained authentication over a whole number of blocks: each block
 /// is combined with the one before it and encrypted, and the last
 /// result is the answer.
+// Wiped on drop: the state is a PRF value under the key, and the
+// block holds digits of the message on their way through.
+#[derive(ZeroizeOnDrop)]
 struct Chain<'a, C> {
+    #[zeroize(skip)]
     cipher: &'a C,
     state: [u8; BLOCK],
     block: [u8; BLOCK],

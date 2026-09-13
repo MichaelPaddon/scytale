@@ -53,7 +53,7 @@ impl<const LIMBS: usize, const BYTES: usize> Public<LIMBS, BYTES> {
     pub(crate) fn try_new(n: &[u8], e: &[u8]) -> Result<Self, Error> {
         // A mismatched pair of const parameters is a bug at the
         // definition of an alias, not a runtime condition.
-        assert_eq!(8 * LIMBS, BYTES, "BYTES must be 8 * LIMBS");
+        const { assert!(8 * LIMBS == BYTES, "BYTES must be 8 * LIMBS") };
         if n.len() != BYTES {
             return Err(Error::InvalidKeyLength(n.len()));
         }
@@ -119,7 +119,7 @@ impl<const LIMBS: usize, const BYTES: usize, const HALF: usize>
         public: &Public<LIMBS, BYTES>,
         d: &[u8],
     ) -> Result<Self, Error> {
-        assert_eq!(2 * HALF, LIMBS, "HALF must be LIMBS / 2");
+        const { assert!(2 * HALF == LIMBS, "HALF must be LIMBS / 2") };
         if d.len() > BYTES {
             return Err(Error::InvalidPrivateKey);
         }
@@ -234,7 +234,7 @@ impl<const LIMBS: usize, const BYTES: usize, const HALF: usize>
     pub(crate) fn generate<R: Random>(
         rng: &mut R,
     ) -> Result<(Public<LIMBS, BYTES>, Self), Error> {
-        assert_eq!(2 * HALF, LIMBS, "HALF must be LIMBS / 2");
+        const { assert!(2 * HALF == LIMBS, "HALF must be LIMBS / 2") };
         const E_WORD: u64 = 65537;
 
         let mut p = probable_prime::<HALF, R>(rng)?;

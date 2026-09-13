@@ -587,8 +587,10 @@ impl<const L: usize> Secret<L> {
         self.d.to_be_bytes(d_bytes.as_flattened_mut());
         let mut z_bytes = [[0u8; 8]; L];
         z.to_be_bytes(z_bytes.as_flattened_mut());
-        let mut nonce =
-            Nonce::<H>::new(d_bytes.as_flattened(), z_bytes.as_flattened())?;
+        let mut nonce = Nonce::<H>::try_new(
+            d_bytes.as_flattened(),
+            z_bytes.as_flattened(),
+        )?;
         d_bytes.zeroize();
 
         loop {
@@ -729,7 +731,7 @@ struct Nonce<H: Hash + Clone + BlockType> {
 impl<H: Hash + Clone + BlockType> Nonce<H> {
     /// Steps b through g, given `int2octets(x)` and
     /// `bits2octets(h1)`.
-    fn new(x: &[u8], h: &[u8]) -> Result<Self, Error> {
+    fn try_new(x: &[u8], h: &[u8]) -> Result<Self, Error> {
         // V starts as 0x01 repeated and K as 0x00 repeated. A digest
         // is the only `H::Output` generic code can make; its value
         // is gone before either is used.

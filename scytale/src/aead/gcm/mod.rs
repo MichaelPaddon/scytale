@@ -393,7 +393,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
     /// dictates it.
     pub fn encryptor(&self, nonce: &[u8]) -> Result<Encryptor<'_, C>, Error> {
         Ok(Encryptor {
-            core: Core::new(self, nonce)?,
+            core: Core::try_new(self, nonce)?,
         })
     }
 
@@ -403,7 +403,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Gcm<C> {
     /// [`encryptor`](Self::encryptor) explains.
     pub fn decryptor(&self, nonce: &[u8]) -> Result<Decryptor<'_, C>, Error> {
         Ok(Decryptor {
-            core: Core::new(self, nonce)?,
+            core: Core::try_new(self, nonce)?,
         })
     }
 }
@@ -534,7 +534,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Core<'_, C> {
 }
 
 impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
-    fn new(gcm: &'a Gcm<C>, nonce: &[u8]) -> Result<Self, Error> {
+    fn try_new(gcm: &'a Gcm<C>, nonce: &[u8]) -> Result<Self, Error> {
         let cipher = &gcm.cipher;
         let start = counter_start(gcm, nonce)?;
         let mut mask = start;

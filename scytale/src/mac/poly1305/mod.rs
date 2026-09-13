@@ -158,19 +158,20 @@ impl Poly1305 {
         self.h = [h0, h1, h2];
     }
 
-    /// Makes sure the powers of `r` are to hand, and says whether
-    /// this processor can use them. What the processor has was
-    /// settled when the authenticator was made; only the powers are
-    /// left until a run arrives that is worth them.
+    /// The powers of `r`, where this processor can use them. What
+    /// the processor has was settled when the authenticator was made;
+    /// only the powers are left until a run arrives that is worth
+    /// them.
     #[cfg(target_arch = "x86_64")]
-    fn ready(&mut self) -> bool {
+    fn ready(&mut self) -> Option<x86_64::Powers> {
         if !self.fast {
-            return false;
+            return None;
         }
-        if self.powers.is_none() {
-            self.powers = Some(x86_64::Powers::new(&self.r));
-        }
-        true
+        Some(
+            *self
+                .powers
+                .get_or_insert_with(|| x86_64::Powers::new(&self.r)),
+        )
     }
 
     /// Fully reduces the accumulator, adds `s`, and returns the tag.
@@ -257,10 +258,11 @@ impl Mac for Poly1305 {
         // Whole groups through the loop written out for this
         // processor, where there is one, and the odd blocks after.
         #[cfg(target_arch = "x86_64")]
-        if data.len() >= x86_64::SPAN && self.ready() {
+        if data.len() >= x86_64::SPAN
+            && let Some(powers) = self.ready()
+        {
             let groups = data.len() / x86_64::SPAN;
             let (whole, rest) = data.split_at(groups * x86_64::SPAN);
-            let powers = self.powers.expect("just made");
             x86_64::bulk(&mut self.h, &powers, whole);
             data = rest;
         }
