@@ -46,24 +46,35 @@
 
 #![allow(unsafe_code)]
 
-use super::super::engine::{Compress32, Compress64, Engine32, Engine64};
+use super::super::engine::{Compress32, Compress64};
+#[cfg(test)]
+use super::super::engine::{Engine32, Engine64};
 use super::super::portable::{K256, K512};
+#[cfg(test)]
 use super::super::variant;
 use crate::arch::riscv64::{
     EXT_ZVBB, EXT_ZVKB, EXT_ZVKNHA, EXT_ZVKNHB, IMA_V, extensions, vector_bytes,
 };
 
+// Named for the vector suites and the benchmark, which drive each
+// engine in turn; the dispatching types reach it directly.
 /// SHA-224 with Zvknh.
+#[cfg(test)]
 pub type Sha224 = Engine32<Zvknh, variant::Sha224>;
 /// SHA-256 with Zvknh.
+#[cfg(test)]
 pub type Sha256 = Engine32<Zvknh, variant::Sha256>;
 /// SHA-384 with Zvknh.
+#[cfg(test)]
 pub type Sha384 = Engine64<Zvknh, variant::Sha384>;
 /// SHA-512 with Zvknh.
+#[cfg(test)]
 pub type Sha512 = Engine64<Zvknh, variant::Sha512>;
 /// SHA-512/224 with Zvknh.
+#[cfg(test)]
 pub type Sha512_224 = Engine64<Zvknh, variant::Sha512_224>;
 /// SHA-512/256 with Zvknh.
+#[cfg(test)]
 pub type Sha512_256 = Engine64<Zvknh, variant::Sha512_256>;
 
 /// The vector SHA-2 instructions.

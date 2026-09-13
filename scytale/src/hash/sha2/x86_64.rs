@@ -15,14 +15,21 @@
 use crate::probe::Probe;
 use core::arch::x86_64::__cpuid_count;
 
-use super::engine::{Compress32, Engine32};
+use super::engine::Compress32;
+#[cfg(test)]
+use super::engine::Engine32;
 use super::portable::K256;
+#[cfg(test)]
 use super::variant;
 use crate::align::At16;
 
+// Named for the vector suites and the benchmark, which drive each
+// engine in turn; the dispatching types reach it directly.
 /// SHA-224 with SHA-NI.
+#[cfg(test)]
 pub type Sha224 = Engine32<ShaNi, variant::Sha224>;
 /// SHA-256 with SHA-NI.
+#[cfg(test)]
 pub type Sha256 = Engine32<ShaNi, variant::Sha256>;
 
 /// Whether the processor reports SHA-NI (CPUID leaf 7, EBX bit 29).

@@ -37,6 +37,9 @@ impl Probe {
     }
 
     /// Whether the processor has it, asking `ask` the first time.
+    // RISC-V keeps the whole extension word instead, so it never puts
+    // a yes-or-no question and has no caller for this.
+    #[cfg_attr(target_arch = "riscv64", allow(dead_code))]
     pub(crate) fn yes(&self, ask: impl Fn() -> bool) -> bool {
         match self.0.load(Ordering::Relaxed) {
             0 => {

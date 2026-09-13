@@ -62,7 +62,7 @@ impl<const K: usize> Aes<K> {
     /// Whether this processor can run this implementation: it is
     /// plain Rust, so always. Named for the inventory the vector
     /// suites print, which asks every implementation alike.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn supported() -> bool {
         true
     }

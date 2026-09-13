@@ -57,17 +57,9 @@
 //! on a 64-bit processor is a little slower than SHA-256 with no
 //! hardware and much slower than SHA-256 with it.
 
-// The engines are named here for the vector suites and the
-// benchmark, which drive each one in turn; a build that runs
-// neither reaches them only through the dispatching types.
-#[allow(dead_code)]
 #[cfg(target_arch = "aarch64")]
 pub(crate) mod aarch64;
 pub(crate) mod engine;
-// The engines are named here for the vector suites and the
-// benchmark, which drive each one in turn; a build that runs
-// neither reaches them only through the dispatching types.
-#[allow(dead_code)]
 pub(crate) mod portable;
 
 use core::fmt;

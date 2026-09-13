@@ -35,13 +35,11 @@
 //! function above treats either with the same suspicion.
 
 #![allow(unsafe_code)]
-// Built on every system, so that the tests below run somewhere they
-// can be watched, but used only where there is no operating system.
-#![allow(dead_code)]
 
 use crate::Error;
 
-/// Whether this build has an instruction to use.
+/// Whether this build has an instruction to use, for the tests.
+#[cfg(test)]
 pub(crate) const AVAILABLE: bool = cfg!(any(
     target_arch = "aarch64",
     target_arch = "riscv64",
@@ -56,6 +54,7 @@ const TRIES: usize = 10;
 
 /// The same for `rdseed`, which is rate limited by design and needs
 /// more patience: it is gathering, not expanding.
+#[cfg(target_arch = "x86_64")]
 const SEED_TRIES: usize = 100;
 
 /// The number a system uses for a device that is not working.

@@ -55,28 +55,12 @@
 //! See [the module above](crate::hash#not-a-mac): a key in front of
 //! the message does not make a MAC.
 
-// The engines are named here for the vector suites and the
-// benchmark, which drive each one in turn; a build that runs
-// neither reaches them only through the dispatching types.
-#[allow(dead_code)]
 #[cfg(target_arch = "aarch64")]
 pub(crate) mod aarch64;
 pub(crate) mod engine;
-// The engines are named here for the vector suites and the
-// benchmark, which drive each one in turn; a build that runs
-// neither reaches them only through the dispatching types.
-#[allow(dead_code)]
 pub(crate) mod portable;
-// The engines are named here for the vector suites and the
-// benchmark, which drive each one in turn; a build that runs
-// neither reaches them only through the dispatching types.
-#[allow(dead_code)]
 #[cfg(target_arch = "riscv64")]
 pub(crate) mod riscv64;
-// The engines are named here for the vector suites and the
-// benchmark, which drive each one in turn; a build that runs
-// neither reaches them only through the dispatching types.
-#[allow(dead_code)]
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod x86_64;
 

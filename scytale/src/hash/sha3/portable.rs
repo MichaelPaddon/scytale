@@ -6,20 +6,31 @@
 //! time taken depends on nothing but the length of the message.
 
 // Only the trait impl is unsafe, and it calls safe code.
-use super::engine::{LANES, Permutation, Sponge};
+#[cfg(test)]
+use super::engine::Sponge;
+use super::engine::{LANES, Permutation};
+#[cfg(test)]
 use super::variant;
 
+// Named for the vector suites and the benchmark, which drive each
+// engine in turn; the dispatching types reach it directly.
 /// SHA3-224, portably.
+#[cfg(test)]
 pub type Sha3_224 = Sponge<Keccak, variant::Sha3_224>;
 /// SHA3-256, portably.
+#[cfg(test)]
 pub type Sha3_256 = Sponge<Keccak, variant::Sha3_256>;
 /// SHA3-384, portably.
+#[cfg(test)]
 pub type Sha3_384 = Sponge<Keccak, variant::Sha3_384>;
 /// SHA3-512, portably.
+#[cfg(test)]
 pub type Sha3_512 = Sponge<Keccak, variant::Sha3_512>;
 /// SHAKE128, portably.
+#[cfg(test)]
 pub type Shake128 = Sponge<Keccak, variant::Shake128>;
 /// SHAKE256, portably.
+#[cfg(test)]
 pub type Shake256 = Sponge<Keccak, variant::Shake256>;
 
 /// The round constants, one per round, for iota.

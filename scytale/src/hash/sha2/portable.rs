@@ -11,20 +11,31 @@
 //! functions and nothing more (RISC-V Zknh) can reuse the loop.
 
 // Only the trait impls are unsafe, and they call safe code.
-use super::engine::{Compress32, Compress64, Engine32, Engine64};
+use super::engine::{Compress32, Compress64};
+#[cfg(test)]
+use super::engine::{Engine32, Engine64};
+#[cfg(test)]
 use super::variant;
 
+// Named for the vector suites and the benchmark, which drive each
+// engine in turn; the dispatching types reach it directly.
 /// SHA-224, portably.
+#[cfg(test)]
 pub type Sha224 = Engine32<Compress, variant::Sha224>;
 /// SHA-256, portably.
+#[cfg(test)]
 pub type Sha256 = Engine32<Compress, variant::Sha256>;
 /// SHA-384, portably.
+#[cfg(test)]
 pub type Sha384 = Engine64<Compress, variant::Sha384>;
 /// SHA-512, portably.
+#[cfg(test)]
 pub type Sha512 = Engine64<Compress, variant::Sha512>;
 /// SHA-512/224, portably.
+#[cfg(test)]
 pub type Sha512_224 = Engine64<Compress, variant::Sha512_224>;
 /// SHA-512/256, portably.
+#[cfg(test)]
 pub type Sha512_256 = Engine64<Compress, variant::Sha512_256>;
 
 /// The SHA-256 round constants: the fractional parts of the cube

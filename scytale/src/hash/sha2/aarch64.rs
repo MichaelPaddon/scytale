@@ -10,22 +10,33 @@
 
 #![allow(unsafe_code)]
 
-use super::engine::{Compress32, Compress64, Engine32, Engine64};
+use super::engine::{Compress32, Compress64};
+#[cfg(test)]
+use super::engine::{Engine32, Engine64};
 use super::portable::{K256, K512};
+#[cfg(test)]
 use super::variant;
 use crate::probe::Probe;
 
+// Named for the vector suites and the benchmark, which drive each
+// engine in turn; the dispatching types reach it directly.
 /// SHA-224 with the SHA2 instructions.
+#[cfg(test)]
 pub type Sha224 = Engine32<Armv8, variant::Sha224>;
 /// SHA-256 with the SHA2 instructions.
+#[cfg(test)]
 pub type Sha256 = Engine32<Armv8, variant::Sha256>;
 /// SHA-384 with the SHA512 instructions.
+#[cfg(test)]
 pub type Sha384 = Engine64<Armv8, variant::Sha384>;
 /// SHA-512 with the SHA512 instructions.
+#[cfg(test)]
 pub type Sha512 = Engine64<Armv8, variant::Sha512>;
 /// SHA-512/224 with the SHA512 instructions.
+#[cfg(test)]
 pub type Sha512_224 = Engine64<Armv8, variant::Sha512_224>;
 /// SHA-512/256 with the SHA512 instructions.
+#[cfg(test)]
 pub type Sha512_256 = Engine64<Armv8, variant::Sha512_256>;
 
 /// Whether the SHA-256 instructions are available.

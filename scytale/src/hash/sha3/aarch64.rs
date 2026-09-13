@@ -11,22 +11,33 @@
 
 #![allow(unsafe_code)]
 
-use super::engine::{LANES, Permutation, Sponge};
+#[cfg(test)]
+use super::engine::Sponge;
+use super::engine::{LANES, Permutation};
 use super::portable::ROUND_CONSTANTS;
+#[cfg(test)]
 use super::variant;
 use crate::probe::Probe;
 
+// Named for the vector suites and the benchmark, which drive each
+// engine in turn; the dispatching types reach it directly.
 /// SHA3-224 with the SHA3 instructions.
+#[cfg(test)]
 pub type Sha3_224 = Sponge<Armv8, variant::Sha3_224>;
 /// SHA3-256 with the SHA3 instructions.
+#[cfg(test)]
 pub type Sha3_256 = Sponge<Armv8, variant::Sha3_256>;
 /// SHA3-384 with the SHA3 instructions.
+#[cfg(test)]
 pub type Sha3_384 = Sponge<Armv8, variant::Sha3_384>;
 /// SHA3-512 with the SHA3 instructions.
+#[cfg(test)]
 pub type Sha3_512 = Sponge<Armv8, variant::Sha3_512>;
 /// SHAKE128 with the SHA3 instructions.
+#[cfg(test)]
 pub type Shake128 = Sponge<Armv8, variant::Shake128>;
 /// SHAKE256 with the SHA3 instructions.
+#[cfg(test)]
 pub type Shake256 = Sponge<Armv8, variant::Shake256>;
 
 /// Whether the SHA3 instructions are available.
