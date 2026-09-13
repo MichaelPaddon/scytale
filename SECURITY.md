@@ -1,0 +1,309 @@
+# Security
+
+What scytale defends against, implementation by implementation, and
+what it does not. Where this file and a module's documentation
+disagree, the code is wrong and this file should be treated as the
+claim to hold it to.
+
+Vulnerabilities: open an issue on the repository named in
+`Cargo.toml`, or contact the maintainer privately through GitHub if
+the report is sensitive. There is no bug bounty.
+
+## Attacker models
+
+The library is written against these, in order of how much it
+promises:
+
+1. **A remote attacker who sees inputs and outputs.** Chosen
+   ciphertexts, chosen messages, malformed keys, forged tags and
+   signatures. This is what the algorithms themselves are for, and
+   the library adds the checks each standard calls for: curve
+   points are checked on import and X25519 refuses low-order points,
+   ML-KEM public keys are checked for canonical encoding, every AEAD
+   refuses to release plaintext under a failed tag, OAEP unpadding
+   gives one verdict, ML-KEM rejects implicitly, and DER is read
+   strictly so that a key cannot parse two ways.
+2. **A remote or local attacker who can time operations.** Wall
+   clock at the network, or a co-resident process measuring shared
+   caches and branch predictors. The constant-time implementations
+   listed below are written so that neither the sequence of
+   instructions executed nor the sequence of memory addresses
+   touched depends on a secret. The compiler is not verified to
+   preserve that (see *Assumptions*).
+3. **Not defended: an attacker with physical access or a fault
+   injector.** Power, electromagnetic emission, glitching, Rowhammer,
+   cold boot. See *What scytale does not protect against*.
+
+A secret, for the purposes of this file, is a private or symmetric
+key, a nonce that must stay unknown (ECDSA), a plaintext, a shared
+secret, a decapsulated key, an RSA prime, a DRBG state, or any value
+derived from those. Lengths are not secrets: the width of a key, the
+length of a message and the number of blocks are visible in every
+operation.
+
+## Constant-time implementations
+
+"Constant time" here means: for a fixed set of lengths, the
+instruction sequence and the memory access sequence are independent
+of secret values. Each entry says how that is achieved and what is
+excluded.
+
+### Symmetric
+
+| Primitive | Implementation | How |
+| --- | --- | --- |
+| AES, portable | `cipher/aes/portable/bitsliced.rs` | bitsliced: the S-box is a Boolean circuit, no tables |
+| AES, x86-64 | AES-NI and VAES assembly | the instructions are data-independent |
+| AES, AArch64 | ARMv8 crypto extension assembly | same |
+| AES, RISC-V | Zkn scalar and Zvkned vector assembly | same |
+| AES, table-driven | `cipher/aes/portable/ttable.rs` | **not constant time**; compiled and tested, never selected by any construction; there is currently no way to ask for it |
+| ChaCha20, all | add-rotate-xor only | no tables, no data-dependent branches, on every backend |
+| GHASH, portable | 128 masked shift-and-add steps per block | no tables; slow on purpose |
+| GHASH, accelerated | `pclmulqdq`, `pmull`, Zvbc/Zbc/Zvkg | carry-less multiply instructions are data-independent |
+| POLYVAL (GCM-SIV) | over the GHASH multiply | same |
+| Poly1305, portable and x86-64 | limb arithmetic, final reduction chosen by mask | no branch or index on key or message |
+| SHA-1, SHA-2, SHA-3, SHAKE | all backends | no data-dependent control flow; hashing a secret leaks only its length |
+| HMAC, HKDF, PBKDF2 | over the hashes | as the hash; `Mac::verify` compares with `constant_time::equal` |
+| CTR, CBC, CFB, OFB, XTS | over the cipher | as the cipher; CBC has no padding, so no padding oracle |
+| KW, KWP | over the cipher | the integrity check value is compared with `constant_time::equal` |
+| GCM, GCM-SIV, XPN, ChaCha20-Poly1305 | over the above | tag compared whole with `constant_time::equal`; plaintext never released on failure |
+| CTR_DRBG | AES-256 | as AES; the state is a `Key` |
+| `constant_time::equal` | `constant_time.rs` | reads every byte of both operands; the accumulator goes through `black_box` so the compiler cannot reintroduce an early exit; a length mismatch returns early, since lengths are not secret |
+
+### Public key
+
+| Scheme | Secret-handling path | How |
+| --- | --- | --- |
+| X25519 | `kex/x25519.rs`, `math/fe25519.rs` | Montgomery ladder, swap by mask; 51-bit limb field arithmetic with no tables |
+| Ed25519 signing | `sig/ed25519.rs` | fixed ladder of doublings and additions, result by mask; same field |
+| Ed25519 verification | same routines | public data only, but no variable-time shortcut is taken either |
+| ECDH P-256, P-384 | `math/ec/`, `math/montgomery.rs` | complete projective formulas (Renes-Costello-Batina), so no special cases for doubling or the identity; scalar in fixed 4-bit windows; every table read scans the whole table; inversion and square roots by exponentiation |
+| ECDSA signing | `sig/ecdsa.rs` over the same | RFC 6979 nonce, so no randomness is consumed and no bias is possible; the one data-dependent branch is the retry on a zero `r` or `s`, probability 2^-256 |
+| ECDSA verification | same routines | public data only |
+| RSA private exponentiation | `math/limbs/mod.rs::modexp` | fixed 4-bit windows over the exponent's full limb length; the 16-entry table is scanned whole on every read; the final Montgomery subtraction is chosen by mask; on x86-64 with ADX the multiply is the four-row assembly block in `math/limbs/x86_64.rs`, whose instruction and memory sequence depends only on the length |
+| RSA CRT | `math/rsa.rs` | two `modexp` calls and Garner's recombination, all masked; every CRT signature is verified with the public exponent before release, so a fault in one half cannot leak a prime (Boneh-DeMillo-Lipton) |
+| RSA-OAEP decryption | `pke/rsa.rs` | unpadding reads every byte and gives one verdict, so nothing distinguishes a bad first byte from a bad hash (Manger) |
+| RSA import | `math/rsa.rs::fill_crt` | the primes are compared and multiplied with masked limb arithmetic; the branches taken are on the outcome (accept or reject), on the bit lengths, which the encoding reveals anyway, and on nothing else |
+| ML-KEM | `kem/ml_kem.rs` | coefficient arithmetic branch-free below the modulus, Barrett-style multiply-and-shift reductions, no division; decapsulation compares the ciphertext against the re-encryption with `constant_time::equal` and selects the shared secret by mask (implicit rejection) |
+| ML-DSA signing | `sig/ml_dsa.rs` | rounding, hints and decomposition written as masks; within a rejection round no branch or index depends on a secret |
+| SLH-DSA | `sig/slh_dsa.rs` | a fixed schedule of hash calls; the only values steering control flow are the message digest's indices, which are recomputable from the signature and so public |
+| Montgomery setup | `Modulus::prepare`, `Montgomery::new` | the low-limb inverse by Newton iteration, `R^2` by fixed doubling with masked subtraction; no division on a secret modulus |
+
+## Deliberately variable-time implementations
+
+Each of these varies its time with something. The list says with
+what, and why that is accepted.
+
+| Operation | Varies with | Why it is accepted |
+| --- | --- | --- |
+| RSA public exponentiation (`verify_*`, `encrypt_*`, `modexp_public`) | the public exponent `e` and the modulus length | both are public; square-and-multiply on `e` is six times faster than the windowed loop and leaks nothing that is secret |
+| RSA key generation | how many candidates fail trial division and Miller-Rabin | inherent in searching for primes; every implementation does this; the candidates that fail are discarded and their count reveals nothing about the primes kept beyond what the key length already says |
+| Miller-Rabin | the candidate, through `Modulus::prepare` and the witness exponentiations | the exponentiations themselves are the constant-time `modexp`; the loop count is fixed at eight rounds; the early exit on a composite reveals that a candidate was composite, which is a value that is then thrown away |
+| ML-KEM matrix sampling (`SampleNTT`) | the public seed `rho` | the seed is part of the public key |
+| ML-DSA signing | the number of rejection rounds | inherent in the scheme (FIPS 204); the count is independent of the key and within a round nothing depends on a secret |
+| SLH-DSA | nothing secret | see above; listed here because its running time does vary, with the public message digest |
+| FF1, FF3-1 | the plaintext and tweak, through radix division | the modes are defined over arithmetic in the caller's radix and division is not constant time on any target; documented on both modes; do not use them where an attacker can time them |
+| DER and PEM import and export | the structure and lengths of the encoding | DER lengths encode integer bit lengths, so a private key's encoding reveals the bit length of `d`, `p` and `q` whatever the parser does; the reader branches on structure but not on the value of any integer; treat a key's encoded form as a secret with the same care as the key |
+| `constant_time::equal` on unequal lengths | the lengths | lengths are not secret |
+| Implementation selection | the processor | asked once per process, in `probe.rs`, and every call thereafter is one predictable branch; not secret-dependent |
+| Every operation | its lengths | see *Attacker models* |
+
+Nothing in the crate makes an early exit on a secret comparison.
+Nothing indexes a table by a secret byte except the table-driven AES,
+which nothing selects.
+
+## Cache, branch, power and EM assumptions
+
+**Cache and branch.** The constant-time claims above are claims
+about the source and the assembly. For the portable Rust code they
+rest on the compiler preserving the property, which LLVM does not
+promise: a masked select can be lowered to a branch, and a loop that
+reads a whole table can be turned into a lookup. The crate uses the
+idioms that are known to survive current compilers (masks built by
+wrapping negation, selection by AND and XOR, `black_box` on the
+equality accumulator) and the hand-written
+assembly is immune to this by construction. There is no
+dudect-style or Valgrind-taint timing test in the test suite. If
+you need a guarantee against a particular compiler, audit the
+generated code.
+
+**Memory access granularity.** Where a table is scanned whole, the
+scan touches every cache line of it, so an attacker seeing cache
+lines learns nothing. It does not defend against an attacker who can
+see which *word* within a line is used, which no shared-cache attack
+can and a hardware debugger can.
+
+**Speculative execution.** Nothing here mitigates Spectre-class
+attacks. A secret in memory is subject to whatever the platform
+allows a co-resident attacker to read speculatively, and that is the
+platform's problem to solve, not a library's.
+
+**Power and electromagnetic emission.** Not defended. A bitsliced
+AES has a data-dependent Hamming weight; scalar multiplication leaks
+through power however it is scheduled. Masking against differential
+power analysis is not implemented anywhere. Do not run these
+implementations on a smart card or in a device an attacker holds
+without adding those countermeasures yourself.
+
+**Fault injection.** Not defended, with one exception: every RSA CRT
+signature is checked against the public key before release, because
+a single faulted half-exponentiation would otherwise reveal a prime.
+Nothing else is double-checked. ML-DSA and SLH-DSA are hedged by
+default, which is a partial fault defence the standards call for:
+a fault in a hedged signature does not reveal the key the way it does
+in a deterministic one. Ed25519 is deterministic, as RFC 8032
+defines it, and so is exposed to fault attacks on the nonce.
+
+## Memory safety
+
+- The crate is `#![no_std]` and `#![deny(unsafe_code)]`. The only
+  modules that allow it are the ones holding `asm!` blocks for a
+  processor instruction, and the probes that read CPUID or its
+  equivalent; each `unsafe` block has a `# Safety` note stating what
+  it relies on. Nothing else in the crate is `unsafe`, so the
+  portable code has Rust's ordinary guarantees: no buffer overruns,
+  no use after free, no uninitialised reads.
+- Every assembly block is reached through a value that only the
+  probe can create, so the instructions it uses have been confirmed
+  present before it can be called. A wrong length is caught by a
+  slice check in Rust before the pointer is handed to assembly.
+- Production paths do not `unwrap`, `expect` or `panic!`. Every
+  fallible call returns `Result<_, Error>`. An out-of-range index
+  would still panic, as in any Rust; none is known.
+- Secrets are wiped. `Key<B>` is `ZeroizeOnDrop` and not `Copy`.
+  Every private key type, every expanded key schedule, the DRBG
+  state, hash and MAC states, and the scratch buffers RSA and the
+  post-quantum schemes work in are zeroized when dropped or when
+  the operation finishes. `Debug` on a key prints no key material.
+- Wiping has limits. Rust moves values by copying, and the compiler
+  may spill any value to the stack or leave a copy in a register or
+  a caller's frame; `zeroize` clears the location the type owns, not
+  every copy that ever existed. A signing operation's temporaries
+  are on the stack and are zeroized by their owners, but the stack
+  frames below them are not scrubbed. If your threat model includes
+  reading process memory after the fact, that is a partial defence.
+- Nothing is allocated. There is no allocator dependency, so no
+  secret ever goes to a heap the library does not control, and no
+  operation's memory use depends on a secret (see below).
+
+## Entropy failure
+
+- `CtrDrbg::from_system` asks the operating system through
+  `getrandom`. On Linux that blocks until the kernel's pool is
+  initialised rather than returning early bytes. A system error is
+  returned as `Error::EntropyUnavailable(code)`; nothing weaker is
+  substituted, and no fallback to a clock or a process id exists.
+- Where there is no operating system (`target_os = "none"`), the
+  processor's own generator is used: `rdseed` (or `rdrand` if only
+  that exists) on x86-64, `rndr` on AArch64, the `seed` CSR on
+  RISC-V. Every sample passes the SP 800-90B repetition-count and
+  adaptive-proportion health tests, with each 16-bit sample credited
+  with 8 bits of entropy, on start-up and continuously. A source
+  that sticks or collapses is reported as an error, not used. A
+  processor with no generator fails construction with
+  `Error::NotSupported`, and a program that needs randomness does
+  not start.
+- Seed material is drawn at twice the required length and
+  conditioned through the CTR_DRBG derivation function; the
+  generator needs `MIN_SEED` (48 bytes: 256 bits of strength plus a
+  128-bit nonce) and refuses less.
+- A generator seeded by the caller (`entropy::External`) has no
+  source to return to. After `RESEED_INTERVAL` (2^48) requests it
+  fails with `Error::ReseedRequired` until `reseed_from` is given
+  fresh material. It never silently continues.
+- One request is capped at `MAX_REQUEST` (65536) bytes;
+  `Error::RequestTooLarge` otherwise.
+- The generator is checked against the ACVP CTR_DRBG vectors. The
+  entropy sources are not, since there is nothing deterministic to
+  check; the health tests are checked against streams with known
+  faults.
+
+## RNG across fork, virtual machines and snapshots
+
+A `CtrDrbg` is a value you hold, and its state is the whole secret.
+Anything that duplicates the process duplicates the next bytes:
+
+- **`fork`**: both processes hold the same generator and will
+  produce the same output. The child must drop it and build another,
+  or call `reseed`, before using it. The library cannot detect a
+  fork without a system call per request, which is what holding a
+  generator exists to avoid, so it does not try.
+- **Virtual machine snapshot and restore, container checkpointing,
+  live migration with cloning**: every restored copy continues from
+  the same state. The same rule applies and the library cannot see
+  it happen. The operating system's generator is told about VM
+  clones on platforms that support it (virtio-rng, `vmgenid`), so a
+  fresh `from_system` after restore is sound; a generator built
+  before the snapshot is not.
+- The generator is deliberately not `Clone`, so a second copy in the
+  same process is not something that can happen by accident.
+- The state is zeroized on drop.
+- A repeated output is a repeated nonce, and a repeated GCM or
+  ChaCha20-Poly1305 nonce loses the key. Ed25519, RFC 6979 ECDSA and
+  deterministic ML-DSA and SLH-DSA draw no randomness when signing
+  and are unaffected; hedged ML-DSA and SLH-DSA, RSA-PSS salts and
+  OAEP seeds degrade to their deterministic security, which is still
+  sound; RSA and ML-KEM key generation and ML-KEM encapsulation under
+  a duplicated generator produce duplicated keys and shared secrets.
+
+## Secret-dependent allocation
+
+There is none, because there is no allocation. The crate has no
+`alloc` dependency, and every buffer is a fixed-size array on the
+stack or in the caller's storage:
+
+- RSA works in a caller-supplied or stack `[u64; scratch_words(bits)]`
+  sized by the key's bit length, which is public.
+- ML-KEM, ML-DSA and SLH-DSA use fixed arrays sized by the parameter
+  set.
+- Signing, decryption and decapsulation touch the same amount of
+  memory whatever the secret.
+
+The stack depth of an operation therefore depends on the algorithm
+and the key length and on nothing secret. An attacker observing
+memory use, page faults or stack high-water marks learns those
+lengths only.
+
+## What scytale does not protect against
+
+- **Nonce reuse.** GCM, XPN, ChaCha20-Poly1305 and CTR lose
+  confidentiality and (for the AEADs) the authentication key when a
+  nonce repeats under one key. The library counts nonces for you
+  when asked (`cipher::Nonces`) but cannot stop a caller supplying
+  its own. GCM-SIV survives a repeated nonce at the cost of
+  revealing that two messages were equal.
+- **Weak or reused keys.** A Poly1305 key used for two messages
+  gives away `r`. An RSA key below 2048 bits, or SHA-1 anywhere but
+  a legacy HMAC, is accepted where a standard still names it, and is
+  not safe against a well-funded attacker.
+- **Choosing the wrong primitive.** Raw RSA, ECB-like use of the
+  block cipher, unauthenticated CTR and the format-preserving modes
+  exist for the protocols that need them. Nothing in the type
+  system stops their use elsewhere.
+- **Compiler-introduced timing leaks** in the portable code, as
+  above.
+- **Physical attacks**: power, EM, fault injection, cold boot,
+  probing, as above.
+- **Speculative-execution side channels** and any other channel the
+  platform exposes to a co-resident attacker below the cache-line
+  level.
+- **Memory disclosure after the fact.** Wiping is best effort; stack
+  copies and registers are not scrubbed.
+- **A compromised host.** Debuggers, `ptrace`, kernel access, DMA,
+  or a hypervisor reading guest memory see every secret.
+- **A broken operating system generator.** `from_system` trusts what
+  the kernel hands over; the health tests run only on the
+  processor's raw source, which the kernel path does not use.
+- **Denial of service.** A caller can be made to spend time: RSA key
+  generation at 8192 bits, SLH-DSA signing and PBKDF2 with a large
+  count are all slow by design, and nothing rate-limits them.
+- **Protocol design.** Signatures do not bind context unless the
+  scheme has a context string (ML-DSA, SLH-DSA) and the caller uses
+  it; key agreement outputs must go through HKDF; ordering, replay
+  and identity binding are the protocol's job.
+- **Bugs.** The library is checked against NIST ACVP and Wycheproof
+  vectors for every algorithm, and every accelerated implementation
+  is tested against the portable one at every length. That catches
+  wrong answers; it does not prove constant time and it does not
+  prove the absence of every bug. It has not had a third-party
+  audit.
