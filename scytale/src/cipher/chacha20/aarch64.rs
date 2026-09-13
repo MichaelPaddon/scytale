@@ -20,21 +20,26 @@ pub type ChaCha20 = Cipher<Neon>;
 
 /// The keystream generator with NEON, which every AArch64 processor
 /// has.
-pub struct Neon;
+// No public constructor: a value exists only by way of `probe`.
+#[derive(Clone, Copy)]
+pub struct Neon(());
 
 impl Sealed for Neon {}
 
 impl Backend for Neon {
-    fn supported() -> bool {
-        true
+    fn probe() -> Option<Self> {
+        Some(Neon(()))
     }
 
-    unsafe fn xor(
+    fn xor(
+        self,
         key: &[u32; 8],
         nonce: &[u32; 3],
         counter: u32,
         data: &mut [u8],
     ) {
+        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // instructions.
         unsafe { xor(key, nonce, counter, data) }
     }
 }

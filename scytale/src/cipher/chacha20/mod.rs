@@ -52,8 +52,6 @@
 //! works four blocks at a time in a form the compiler vectorises
 //! where it can.
 
-#![allow(unsafe_code)]
-
 #[cfg(target_arch = "aarch64")]
 pub mod aarch64;
 pub mod portable;
@@ -63,7 +61,6 @@ pub mod riscv64;
 pub mod x86_64;
 
 use core::fmt;
-use core::marker::PhantomData;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -94,17 +91,25 @@ mod sealed {
 pub(crate) use sealed::Sealed;
 
 /// A keystream generator. Sealed.
-pub trait Backend: Sealed {
+///
+/// A value of the type is the proof that this processor can run it:
+/// [`probe`](Backend::probe) is the only way to make one, the
+/// hardware ones have no public constructor, and the cipher holds the
+/// value it was given. So the generator is a safe call, and the one
+/// `unsafe` block in a hardware module is where the value is minted.
+pub trait Backend: Sealed + Copy {
+    /// The generator, where this processor can run it. Asked once.
+    fn probe() -> Option<Self>;
+
     /// Whether this processor can run it.
-    fn supported() -> bool;
+    fn supported() -> bool {
+        Self::probe().is_some()
+    }
 
     /// Xors the keystream for consecutive blocks from `counter` into
     /// `data`, whose length is a whole number of blocks.
-    ///
-    /// # Safety
-    /// [`supported`](Backend::supported) must have returned true on
-    /// this processor.
-    unsafe fn xor(
+    fn xor(
+        self,
         key: &[u32; 8],
         nonce: &[u32; 3],
         counter: u32,
@@ -148,7 +153,8 @@ fn nonce_words(nonce: &[u8; NONCE_SIZE]) -> [u32; 3] {
 /// name the others.
 pub struct Cipher<B: Backend> {
     key: Words,
-    _marker: PhantomData<B>,
+    /// The generator, which is the proof the processor can run it.
+    backend: B,
 }
 
 impl<B: Backend> Cipher<B> {
@@ -156,21 +162,17 @@ impl<B: Backend> Cipher<B> {
     ///
     /// [`Error::NotSupported`] where this processor cannot run `B`.
     pub fn try_new(key: &Key<[u8; KEY_SIZE]>) -> Result<Self, Error> {
-        if !B::supported() {
-            return Err(Error::NotSupported);
-        }
-        // SAFETY: just confirmed.
-        Ok(unsafe { Self::new_unchecked(key) })
+        B::probe()
+            .map(|backend| Self::with(backend, key))
+            .ok_or(Error::NotSupported)
     }
 
-    /// Takes `key` without asking the processor.
-    ///
-    /// # Safety
-    /// The caller must have confirmed `B::supported()`.
-    pub(crate) unsafe fn new_unchecked(key: &Key<[u8; KEY_SIZE]>) -> Self {
+    /// Takes `key` under `backend`, which the caller got from the
+    /// probe.
+    pub(crate) fn with(backend: B, key: &Key<[u8; KEY_SIZE]>) -> Self {
         Cipher {
             key: Words::new(key.array()),
-            _marker: PhantomData,
+            backend,
         }
     }
 
@@ -222,8 +224,8 @@ impl<B: Backend> Cipher<B> {
         counter: u32,
     ) -> [u8; BLOCK_SIZE] {
         let mut block = [0u8; BLOCK_SIZE];
-        // SAFETY: the cipher only exists once support was confirmed.
-        unsafe { B::xor(&self.key.0, &nonce_words(nonce), counter, &mut block) }
+        self.backend
+            .xor(&self.key.0, &nonce_words(nonce), counter, &mut block);
         block
     }
 }
@@ -232,7 +234,7 @@ impl<B: Backend> Clone for Cipher<B> {
     fn clone(&self) -> Self {
         Cipher {
             key: self.key.clone(),
-            _marker: PhantomData,
+            backend: self.backend,
         }
     }
 }
@@ -287,31 +289,24 @@ impl<B: Backend> Stream<'_, B> {
         let whole = data.len() - data.len() % BLOCK_SIZE;
         let (now, rest) = data.split_at_mut(whole);
         if !now.is_empty() {
-            // SAFETY: the cipher only exists once support was
-            // confirmed.
-            unsafe {
-                B::xor(
-                    &self.cipher.key.0,
-                    &self.nonce,
-                    self.counter as u32,
-                    now,
-                )
-            }
+            self.cipher.backend.xor(
+                &self.cipher.key.0,
+                &self.nonce,
+                self.counter as u32,
+                now,
+            );
             self.counter += (whole / BLOCK_SIZE) as u64;
         }
 
         // A last partial block, keeping the rest of its keystream.
         if !rest.is_empty() {
             self.keystream = [0; BLOCK_SIZE];
-            // SAFETY: as above.
-            unsafe {
-                B::xor(
-                    &self.cipher.key.0,
-                    &self.nonce,
-                    self.counter as u32,
-                    &mut self.keystream,
-                )
-            }
+            self.cipher.backend.xor(
+                &self.cipher.key.0,
+                &self.nonce,
+                self.counter as u32,
+                &mut self.keystream,
+            );
             self.counter += 1;
             for (d, k) in rest.iter_mut().zip(&self.keystream) {
                 *d ^= k;
@@ -384,7 +379,7 @@ fn supported(choice: Choice) -> bool {
         Choice::Zvkb => <riscv64::Zvkb as Backend>::supported(),
         #[cfg(target_arch = "riscv64")]
         Choice::Zbb => <riscv64::Zbb as Backend>::supported(),
-        Choice::Portable => true,
+        Choice::Portable => <portable::Portable as Backend>::supported(),
         #[allow(unreachable_patterns)]
         _ => false,
     }
@@ -447,24 +442,34 @@ impl ChaCha20 {
     /// Takes the key, with the best implementation the processor
     /// supports. The portable one is always there, so this cannot
     /// fail.
-    // The hardware constructors skip their own processor check
-    // because the probe has already made it.
-    #[allow(unsafe_code)]
     pub fn new(key: &Key<[u8; KEY_SIZE]>) -> Self {
-        // SAFETY: `probe` only names hardware after confirming the
-        // processor supports it.
-        let inner = unsafe {
-            match probe() {
-                #[cfg(target_arch = "x86_64")]
-                Choice::Avx2 => Inner::Avx2(Cipher::new_unchecked(key)),
-                #[cfg(target_arch = "aarch64")]
-                Choice::Neon => Inner::Neon(Cipher::new_unchecked(key)),
-                #[cfg(target_arch = "riscv64")]
-                Choice::Zvkb => Inner::Zvkb(Cipher::new_unchecked(key)),
-                #[cfg(target_arch = "riscv64")]
-                Choice::Zbb => Inner::Zbb(Cipher::new_unchecked(key)),
-                _ => Inner::Portable(Cipher::new_unchecked(key)),
-            }
+        // The probe chose the arm, so the backend's own probe answers
+        // yes; the portable fallback in each arm is right if it did
+        // not.
+        let portable =
+            || Inner::Portable(Cipher::with(portable::Portable, key));
+        let inner = match probe() {
+            #[cfg(target_arch = "x86_64")]
+            Choice::Avx2 => match x86_64::Avx2::probe() {
+                Some(b) => Inner::Avx2(Cipher::with(b, key)),
+                None => portable(),
+            },
+            #[cfg(target_arch = "aarch64")]
+            Choice::Neon => match aarch64::Neon::probe() {
+                Some(b) => Inner::Neon(Cipher::with(b, key)),
+                None => portable(),
+            },
+            #[cfg(target_arch = "riscv64")]
+            Choice::Zvkb => match riscv64::Zvkb::probe() {
+                Some(b) => Inner::Zvkb(Cipher::with(b, key)),
+                None => portable(),
+            },
+            #[cfg(target_arch = "riscv64")]
+            Choice::Zbb => match riscv64::Zbb::probe() {
+                Some(b) => Inner::Zbb(Cipher::with(b, key)),
+                None => portable(),
+            },
+            _ => portable(),
         };
         ChaCha20(inner)
     }

@@ -226,9 +226,8 @@ impl<const K: usize> Aes<K> {
     ///
     /// A width other than 16, 24 or 32 is refused when the type is
     /// instantiated, at compile time.
-    // The hardware constructors skip their own processor check because
-    // the probe has already made it.
-    #[allow(unsafe_code)]
+    // Each hardware constructor checks the kept answer itself, which
+    // is one atomic load; there is nothing here to be unsafe about.
     pub(crate) fn new(key: &[u8; K]) -> Self {
         const {
             assert!(
@@ -236,30 +235,18 @@ impl<const K: usize> Aes<K> {
                 "AES keys are 16, 24 or 32 bytes"
             )
         };
-        // SAFETY: `probe` only names hardware after confirming the
-        // processor supports it.
-        let inner = unsafe {
+        let inner = {
             match probe() {
                 #[cfg(target_arch = "x86_64")]
-                Choice::Vaes => {
-                    Inner::Vaes(x86_64::vaes::Aes::new_unchecked(key))
-                }
+                Choice::Vaes => Inner::Vaes(x86_64::vaes::Aes::new(key)),
                 #[cfg(target_arch = "x86_64")]
-                Choice::AesNi => {
-                    Inner::AesNi(x86_64::aesni::Aes::new_unchecked(key))
-                }
+                Choice::AesNi => Inner::AesNi(x86_64::aesni::Aes::new(key)),
                 #[cfg(target_arch = "aarch64")]
-                Choice::Armv8 => {
-                    Inner::Armv8(aarch64::armv8::Aes::new_unchecked(key))
-                }
+                Choice::Armv8 => Inner::Armv8(aarch64::armv8::Aes::new(key)),
                 #[cfg(target_arch = "riscv64")]
-                Choice::Zvkned => {
-                    Inner::Zvkned(riscv64::zvkned::Aes::new_unchecked(key))
-                }
+                Choice::Zvkned => Inner::Zvkned(riscv64::zvkned::Aes::new(key)),
                 #[cfg(target_arch = "riscv64")]
-                Choice::Zkn => {
-                    Inner::Zkn(riscv64::zkn::Aes::new_unchecked(key))
-                }
+                Choice::Zkn => Inner::Zkn(riscv64::zkn::Aes::new(key)),
                 _ => Inner::Bitsliced(portable::bitsliced::Aes::new(key)),
             }
         };

@@ -79,16 +79,20 @@ fn id_register_sha2() -> u64 {
 }
 
 /// The compression functions via the ARMv8 instructions.
-pub struct Armv8;
+// No public constructor: a value exists only by way of `probe`.
+#[derive(Clone, Copy)]
+pub struct Armv8(());
 
 impl super::engine::Sealed for Armv8 {}
 
 impl Compress32 for Armv8 {
-    fn supported() -> bool {
-        has_sha256()
+    fn probe() -> Option<Self> {
+        has_sha256().then_some(Armv8(()))
     }
 
-    unsafe fn compress(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
+    fn compress(self, state: &mut [u32; 8], blocks: &[[u8; 64]]) {
+        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // instructions.
         unsafe {
             if !blocks.is_empty() {
                 compress256(state, blocks.as_ptr().cast(), blocks.len());
@@ -98,11 +102,12 @@ impl Compress32 for Armv8 {
 }
 
 impl Compress64 for Armv8 {
-    fn supported() -> bool {
-        has_sha512()
+    fn probe() -> Option<Self> {
+        has_sha512().then_some(Armv8(()))
     }
 
-    unsafe fn compress(state: &mut [u64; 8], blocks: &[[u8; 128]]) {
+    fn compress(self, state: &mut [u64; 8], blocks: &[[u8; 128]]) {
+        // SAFETY: as for the 32-bit family.
         unsafe {
             if !blocks.is_empty() {
                 compress512(state, blocks.as_ptr().cast(), blocks.len());

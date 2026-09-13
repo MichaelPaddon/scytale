@@ -47,21 +47,26 @@ fn ask_avx2() -> bool {
 }
 
 /// The keystream generator with AVX2.
-pub struct Avx2;
+// No public constructor: a value exists only by way of `probe`.
+#[derive(Clone, Copy)]
+pub struct Avx2(());
 
 impl Sealed for Avx2 {}
 
 impl Backend for Avx2 {
-    fn supported() -> bool {
-        has_avx2()
+    fn probe() -> Option<Self> {
+        has_avx2().then_some(Avx2(()))
     }
 
-    unsafe fn xor(
+    fn xor(
+        self,
         key: &[u32; 8],
         nonce: &[u32; 3],
         counter: u32,
         data: &mut [u8],
     ) {
+        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // instructions.
         unsafe { xor(key, nonce, counter, data) }
     }
 }

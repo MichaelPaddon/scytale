@@ -8,8 +8,6 @@
 //! Nothing here touches memory in a way that depends on the key.
 
 // Only the trait impl is unsafe, and it calls safe code.
-#![allow(unsafe_code)]
-
 use super::{BLOCK_SIZE, Backend, CONSTANTS, Cipher, Sealed};
 
 /// ChaCha20, portably.
@@ -111,16 +109,18 @@ pub(crate) fn xor(
 }
 
 /// The keystream generator in plain Rust.
+#[derive(Clone, Copy)]
 pub struct Portable;
 
 impl Sealed for Portable {}
 
 impl Backend for Portable {
-    fn supported() -> bool {
-        true
+    fn probe() -> Option<Self> {
+        Some(Portable)
     }
 
-    unsafe fn xor(
+    fn xor(
+        self,
         key: &[u32; 8],
         nonce: &[u32; 3],
         counter: u32,

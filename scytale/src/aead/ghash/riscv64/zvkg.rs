@@ -27,16 +27,24 @@ use crate::arch::riscv64::{EXT_ZVKG, IMA_V};
 /// reduction for a group to amortise and no group multiply here.
 pub(super) const GROUP: usize = 1;
 
-/// Never called: [`GROUP`] is one.
+/// A group of blocks, one at a time: with [`GROUP`] at one the hash
+/// never asks for this, but a block at a time is what a group of one
+/// means, so it is written out rather than declared unreachable.
 ///
 /// # Safety
-/// Unreachable.
+/// Requires the vector extension and Zvkg. `powers[0]` is the
+/// prepared subkey.
 pub(super) unsafe fn multiply_group(
-    _value: &mut [u64; 2],
-    _powers: &[[u64; 2]; super::super::MAX_GROUP],
-    _blocks: &[u8],
+    value: &mut [u64; 2],
+    powers: &[[u64; 2]; super::super::MAX_GROUP],
+    blocks: &[u8],
 ) {
-    unreachable!("no group multiply on this architecture")
+    for block in blocks.chunks_exact(super::super::BLOCK) {
+        value[0] ^= super::super::halve(&block[..8]);
+        value[1] ^= super::super::halve(&block[8..]);
+        // SAFETY: the caller's.
+        unsafe { multiply(value, &powers[0]) };
+    }
 }
 
 /// Whether `ext` reports the vector GHASH instruction, on a processor

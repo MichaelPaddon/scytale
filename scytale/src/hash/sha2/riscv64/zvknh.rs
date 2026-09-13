@@ -67,7 +67,9 @@ pub type Sha512_224 = Engine64<Zvknh, variant::Sha512_224>;
 pub type Sha512_256 = Engine64<Zvknh, variant::Sha512_256>;
 
 /// The vector SHA-2 instructions.
-pub struct Zvknh;
+// No public constructor: a value exists only by way of `probe`.
+#[derive(Clone, Copy)]
+pub struct Zvknh(());
 
 impl super::super::engine::Sealed for Zvknh {}
 
@@ -311,11 +313,13 @@ unsafe fn rounds512(
 }
 
 impl Compress32 for Zvknh {
-    fn supported() -> bool {
-        has_sha256()
+    fn probe() -> Option<Self> {
+        has_sha256().then_some(Zvknh(()))
     }
 
-    unsafe fn compress(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
+    fn compress(self, state: &mut [u32; 8], blocks: &[[u8; 64]]) {
+        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // instructions.
         unsafe {
             if blocks.is_empty() {
                 return;
@@ -333,11 +337,12 @@ impl Compress32 for Zvknh {
 }
 
 impl Compress64 for Zvknh {
-    fn supported() -> bool {
-        has_sha512()
+    fn probe() -> Option<Self> {
+        has_sha512().then_some(Zvknh(()))
     }
 
-    unsafe fn compress(state: &mut [u64; 8], blocks: &[[u8; 128]]) {
+    fn compress(self, state: &mut [u64; 8], blocks: &[[u8; 128]]) {
+        // SAFETY: as for the 32-bit family.
         unsafe {
             if blocks.is_empty() {
                 return;

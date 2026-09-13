@@ -167,7 +167,9 @@ fn supported(choice: Choice) -> bool {
     match choice {
         #[cfg(target_arch = "aarch64")]
         Choice::Armv8 => <aarch64::Armv8 as engine::Permutation>::supported(),
-        Choice::Portable => true,
+        Choice::Portable => {
+            <portable::Keccak as engine::Permutation>::supported()
+        }
         #[allow(unreachable_patterns)]
         _ => false,
     }
@@ -202,18 +204,16 @@ enum Inner<V: engine::Variant> {
 impl<V: engine::Variant> Auto<V> {
     /// Starts a function with the best implementation the processor
     /// supports.
-    // The hardware sponge skips its own processor check because the
-    // probe has already made it.
-    #[allow(unsafe_code)]
     pub fn new() -> Self {
-        // SAFETY: `probe` only names hardware after confirming the
-        // processor supports it.
-        let inner = unsafe {
-            match probe() {
-                #[cfg(target_arch = "aarch64")]
-                Choice::Armv8 => Inner::Armv8(Sponge::new_unchecked()),
-                _ => Inner::Portable(Sponge::new_unchecked()),
-            }
+        let inner = match probe() {
+            #[cfg(target_arch = "aarch64")]
+            Choice::Armv8 => match engine::Permutation::probe() {
+                Some(p) => Inner::Armv8(Sponge::with(p)),
+                // The probe chose it, so this is not taken; portable
+                // is right if it were.
+                None => Inner::Portable(Sponge::with(portable::Keccak)),
+            },
+            _ => Inner::Portable(Sponge::with(portable::Keccak)),
         };
         Auto(inner)
     }

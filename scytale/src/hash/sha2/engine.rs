@@ -20,8 +20,6 @@
 //! `portable::Sha256` and the like, can be named; its traits are
 //! sealed and implemented by nothing outside the crate.
 
-#![allow(unsafe_code)]
-
 use core::fmt;
 use core::marker::PhantomData;
 
@@ -37,29 +35,39 @@ mod sealed {
 pub(crate) use sealed::Sealed;
 
 /// A SHA-256 family compression function. Sealed.
-pub trait Compress32: Sealed {
+///
+/// A value of the type is the proof that this processor can run it:
+/// [`probe`](Compress32::probe) is the only way to make one, the
+/// hardware ones have no public constructor, and the engine holds
+/// the value it was given. So the compression function is a safe
+/// call, and the one `unsafe` block in a hardware module is where
+/// the value is minted.
+pub trait Compress32: Sealed + Copy {
+    /// The function, where this processor can run it. Asked once.
+    fn probe() -> Option<Self>;
+
     /// Whether this processor can run it.
-    fn supported() -> bool;
+    fn supported() -> bool {
+        Self::probe().is_some()
+    }
 
     /// Folds every block into `state`.
-    ///
-    /// # Safety
-    /// [`supported`](Compress32::supported) must have returned true
-    /// on this processor.
-    unsafe fn compress(state: &mut [u32; 8], blocks: &[[u8; 64]]);
+    fn compress(self, state: &mut [u32; 8], blocks: &[[u8; 64]]);
 }
 
-/// A SHA-512 family compression function. Sealed.
-pub trait Compress64: Sealed {
+/// A SHA-512 family compression function. Sealed; see
+/// [`Compress32`] for what a value of the type means.
+pub trait Compress64: Sealed + Copy {
+    /// The function, where this processor can run it. Asked once.
+    fn probe() -> Option<Self>;
+
     /// Whether this processor can run it.
-    fn supported() -> bool;
+    fn supported() -> bool {
+        Self::probe().is_some()
+    }
 
     /// Folds every block into `state`.
-    ///
-    /// # Safety
-    /// [`supported`](Compress64::supported) must have returned true
-    /// on this processor.
-    unsafe fn compress(state: &mut [u64; 8], blocks: &[[u8; 128]]);
+    fn compress(self, state: &mut [u64; 8], blocks: &[[u8; 128]]);
 }
 
 /// A member of the SHA-256 family: SHA-224 or SHA-256. Sealed.
@@ -111,16 +119,17 @@ macro_rules! engine {
             /// the length the padding cannot express, which no real
             /// message reaches.
             bytes: $length,
-            _marker: PhantomData<(C, V)>,
+            /// The compression function, which is the proof the
+            /// processor can run it.
+            compress: C,
+            _marker: PhantomData<V>,
         }
 
         impl<C: $compress, V: $variant> $name<C, V> {
-            /// Starts a hash without asking the processor.
-            ///
-            /// # Safety
-            /// The caller must have confirmed `C::supported()`.
-            pub(crate) unsafe fn new_unchecked() -> Self {
-                Self::from_state(V::IV)
+            /// Starts a hash over `compress`, which the caller got
+            /// from the probe.
+            pub(crate) fn with(compress: C) -> Self {
+                Self::from_state(compress, V::IV)
             }
 
             /// Starts from `iv` instead of the variant's own value,
@@ -128,26 +137,24 @@ macro_rules! engine {
             // Only the 64-bit engine has a use for it.
             #[cfg(test)]
             #[allow(dead_code)]
-            pub(crate) fn with_iv(iv: [$word; 8]) -> Self {
-                assert!(C::supported());
-                Self::from_state(iv)
+            pub(crate) fn with_iv(compress: C, iv: [$word; 8]) -> Self {
+                Self::from_state(compress, iv)
             }
 
-            fn from_state(state: [$word; 8]) -> Self {
+            fn from_state(compress: C, state: [$word; 8]) -> Self {
                 $name {
                     state,
                     block: [0; $block],
                     used: 0,
                     bytes: 0,
+                    compress,
                     _marker: PhantomData,
                 }
             }
 
             /// Folds whole blocks in.
             fn compress(&mut self, blocks: &[[u8; $block]]) {
-                // SAFETY: the engine only exists once `new_unchecked`'s
-                // caller confirmed support.
-                unsafe { C::compress(&mut self.state, blocks) }
+                self.compress.compress(&mut self.state, blocks)
             }
 
             /// Pads with `trailer` (the leading one bit and any last
@@ -188,7 +195,7 @@ macro_rules! engine {
             }
         }
 
-        // By hand so that `C` need not be `Clone`: it is a marker.
+        // By hand so that `V` need not be `Clone`: it is a marker.
         impl<C: $compress, V: $variant> Clone for $name<C, V> {
             fn clone(&self) -> Self {
                 $name {
@@ -196,6 +203,7 @@ macro_rules! engine {
                     block: self.block,
                     used: self.used,
                     bytes: self.bytes,
+                    compress: self.compress,
                     _marker: PhantomData,
                 }
             }
@@ -213,11 +221,7 @@ macro_rules! engine {
             type Output = V::Output;
 
             fn try_new() -> Result<Self, Error> {
-                if !C::supported() {
-                    return Err(Error::NotSupported);
-                }
-                // SAFETY: just confirmed.
-                Ok(unsafe { Self::new_unchecked() })
+                C::probe().map(Self::with).ok_or(Error::NotSupported)
             }
 
             fn reset(&mut self) {

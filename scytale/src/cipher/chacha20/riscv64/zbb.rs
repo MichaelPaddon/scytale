@@ -19,6 +19,8 @@
 //! it afterwards rather than in the assembly, because the data may
 //! start at any byte and a word store wants an aligned address.
 
+#![allow(unsafe_code)]
+
 use super::super::{BLOCK_SIZE, Backend, CONSTANTS, Cipher, Sealed};
 use crate::arch::riscv64::{EXT_ZBB, EXT_ZBKB, extensions};
 
@@ -38,21 +40,26 @@ fn present(ext: u64) -> bool {
 }
 
 /// The keystream generator on the general registers.
-pub struct Zbb;
+// No public constructor: a value exists only by way of `probe`.
+#[derive(Clone, Copy)]
+pub struct Zbb(());
 
 impl Sealed for Zbb {}
 
 impl Backend for Zbb {
-    fn supported() -> bool {
-        has_zbb()
+    fn probe() -> Option<Self> {
+        has_zbb().then_some(Zbb(()))
     }
 
-    unsafe fn xor(
+    fn xor(
+        self,
         key: &[u32; 8],
         nonce: &[u32; 3],
         counter: u32,
         data: &mut [u8],
     ) {
+        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // instructions.
         unsafe { xor(key, nonce, counter, data) }
     }
 }
@@ -131,7 +138,6 @@ macro_rules! output {
 ///
 /// # Safety
 /// Requires Zbb or Zbkb.
-#[allow(unsafe_code)]
 unsafe fn keystream_block(state: &[u32; 16], out: &mut [u32; 16]) {
     // SAFETY: the caller has confirmed the rotate; the assembly reads
     // sixteen words through `state` and writes sixteen through `out`,

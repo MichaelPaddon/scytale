@@ -39,21 +39,26 @@ fn present(ext: u64, bytes: usize) -> bool {
 }
 
 /// The keystream generator with the vector extension and Zvkb.
-pub struct Zvkb;
+// No public constructor: a value exists only by way of `probe`.
+#[derive(Clone, Copy)]
+pub struct Zvkb(());
 
 impl Sealed for Zvkb {}
 
 impl Backend for Zvkb {
-    fn supported() -> bool {
-        has_zvkb()
+    fn probe() -> Option<Self> {
+        has_zvkb().then_some(Zvkb(()))
     }
 
-    unsafe fn xor(
+    fn xor(
+        self,
         key: &[u32; 8],
         nonce: &[u32; 3],
         counter: u32,
         data: &mut [u8],
     ) {
+        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // instructions.
         unsafe { xor(key, nonce, counter, data) }
     }
 }

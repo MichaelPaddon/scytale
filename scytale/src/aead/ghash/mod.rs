@@ -28,7 +28,6 @@
 //! which the processor can run at once, and needs only one reduction
 //! at the end rather than eight.
 
-use crate::probe::Probe;
 /// GHASH works only on 128-bit blocks, whatever the cipher's block.
 pub(crate) const BLOCK: usize = 16;
 
@@ -73,16 +72,6 @@ use self::riscv64 as arch;
 #[cfg(target_arch = "x86_64")]
 use self::x86_64 as arch;
 
-/// Asked once; see [`crate::probe`].
-static PROBED: Probe = Probe::new();
-
-/// The subkey ready for the processor's carry-less multiply, or
-/// nothing if there is no such instruction here.
-fn prepared(h: &[u64; 2]) -> Option<[u64; 2]> {
-    let known = PROBED.yes(arch::has_carryless_multiply);
-    known.then(|| arch::prepare(h))
-}
-
 /// Divides the subkey by `x` and puts its halves in the order a
 /// vector register wants them, least significant first.
 ///
@@ -115,10 +104,12 @@ pub(crate) struct Ghash {
     /// Bytes of a block not yet complete.
     block: [u8; BLOCK],
     used: usize,
-    /// The subkey prepared for the processor's carry-less multiply,
-    /// present only when there is one to use. Decided when the hash
-    /// starts rather than per block.
-    fast: Option<[u64; 2]>,
+    /// The processor's carry-less multiply, and the subkey prepared
+    /// for it, present only when there is one to use. Decided when
+    /// the hash starts rather than per block; the multiply is a
+    /// value that exists only where the processor has it, so using
+    /// it needs no further check.
+    fast: Option<(arch::Multiply, [u64; 2])>,
     /// Prepared powers of the subkey, `H` first, for hashing a whole
     /// group of blocks at once. Built the first time a group turns
     /// up, so that short messages never pay for it.
@@ -135,7 +126,7 @@ impl Ghash {
             y: [0, 0],
             block: [0; BLOCK],
             used: 0,
-            fast: prepared(&h),
+            fast: arch::probe().map(|m| (m, m.prepare(&h))),
             powers: None,
         }
     }
@@ -194,38 +185,30 @@ impl Ghash {
     /// Adds as many whole groups of blocks as `data` holds, and
     /// returns what is left over. Does nothing where the architecture
     /// has no group multiply.
-    #[allow(unsafe_code)]
     fn absorb_groups<'a>(&mut self, data: &'a [u8]) -> &'a [u8] {
-        let group = arch::group();
-        let Some(h) = self.fast else { return data };
+        let Some((fast, h)) = self.fast else {
+            return data;
+        };
+        let group = fast.group();
         if group == 1 || data.len() < group * BLOCK {
             return data;
         }
         let span = group * BLOCK;
         // A copy, so that the loop below can borrow the hash itself.
-        let powers = match self.powers {
-            Some(powers) => powers,
-            None => *self.powers.insert(unsafe { powers_of(&h) }),
-        };
+        let powers = *self.powers.get_or_insert_with(|| powers_of(fast, &h));
         let mut groups = data.chunks_exact(span);
         for group in &mut groups {
-            // SAFETY: the instructions were confirmed present when
-            // this hash was started, and the group is the width the
-            // multiply expects.
-            unsafe { arch::multiply_group(&mut self.y, &powers, group) };
+            fast.multiply_group(&mut self.y, &powers, group);
         }
         groups.remainder()
     }
 
     /// Adds one whole block: `y = (y + block) * h`.
-    #[allow(unsafe_code)]
     fn absorb(&mut self, block: &[u8]) {
         self.y[0] ^= halve(&block[..8]);
         self.y[1] ^= halve(&block[8..BLOCK]);
-        if let Some(h) = self.fast.as_ref() {
-            // SAFETY: the instruction was confirmed present when this
-            // hash was started.
-            unsafe { arch::multiply(&mut self.y, h) };
+        if let Some((fast, h)) = &self.fast {
+            fast.multiply(&mut self.y, h);
             return;
         }
         multiply(&mut self.y, &self.h);
@@ -233,9 +216,12 @@ impl Ghash {
 }
 
 /// The first [`MAX_GROUP`] powers of the subkey, each prepared for
-/// the architecture's multiply, given the subkey already prepared.
-#[allow(unsafe_code)]
-pub(crate) unsafe fn powers_of(h: &[u64; 2]) -> [[u64; 2]; MAX_GROUP] {
+/// the architecture's multiply `fast`, given the subkey already
+/// prepared.
+pub(crate) fn powers_of(
+    fast: arch::Multiply,
+    h: &[u64; 2],
+) -> [[u64; 2]; MAX_GROUP] {
     // The powers are built with the accelerated multiply rather than
     // the portable one: this runs once per hash that sees a whole
     // group, and the portable version would cost more than the group
@@ -243,9 +229,8 @@ pub(crate) unsafe fn powers_of(h: &[u64; 2]) -> [[u64; 2]; MAX_GROUP] {
     let mut powers = [[0u64; 2]; MAX_GROUP];
     let mut power = [1u64 << 63, 0];
     for slot in powers.iter_mut() {
-        // SAFETY: the caller has confirmed the instruction.
-        unsafe { arch::multiply(&mut power, h) };
-        *slot = arch::prepare(&power);
+        fast.multiply(&mut power, h);
+        *slot = fast.prepare(&power);
     }
     powers
 }
@@ -326,20 +311,18 @@ mod tests {
     }
 
     #[test]
-    #[allow(unsafe_code)]
     fn carryless_multiply_agrees_with_portable() {
-        if !arch::has_carryless_multiply() {
+        let Some(fast) = arch::probe() else {
             eprintln!("skipping: no carry-less multiply");
             return;
-        }
+        };
         for seed in 0..500 {
             let h = values(seed);
             let start = values(seed ^ 0x5555_5555);
             let mut want = start;
             multiply(&mut want, &h);
             let mut got = start;
-            let scaled = arch::prepare(&h);
-            unsafe { arch::multiply(&mut got, &scaled) };
+            fast.multiply(&mut got, &fast.prepare(&h));
             assert_eq!(got, want, "seed {seed}");
         }
     }
@@ -398,12 +381,11 @@ mod tests {
     /// Zero and one are the cases the folding is most likely to get
     /// wrong, and the random sample is unlikely to hit them.
     #[test]
-    #[allow(unsafe_code)]
     fn carryless_multiply_handles_edges() {
-        if !arch::has_carryless_multiply() {
+        let Some(fast) = arch::probe() else {
             eprintln!("skipping: no carry-less multiply");
             return;
-        }
+        };
         // In this bit order the identity is the top bit of the first
         // word, and the all-ones value exercises every fold term.
         let edges = [[0, 0], [1 << 63, 0], [0, 1], [!0, !0]];
@@ -412,8 +394,7 @@ mod tests {
                 let mut want = a;
                 multiply(&mut want, &b);
                 let mut got = a;
-                let scaled = arch::prepare(&b);
-                unsafe { arch::multiply(&mut got, &scaled) };
+                fast.multiply(&mut got, &fast.prepare(&b));
                 assert_eq!(got, want, "{a:x?} * {b:x?}");
             }
         }

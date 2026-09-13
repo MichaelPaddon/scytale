@@ -93,12 +93,9 @@ impl Subkey {
         if !supported() {
             return None;
         }
-        let h = ghash::aarch64::prepare(&[
-            ghash::halve(&h[..8]),
-            ghash::halve(&h[8..]),
-        ]);
-        // SAFETY: `supported` has just confirmed the instructions.
-        let powers = unsafe { ghash::powers_of(&h) };
+        let fast = ghash::aarch64::probe()?;
+        let h = fast.prepare(&[ghash::halve(&h[..8]), ghash::halve(&h[8..])]);
+        let powers = ghash::powers_of(fast, &h);
         Some(Subkey { h, powers })
     }
 }

@@ -18,8 +18,6 @@
 //! FIPS 202 look the way they do. Only the padding knows any of
 //! this; the permutation sees whole lanes.
 
-#![allow(unsafe_code)]
-
 use core::fmt;
 use core::marker::PhantomData;
 
@@ -41,16 +39,24 @@ pub(crate) const LANES: usize = 25;
 const MAX_RATE: usize = 168;
 
 /// Keccak-f\[1600\]. Sealed.
-pub trait Permutation: Sealed {
+///
+/// A value of the type is the proof that this processor can run it:
+/// [`probe`](Permutation::probe) is the only way to make one, the
+/// hardware one has no public constructor, and the sponge holds the
+/// value it was given. So the permutation is a safe call, and the
+/// one `unsafe` block in a hardware module is where the value is
+/// minted.
+pub trait Permutation: Sealed + Copy {
+    /// The permutation, where this processor can run it. Asked once.
+    fn probe() -> Option<Self>;
+
     /// Whether this processor can run it.
-    fn supported() -> bool;
+    fn supported() -> bool {
+        Self::probe().is_some()
+    }
 
     /// Applies the permutation to `state`.
-    ///
-    /// # Safety
-    /// [`supported`](Permutation::supported) must have returned true
-    /// on this processor.
-    unsafe fn permute(state: &mut [u64; LANES]);
+    fn permute(self, state: &mut [u64; LANES]);
 }
 
 /// One of the six functions: its rate and the domain bits that end
@@ -88,22 +94,21 @@ struct State<P: Permutation> {
     lanes: [u64; LANES],
     /// Bytes of the current block absorbed, or squeezed.
     used: usize,
-    _marker: PhantomData<P>,
+    /// The permutation, which is the proof the processor can run it.
+    permutation: P,
 }
 
 impl<P: Permutation> State<P> {
-    fn new() -> Self {
+    fn new(permutation: P) -> Self {
         State {
             lanes: [0; LANES],
             used: 0,
-            _marker: PhantomData,
+            permutation,
         }
     }
 
     fn permute(&mut self) {
-        // SAFETY: the sponge only exists once its constructor's
-        // caller confirmed support.
-        unsafe { P::permute(&mut self.lanes) }
+        self.permutation.permute(&mut self.lanes)
     }
 
     /// Xors `byte` into the state at byte offset `at`.
@@ -199,7 +204,7 @@ impl<P: Permutation> Clone for State<P> {
         State {
             lanes: self.lanes,
             used: self.used,
-            _marker: PhantomData,
+            permutation: self.permutation,
         }
     }
 }
@@ -229,23 +234,17 @@ pub struct Sponge<P: Permutation, V: Variant> {
 }
 
 impl<P: Permutation, V: Variant> Sponge<P, V> {
-    /// Starts a sponge without asking the processor.
-    ///
-    /// # Safety
-    /// The caller must have confirmed `P::supported()`.
-    pub(crate) unsafe fn new_unchecked() -> Self {
+    /// Starts a sponge over `permutation`, which the caller got from
+    /// the probe.
+    pub(crate) fn with(permutation: P) -> Self {
         Sponge {
-            state: State::new(),
+            state: State::new(permutation),
             _marker: PhantomData,
         }
     }
 
     fn try_new() -> Result<Self, Error> {
-        if !P::supported() {
-            return Err(Error::NotSupported);
-        }
-        // SAFETY: just confirmed.
-        Ok(unsafe { Self::new_unchecked() })
+        P::probe().map(Self::with).ok_or(Error::NotSupported)
     }
 
     fn reset(&mut self) {

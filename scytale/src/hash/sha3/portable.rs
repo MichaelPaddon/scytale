@@ -6,8 +6,6 @@
 //! time taken depends on nothing but the length of the message.
 
 // Only the trait impl is unsafe, and it calls safe code.
-#![allow(unsafe_code)]
-
 use super::engine::{LANES, Permutation, Sponge};
 use super::variant;
 
@@ -99,16 +97,17 @@ pub(crate) fn keccak_f1600(a: &mut [u64; LANES]) {
 }
 
 /// The permutation in plain Rust.
+#[derive(Clone, Copy)]
 pub struct Keccak;
 
 impl super::engine::Sealed for Keccak {}
 
 impl Permutation for Keccak {
-    fn supported() -> bool {
-        true
+    fn probe() -> Option<Self> {
+        Some(Keccak)
     }
 
-    unsafe fn permute(state: &mut [u64; LANES]) {
+    fn permute(self, state: &mut [u64; LANES]) {
         keccak_f1600(state)
     }
 }

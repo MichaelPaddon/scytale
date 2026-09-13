@@ -7,42 +7,37 @@
 // The signatures have to match the real ones.
 #![allow(unsafe_code)]
 
-/// How many blocks the group multiply takes at once. One means there
-/// is no group multiply.
-pub(super) const GROUP: usize = 1;
+/// The carry-less multiply this architecture does not have. There
+/// is no value of the type, so a hash holding one cannot exist, and
+/// the calls below are never made; the type says so rather than a
+/// panic.
+#[derive(Clone, Copy)]
+pub(crate) enum Multiply {}
 
-/// How many blocks the group multiply takes at once, asked as a
-/// call because one architecture decides it at run time.
-pub(super) fn group() -> usize {
-    GROUP
+/// Never anything: there is no multiply to find.
+pub(crate) fn probe() -> Option<Multiply> {
+    None
 }
 
-/// There is no carry-less multiply here.
-pub(super) fn has_carryless_multiply() -> bool {
-    false
-}
+impl Multiply {
+    pub(crate) fn group(self) -> usize {
+        match self {}
+    }
 
-/// Never called, because the subkey is never prepared.
-pub(super) fn prepare(h: &[u64; 2]) -> [u64; 2] {
-    *h
-}
+    pub(super) fn prepare(self, _h: &[u64; 2]) -> [u64; 2] {
+        match self {}
+    }
 
-/// Never called, because the subkey is never prepared.
-///
-/// # Safety
-/// Unreachable.
-pub(super) unsafe fn multiply(_value: &mut [u64; 2], _h: &[u64; 2]) {
-    unreachable!("no carry-less multiply on this architecture")
-}
+    pub(super) fn multiply(self, _value: &mut [u64; 2], _h: &[u64; 2]) {
+        match self {}
+    }
 
-/// Never called: [`GROUP`] is one.
-///
-/// # Safety
-/// Unreachable.
-pub(super) unsafe fn multiply_group(
-    _value: &mut [u64; 2],
-    _powers: &[[u64; 2]; super::MAX_GROUP],
-    _blocks: &[u8],
-) {
-    unreachable!("no group multiply on this architecture")
+    pub(crate) fn multiply_group(
+        self,
+        _value: &mut [u64; 2],
+        _powers: &[[u64; 2]; super::MAX_GROUP],
+        _blocks: &[u8],
+    ) {
+        match self {}
+    }
 }

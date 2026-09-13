@@ -66,17 +66,21 @@ fn id_register_reports_sha3() -> bool {
     false
 }
 
-/// The permutation via the SHA3 instructions.
-pub struct Armv8;
+/// The permutation via the SHA3 instructions. No public constructor:
+/// a value exists only by way of `probe`.
+#[derive(Clone, Copy)]
+pub struct Armv8(());
 
 impl super::engine::Sealed for Armv8 {}
 
 impl Permutation for Armv8 {
-    fn supported() -> bool {
-        has_sha3()
+    fn probe() -> Option<Self> {
+        has_sha3().then_some(Armv8(()))
     }
 
-    unsafe fn permute(state: &mut [u64; LANES]) {
+    fn permute(self, state: &mut [u64; LANES]) {
+        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // instructions.
         unsafe { keccak_f1600(state.as_mut_ptr()) }
     }
 }
@@ -283,8 +287,7 @@ mod tests {
             }
             let mut expected = state;
             reference(&mut expected);
-            // SAFETY: `has_sha3` was just checked.
-            unsafe { Armv8::permute(&mut state) };
+            Armv8::probe().expect("checked above").permute(&mut state);
             assert_eq!(state, expected);
         }
     }

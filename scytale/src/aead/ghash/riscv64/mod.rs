@@ -89,67 +89,68 @@ fn choice() -> Option<Choice> {
     })
 }
 
-/// How many blocks the group multiply takes at once.
-pub(super) fn group() -> usize {
-    match choice() {
-        Some(Choice::Zvkg) => zvkg::GROUP,
-        Some(Choice::Zvbc) => zvbc::GROUP,
-        Some(Choice::Zbc) => zbc::GROUP,
-        None => 1,
-    }
+/// The processor's carry-less multiply, whichever of the three it
+/// is. A value exists only by way of [`probe`], so holding one is
+/// holding the proof that the instructions are there, and the calls
+/// on it are safe; which backend answers is carried in the value, so
+/// there is no arm for "none".
+#[derive(Clone, Copy)]
+pub(crate) struct Multiply(Choice);
+
+/// The multiply, where the processor has one. Asked once.
+pub(crate) fn probe() -> Option<Multiply> {
+    choice().map(Multiply)
 }
 
-/// Whether this processor can multiply in the field without walking
-/// the bits.
-pub(super) fn has_carryless_multiply() -> bool {
-    choice().is_some()
-}
-
-/// Prepares the subkey for [`multiply`].
-pub(super) fn prepare(h: &[u64; 2]) -> [u64; 2] {
-    match choice() {
-        Some(Choice::Zvkg) => zvkg::prepare(h),
-        Some(Choice::Zvbc) => zvbc::prepare(h),
-        Some(Choice::Zbc) => zbc::prepare(h),
-        // Never reached: the subkey is only prepared once the probe
-        // has found something to prepare it for.
-        None => *h,
-    }
-}
-
-/// Multiplies `value` by the prepared subkey `h`, in place.
-///
-/// # Safety
-/// The subkey must have been prepared by [`prepare`], which is what
-/// confirms the instructions.
-pub(super) unsafe fn multiply(value: &mut [u64; 2], h: &[u64; 2]) {
-    unsafe {
-        match choice() {
-            Some(Choice::Zvkg) => zvkg::multiply(value, h),
-            Some(Choice::Zvbc) => zvbc::multiply(value, h),
-            Some(Choice::Zbc) => zbc::multiply(value, h),
-            None => unreachable!("no carry-less multiply on this processor"),
+impl Multiply {
+    /// How many blocks the group multiply takes at once.
+    pub(crate) fn group(self) -> usize {
+        match self.0 {
+            Choice::Zvkg => zvkg::GROUP,
+            Choice::Zvbc => zvbc::GROUP,
+            Choice::Zbc => zbc::GROUP,
         }
     }
-}
 
-/// Multiplies in the whole of `blocks`, which is [`group`] blocks,
-/// leaving the running hash in `value`.
-///
-/// # Safety
-/// As [`multiply`], and `blocks` must be exactly [`group`] blocks
-/// long. `powers` holds the prepared powers of the subkey, `H` first.
-pub(super) unsafe fn multiply_group(
-    value: &mut [u64; 2],
-    powers: &[[u64; 2]; super::MAX_GROUP],
-    blocks: &[u8],
-) {
-    unsafe {
-        match choice() {
-            Some(Choice::Zvkg) => zvkg::multiply_group(value, powers, blocks),
-            Some(Choice::Zvbc) => zvbc::multiply_group(value, powers, blocks),
-            Some(Choice::Zbc) => zbc::multiply_group(value, powers, blocks),
-            None => unreachable!("no carry-less multiply on this processor"),
+    /// Prepares the subkey for [`Multiply::multiply`].
+    pub(crate) fn prepare(self, h: &[u64; 2]) -> [u64; 2] {
+        match self.0 {
+            Choice::Zvkg => zvkg::prepare(h),
+            Choice::Zvbc => zvbc::prepare(h),
+            Choice::Zbc => zbc::prepare(h),
+        }
+    }
+
+    /// Multiplies `value` by the prepared subkey `h`, in place.
+    pub(crate) fn multiply(self, value: &mut [u64; 2], h: &[u64; 2]) {
+        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // instructions of the backend it names.
+        unsafe {
+            match self.0 {
+                Choice::Zvkg => zvkg::multiply(value, h),
+                Choice::Zvbc => zvbc::multiply(value, h),
+                Choice::Zbc => zbc::multiply(value, h),
+            }
+        }
+    }
+
+    /// Multiplies in the whole of `blocks`, which is
+    /// [`group`](Multiply::group) blocks, leaving the running hash in
+    /// `value`. `powers` holds the prepared powers of the subkey, `H`
+    /// first.
+    pub(crate) fn multiply_group(
+        self,
+        value: &mut [u64; 2],
+        powers: &[[u64; 2]; super::MAX_GROUP],
+        blocks: &[u8],
+    ) {
+        // SAFETY: as for `multiply`, and the length is the caller's.
+        unsafe {
+            match self.0 {
+                Choice::Zvkg => zvkg::multiply_group(value, powers, blocks),
+                Choice::Zvbc => zvbc::multiply_group(value, powers, blocks),
+                Choice::Zbc => zbc::multiply_group(value, powers, blocks),
+            }
         }
     }
 }
@@ -379,17 +380,14 @@ mod tests {
         match choice() {
             Some(chosen) => {
                 assert!(here(chosen));
-                assert!(has_carryless_multiply());
+                let fast = probe().expect("a multiply");
                 let at = CHOICES.iter().position(|&c| c == chosen).unwrap();
-                assert_eq!(group(), BACKENDS[at].group);
+                assert_eq!(fast.group(), BACKENDS[at].group);
                 // Asking twice must give the same answer, now that
                 // the first call has cached it.
                 assert_eq!(choice(), Some(chosen));
             }
-            None => {
-                assert!(!has_carryless_multiply());
-                assert_eq!(group(), 1);
-            }
+            None => assert!(probe().is_none()),
         }
     }
 }

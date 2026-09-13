@@ -41,16 +41,20 @@ fn ask_sha() -> bool {
 }
 
 /// The compression function via SHA-NI.
-pub struct ShaNi;
+// No public constructor: a value exists only by way of `probe`.
+#[derive(Clone, Copy)]
+pub struct ShaNi(());
 
 impl super::engine::Sealed for ShaNi {}
 
 impl Compress32 for ShaNi {
-    fn supported() -> bool {
-        has_sha()
+    fn probe() -> Option<Self> {
+        has_sha().then_some(ShaNi(()))
     }
 
-    unsafe fn compress(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
+    fn compress(self, state: &mut [u32; 8], blocks: &[[u8; 64]]) {
+        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // instructions.
         unsafe {
             if !blocks.is_empty() {
                 compress(state, blocks.as_ptr().cast(), blocks.len());

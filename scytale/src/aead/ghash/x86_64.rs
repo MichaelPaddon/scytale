@@ -59,6 +59,8 @@
 
 use core::arch::x86_64::__cpuid;
 
+use crate::probe::Probe;
+
 /// The field polynomial `x^128 + x^7 + x^2 + x + 1` without its
 /// leading term, written in the reversed bit order.
 const POLYNOMIAL: u64 = 0xc200_0000_0000_0000;
@@ -73,10 +75,49 @@ pub(super) const GROUP: usize = 8;
 const REVERSE: [u8; 16] =
     [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
 
-/// How many blocks the group multiply takes at once, asked as a
-/// call because one architecture decides it at run time.
-pub(super) fn group() -> usize {
-    GROUP
+/// The processor's carry-less multiply. A value exists only by way
+/// of [`probe`], so holding one is holding the proof that the
+/// instructions are there, and the calls on it are safe.
+#[derive(Clone, Copy)]
+pub(crate) struct Multiply(());
+
+/// The multiply, where the processor has it. Asked once.
+pub(crate) fn probe() -> Option<Multiply> {
+    has_carryless_multiply().then_some(Multiply(()))
+}
+
+impl Multiply {
+    /// How many blocks the group multiply takes at once, asked as a
+    /// call because one architecture decides it at run time.
+    pub(crate) fn group(self) -> usize {
+        GROUP
+    }
+
+    /// Prepares the subkey for [`Multiply::multiply`].
+    pub(crate) fn prepare(self, h: &[u64; 2]) -> [u64; 2] {
+        super::divide_by_x(h)
+    }
+
+    /// Multiplies `value` by the prepared subkey `h`, in place.
+    pub(crate) fn multiply(self, value: &mut [u64; 2], h: &[u64; 2]) {
+        // SAFETY: `self` was minted by `probe`, which confirmed the
+        // instructions.
+        unsafe { multiply(value, h) }
+    }
+
+    /// Multiplies in the whole of `blocks`, which is
+    /// [`group`](Multiply::group) blocks, leaving the running hash in
+    /// `value`. `powers` holds the prepared powers of the subkey, `H`
+    /// first.
+    pub(crate) fn multiply_group(
+        self,
+        value: &mut [u64; 2],
+        powers: &[[u64; 2]; super::MAX_GROUP],
+        blocks: &[u8],
+    ) {
+        // SAFETY: as for `multiply`, and the length is the caller's.
+        unsafe { multiply_group(value, powers, blocks) }
+    }
 }
 
 /// Whether the processor has the instructions used here: `pclmulqdq`
@@ -84,20 +125,22 @@ pub(super) fn group() -> usize {
 /// (bit 9). Every processor with the first has the second, but the
 /// group multiply below uses both, so both are checked.
 pub(super) fn has_carryless_multiply() -> bool {
-    let features = __cpuid(1).ecx;
-    features & (1 << 1) != 0 && features & (1 << 9) != 0
+    PCLMUL.yes(ask_carryless_multiply)
 }
 
-/// Prepares the subkey for [`multiply`].
-pub(super) fn prepare(h: &[u64; 2]) -> [u64; 2] {
-    super::divide_by_x(h)
+/// Kept: the hash subkey is prepared for every GCM-SIV message.
+static PCLMUL: Probe = Probe::new();
+
+fn ask_carryless_multiply() -> bool {
+    let features = __cpuid(1).ecx;
+    features & (1 << 1) != 0 && features & (1 << 9) != 0
 }
 
 /// Multiplies `value` by the prepared subkey `h`, in place.
 ///
 /// # Safety
 /// Requires `pclmulqdq`.
-pub(super) unsafe fn multiply(value: &mut [u64; 2], h: &[u64; 2]) {
+unsafe fn multiply(value: &mut [u64; 2], h: &[u64; 2]) {
     unsafe {
         core::arch::asm!(
             // The words are held most significant first; a register
@@ -169,7 +212,7 @@ pub(super) unsafe fn multiply(value: &mut [u64; 2], h: &[u64; 2]) {
 /// [`GROUP`] blocks long. `powers` holds the prepared powers of the
 /// subkey, `H` first, so the last block meets `H` and the first meets
 /// `H^8`.
-pub(super) unsafe fn multiply_group(
+unsafe fn multiply_group(
     value: &mut [u64; 2],
     powers: &[[u64; 2]; super::MAX_GROUP],
     blocks: &[u8],

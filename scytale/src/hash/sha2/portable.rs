@@ -11,8 +11,6 @@
 //! functions and nothing more (RISC-V Zknh) can reuse the loop.
 
 // Only the trait impls are unsafe, and they call safe code.
-#![allow(unsafe_code)]
-
 use super::engine::{Compress32, Compress64, Engine32, Engine64};
 use super::variant;
 
@@ -210,6 +208,7 @@ compress!(compress256, Functions32, u32, 64, 64, K256);
 compress!(compress512, Functions64, u64, 128, 80, K512);
 
 /// The bitwise functions in plain shifts and rotates.
+#[derive(Clone, Copy)]
 pub struct Compress;
 
 impl super::engine::Sealed for Compress {}
@@ -269,21 +268,21 @@ impl Functions64 for Compress {
 }
 
 impl Compress32 for Compress {
-    fn supported() -> bool {
-        true
+    fn probe() -> Option<Self> {
+        Some(Compress)
     }
 
-    unsafe fn compress(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
+    fn compress(self, state: &mut [u32; 8], blocks: &[[u8; 64]]) {
         compress256::<Compress>(state, blocks)
     }
 }
 
 impl Compress64 for Compress {
-    fn supported() -> bool {
-        true
+    fn probe() -> Option<Self> {
+        Some(Compress)
     }
 
-    unsafe fn compress(state: &mut [u64; 8], blocks: &[[u8; 128]]) {
+    fn compress(self, state: &mut [u64; 8], blocks: &[[u8; 128]]) {
         compress512::<Compress>(state, blocks)
     }
 }

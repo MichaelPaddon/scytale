@@ -43,7 +43,9 @@ fn present(ext: u64) -> bool {
 }
 
 /// The sigma functions as Zknh instructions.
-pub struct Zknh;
+// No public constructor: a value exists only by way of `probe`.
+#[derive(Clone, Copy)]
+pub struct Zknh(());
 
 impl super::super::engine::Sealed for Zknh {}
 
@@ -102,21 +104,21 @@ impl Functions64 for Zknh {
 }
 
 impl Compress32 for Zknh {
-    fn supported() -> bool {
-        has_zknh()
+    fn probe() -> Option<Self> {
+        has_zknh().then_some(Zknh(()))
     }
 
-    unsafe fn compress(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
+    fn compress(self, state: &mut [u32; 8], blocks: &[[u8; 64]]) {
         compress256::<Zknh>(state, blocks)
     }
 }
 
 impl Compress64 for Zknh {
-    fn supported() -> bool {
-        has_zknh()
+    fn probe() -> Option<Self> {
+        has_zknh().then_some(Zknh(()))
     }
 
-    unsafe fn compress(state: &mut [u64; 8], blocks: &[[u8; 128]]) {
+    fn compress(self, state: &mut [u64; 8], blocks: &[[u8; 128]]) {
         compress512::<Zknh>(state, blocks)
     }
 }
