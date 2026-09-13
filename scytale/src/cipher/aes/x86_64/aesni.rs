@@ -20,7 +20,7 @@
 
 use core::fmt;
 
-use super::{RoundKeys, expand, has_aesni};
+use super::{RoundKeys, has_aesni};
 use crate::cipher::BlockCipher;
 use crate::cipher::aes::BLOCK_SIZE;
 use crate::{BlockType, Key, KeyType};
@@ -75,8 +75,9 @@ impl<const K: usize> Aes<K> {
     pub(crate) unsafe fn new_unchecked(key: &[u8; K]) -> Self {
         unsafe {
             let size = super::KeySize::for_key(key);
-            let keys = expand(key, size);
-            Aes { keys }
+            Aes {
+                keys: RoundKeys::new(key, size),
+            }
         }
     }
 

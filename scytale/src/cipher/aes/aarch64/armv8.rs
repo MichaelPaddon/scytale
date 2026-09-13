@@ -22,13 +22,16 @@
 #![allow(unsafe_code)]
 
 use core::arch::aarch64::{
-    vaeseq_u8, vaesimcq_u8, vdupq_n_u8, vdupq_n_u32, vgetq_lane_u32, vld1q_u8,
-    vreinterpretq_u8_u32, vreinterpretq_u32_u8, vst1q_u8,
+    uint32x4_t, vaeseq_u8, vaesimcq_u8, vcombine_u32, vdup_n_u32,
+    vdupq_laneq_u32, vdupq_n_u8, vdupq_n_u32, veorq_u32, vextq_u8,
+    vget_low_u32, vld1_u32, vld1q_u8, vld1q_u32, vreinterpretq_u8_u32,
+    vreinterpretq_u32_u8, vshlq_n_u32, vsriq_n_u32, vst1_u32, vst1q_u8,
+    vst1q_u32,
 };
 use core::fmt;
 
 use crate::cipher::BlockCipher;
-use crate::cipher::aes::{BLOCK_SIZE, KeySize, MAX_WORDS, expand_words};
+use crate::cipher::aes::{BLOCK_SIZE, KeySize, MAX_WORDS};
 use crate::probe::Probe;
 use crate::{BlockType, Key, KeyType};
 use zeroize::ZeroizeOnDrop;
@@ -198,21 +201,131 @@ impl<const K: usize> BlockCipher for Aes<K> {
     }
 }
 
-/// `SubWord` via `aese` with a zero key: that applies SubBytes then
-/// ShiftRows, and with the word copied into every column ShiftRows
-/// only moves equal bytes around.
-///
-/// # Safety
-/// Requires the AES instructions.
-#[target_feature(enable = "aes")]
-unsafe fn sub_word(w: u32) -> u32 {
-    let v = vreinterpretq_u8_u32(vdupq_n_u32(w));
-    let s = vaeseq_u8(v, vdupq_n_u8(0));
-    vgetq_lane_u32::<0>(vreinterpretq_u32_u8(s))
+// The key schedule, in registers. There is no key-assist instruction
+// here; `aese` against a zero key is `SubBytes` then `ShiftRows`, and
+// on a vector whose four words are the same, `ShiftRows` moves equal
+// bytes onto each other and changes nothing, so it is `SubWord` of
+// that word in every lane. `RotWord` is a byte rotate of each lane,
+// and the running XOR down a round key is three shift-and-XOR steps.
+// Nothing leaves the vector registers until a round key is whole.
+
+/// `SubWord` of the word in every lane of `v`.
+#[inline(always)]
+unsafe fn sub_lanes(v: uint32x4_t) -> uint32x4_t {
+    unsafe {
+        vreinterpretq_u32_u8(vaeseq_u8(vreinterpretq_u8_u32(v), vdupq_n_u8(0)))
+    }
 }
 
-/// The shared key expansion with the hardware S-box, then the inverse
-/// keys for the equivalent inverse cipher.
+/// `RotWord` of every lane: each word rotated right by a byte, which
+/// on the little-endian view is the standard's rotate left.
+#[inline(always)]
+unsafe fn rot_lanes(v: uint32x4_t) -> uint32x4_t {
+    unsafe { vsriq_n_u32::<8>(vshlq_n_u32::<24>(v), v) }
+}
+
+/// XORs each word of `k` into every word above it: the running sum
+/// that FIPS 197 section 5.2 forms one word at a time.
+#[inline(always)]
+unsafe fn fold(mut k: uint32x4_t) -> uint32x4_t {
+    unsafe {
+        let zero = vdupq_n_u32(0);
+        for _ in 0..3 {
+            let up = vreinterpretq_u32_u8(vextq_u8::<12>(
+                vreinterpretq_u8_u32(zero),
+                vreinterpretq_u8_u32(k),
+            ));
+            k = veorq_u32(k, up);
+        }
+        k
+    }
+}
+
+/// The word `SubWord(RotWord(w)) ^ rcon` that starts a round key,
+/// with `w` the lane `LANE` of `v`, broadcast.
+#[inline(always)]
+unsafe fn assist<const LANE: i32>(v: uint32x4_t, rcon: u32) -> uint32x4_t {
+    unsafe {
+        let w = vdupq_laneq_u32::<LANE>(v);
+        veorq_u32(sub_lanes(rot_lanes(w)), vdupq_n_u32(rcon))
+    }
+}
+
+/// The round constants, `x^i` in GF(2^8), for as many steps as the
+/// widest schedule takes.
+const RCON: [u32; 10] =
+    [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36];
+
+/// AES-128: ten round keys after the key itself.
+#[target_feature(enable = "aes")]
+unsafe fn expand128(key: &[u8], out: &mut [u32; MAX_WORDS]) {
+    unsafe {
+        let mut k = vld1q_u32(key.as_ptr() as *const u32);
+        vst1q_u32(out.as_mut_ptr(), k);
+        for (i, &rcon) in RCON.iter().enumerate() {
+            k = veorq_u32(fold(k), assist::<3>(k, rcon));
+            vst1q_u32(out.as_mut_ptr().add(4 * (i + 1)), k);
+        }
+    }
+}
+
+/// AES-192: six words a step, four in `k0` and two in the low half
+/// of `k1`. The assist is on the last of the six, lane 1 of `k1`;
+/// after the four are folded, their last word runs on into the two.
+#[target_feature(enable = "aes")]
+unsafe fn expand192(key: &[u8], out: &mut [u32; MAX_WORDS]) {
+    unsafe {
+        let zero = vdupq_n_u32(0);
+        let mut k0 = vld1q_u32(key.as_ptr() as *const u32);
+        let mut k1 = vcombine_u32(
+            vld1_u32(key.as_ptr().add(16) as *const u32),
+            vdup_n_u32(0),
+        );
+        vst1q_u32(out.as_mut_ptr(), k0);
+        vst1_u32(out.as_mut_ptr().add(4), vget_low_u32(k1));
+        // Eight steps make forty-eight words after the six; the last
+        // step's two are beyond the schedule and are not stored.
+        for (i, &rcon) in RCON[..8].iter().enumerate() {
+            k0 = veorq_u32(fold(k0), assist::<1>(k1, rcon));
+            let at = 6 * (i + 1);
+            vst1q_u32(out.as_mut_ptr().add(at), k0);
+            if at + 6 > 4 * (KeySize::Aes192.rounds() + 1) {
+                break;
+            }
+            let up = vreinterpretq_u32_u8(vextq_u8::<12>(
+                vreinterpretq_u8_u32(zero),
+                vreinterpretq_u8_u32(k1),
+            ));
+            k1 = veorq_u32(veorq_u32(k1, up), vdupq_laneq_u32::<3>(k0));
+            vst1_u32(out.as_mut_ptr().add(at + 4), vget_low_u32(k1));
+        }
+    }
+}
+
+/// AES-256: two round keys a step. The first takes the rotated assist
+/// with the round constant, as AES-128 does; the second takes the
+/// plain `SubWord` of the first's last word, with no constant.
+#[target_feature(enable = "aes")]
+unsafe fn expand256(key: &[u8], out: &mut [u32; MAX_WORDS]) {
+    unsafe {
+        let mut k0 = vld1q_u32(key.as_ptr() as *const u32);
+        let mut k1 = vld1q_u32(key.as_ptr().add(16) as *const u32);
+        vst1q_u32(out.as_mut_ptr(), k0);
+        vst1q_u32(out.as_mut_ptr().add(4), k1);
+        for (i, &rcon) in RCON[..7].iter().enumerate() {
+            k0 = veorq_u32(fold(k0), assist::<3>(k1, rcon));
+            vst1q_u32(out.as_mut_ptr().add(8 * (i + 1)), k0);
+            if i == 6 {
+                break;
+            }
+            let plain = sub_lanes(vdupq_laneq_u32::<3>(k0));
+            k1 = veorq_u32(fold(k1), plain);
+            vst1q_u32(out.as_mut_ptr().add(8 * (i + 1) + 4), k1);
+        }
+    }
+}
+
+/// The expanded key both ways round, built in place.
 ///
 /// # Safety
 /// Requires the AES instructions.
@@ -220,12 +333,22 @@ unsafe fn sub_word(w: u32) -> u32 {
 unsafe fn expand<const K: usize>(key: &[u8; K], size: KeySize) -> Aes<K> {
     unsafe {
         let rounds = size.rounds();
-        let enc = expand_words(key, size, |w| sub_word(w));
+        let mut aes = Aes {
+            enc: [0; MAX_WORDS],
+            dec: [0; MAX_WORDS],
+            size,
+        };
+        match size {
+            KeySize::Aes128 => expand128(key, &mut aes.enc),
+            KeySize::Aes192 => expand192(key, &mut aes.enc),
+            KeySize::Aes256 => expand256(key, &mut aes.enc),
+        }
 
         // Decryption runs the round keys backwards, with the inner ones
         // passed through InvMixColumns so `aesd`/`aesimc` can use them
         // directly.
-        let mut dec = [0u32; MAX_WORDS];
+        let enc = &aes.enc;
+        let dec = &mut aes.dec;
         dec[..4].copy_from_slice(&enc[4 * rounds..4 * rounds + 4]);
         for r in 1..rounds {
             let src = 4 * (rounds - r);
@@ -235,8 +358,7 @@ unsafe fn expand<const K: usize>(key: &[u8; K], size: KeySize) -> Aes<K> {
             vst1q_u8(dec[4 * r..].as_mut_ptr() as *mut u8, vaesimcq_u8(k));
         }
         dec[4 * rounds..4 * rounds + 4].copy_from_slice(&enc[..4]);
-
-        Aes { enc, dec, size }
+        aes
     }
 }
 
@@ -493,6 +615,38 @@ body!(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cipher::aes::expand_words;
+    use crate::cipher::aes::portable::bitsliced::sub_word;
+
+    /// The schedule built in registers is the schedule FIPS 197
+    /// section 5.2 writes out word by word, at every width. The
+    /// inverse half is exercised by every decryption test; here only
+    /// its untransformed ends are checked, so that a wrong copy shows
+    /// up as itself.
+    #[test]
+    fn the_schedule_is_the_standard_one() {
+        if !has_aes() {
+            return;
+        }
+        fn check<const K: usize>(size: KeySize) {
+            for i in 0..100u32 {
+                let key: [u8; K] = core::array::from_fn(|j| {
+                    (i.wrapping_mul(97).wrapping_add(j as u32 * 31)) as u8
+                });
+                let want = expand_words(&key, size, sub_word);
+                // SAFETY: checked above.
+                let aes = unsafe { expand(&key, size) };
+                assert_eq!(aes.enc, want, "{size:?} key {i}");
+                let rounds = size.rounds();
+                assert_eq!(aes.dec[..4], want[4 * rounds..4 * rounds + 4]);
+                assert_eq!(aes.dec[4 * rounds..4 * rounds + 4], want[..4]);
+                assert_eq!(aes.dec[4 * rounds + 4..], want[4 * rounds + 4..]);
+            }
+        }
+        check::<16>(KeySize::Aes128);
+        check::<24>(KeySize::Aes192);
+        check::<32>(KeySize::Aes256);
+    }
     use crate::cipher::aes::portable;
 
     /// Returns the cipher, or `None` (skipping the test) without the

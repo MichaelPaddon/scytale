@@ -14,7 +14,7 @@ use zeroize::ZeroizeOnDrop;
 
 use core::any::Any;
 
-use super::{Aes, Aes128, Aes192, Aes256, KeySize, MAX_WORDS, expand_words};
+use super::{Aes, Aes128, Aes192, Aes256, KeySize, MAX_WORDS};
 use crate::cipher::{BlockCipher, is};
 use crate::probe::Probe;
 
@@ -132,67 +132,273 @@ struct RoundKeys {
     size: KeySize,
 }
 
-/// `SubWord` via `aeskeygenassist`, which applies the S-box to lanes
-/// 1 and 3 of its input; broadcasting `w` puts it in every lane.
-///
-/// Written out rather than reached through an intrinsic, and not
-/// because of speed: an intrinsic names the 128-bit vector type, and
-/// on a target built without SSE that type cannot be lowered at all,
-/// so the crate would not compile for bare metal. The instruction
-/// itself is happy there, since naming a register in assembly asks
-/// nothing of the compiler.
+// The key schedule, written for the instructions rather than as a
+// word loop with a hardware S-box dropped in. `aeskeygenassist` does
+// `SubWord` and `RotWord` on the lane it is pointed at and folds the
+// round constant in; what remains is the running XOR down the four
+// words of a round key, which three shift-and-XOR steps do in place.
+// Nothing leaves the vector registers until a round key is whole and
+// is stored. The old form moved each word out to a general register
+// and back again, ten times a key, and that was most of the cost of
+// building one, which GCM-SIV pays for every message.
+//
+// Legacy SSE encodings throughout, as in `aesni`: this runs wherever
+// AES-NI does, which does not imply AVX.
+
+/// Three shift-and-XOR steps: XORs each word of `xmm1` into every
+/// word above it, which is the running sum FIPS 197 section 5.2
+/// forms one word at a time.
+macro_rules! fold {
+    ($r:literal) => {
+        concat!(
+            "movdqa xmm4, ",
+            $r,
+            "\n",
+            "pslldq xmm4, 4\n",
+            "pxor ",
+            $r,
+            ", xmm4\n",
+            "movdqa xmm4, ",
+            $r,
+            "\n",
+            "pslldq xmm4, 4\n",
+            "pxor ",
+            $r,
+            ", xmm4\n",
+            "movdqa xmm4, ",
+            $r,
+            "\n",
+            "pslldq xmm4, 4\n",
+            "pxor ",
+            $r,
+            ", xmm4\n",
+        )
+    };
+}
+
+/// One AES-128 round key from the one before it: the assist on
+/// the last word, broadcast, folded in.
+macro_rules! step128 {
+    ($rcon:literal, $off:literal) => {
+        concat!(
+            "aeskeygenassist xmm2, xmm1, ",
+            $rcon,
+            "\n",
+            "pshufd xmm2, xmm2, 0xff\n",
+            fold!("xmm1"),
+            "pxor xmm1, xmm2\n",
+            "movdqu [{out} + ",
+            $off,
+            "], xmm1\n",
+        )
+    };
+}
+
+/// AES-128: ten round keys after the key itself.
 ///
 /// # Safety
-/// Requires AES-NI.
-unsafe fn sub_word(w: u32) -> u32 {
+/// Requires AES-NI. `key` must point at 16 readable bytes and `out`
+/// at 176 writable ones.
+unsafe fn expand128(key: *const u8, out: *mut u32) {
     unsafe {
-        let out: u32;
         core::arch::asm!(
-            "movd            xmm0, {w:e}",
-            // Into every lane, so lane 0 of the result is the one wanted.
-            "pshufd          xmm0, xmm0, 0",
-            "aeskeygenassist xmm0, xmm0, 0",
-            "movd            {out:e}, xmm0",
-            w = in(reg) w,
-            out = out(reg) out,
-            out("xmm0") _,
-            options(pure, nomem, nostack, preserves_flags),
+            "movdqu xmm1, [{key}]",
+            "movdqu [{out}], xmm1",
+            step128!("0x01", "16"),
+            step128!("0x02", "32"),
+            step128!("0x04", "48"),
+            step128!("0x08", "64"),
+            step128!("0x10", "80"),
+            step128!("0x20", "96"),
+            step128!("0x40", "112"),
+            step128!("0x80", "128"),
+            step128!("0x1b", "144"),
+            step128!("0x36", "160"),
+            key = in(reg) key,
+            out = in(reg) out,
+            out("xmm1") _, out("xmm2") _, out("xmm4") _,
+            options(nostack),
         );
-        out
     }
 }
 
-/// The shared key expansion with the hardware S-box, then the inverse
-/// keys for the equivalent inverse cipher.
+/// Six words of AES-192 schedule from the six before them. `xmm1`
+/// holds four words and `xmm3` two, in its low half; the assist is
+/// on the last of the six, so lane 1 of `xmm3`. After the four are
+/// folded, their last word is broadcast into the two.
+macro_rules! step192 {
+    ($rcon:literal, $off:literal, $store:literal) => {
+        concat!(
+            "aeskeygenassist xmm2, xmm3, ",
+            $rcon,
+            "\n",
+            "pshufd xmm2, xmm2, 0x55\n",
+            fold!("xmm1"),
+            "pxor xmm1, xmm2\n",
+            "movdqu [{out} + ",
+            $off,
+            "], xmm1\n",
+            "pshufd xmm2, xmm1, 0xff\n",
+            "movdqa xmm4, xmm3\n",
+            "pslldq xmm4, 4\n",
+            "pxor xmm3, xmm4\n",
+            "pxor xmm3, xmm2\n",
+            $store,
+        )
+    };
+}
+
+/// AES-192: fifty-two words, six at a step, so the last step wants
+/// only four and the two it would go on to make are not stored.
 ///
 /// # Safety
-/// Requires AES-NI.
-unsafe fn expand(key: &[u8], size: KeySize) -> RoundKeys {
+/// Requires AES-NI. `key` must point at 24 readable bytes and `out`
+/// at 208 writable ones.
+unsafe fn expand192(key: *const u8, out: *mut u32) {
     unsafe {
-        let rounds = size.rounds();
-        let enc = expand_words(key, size, |w| sub_word(w));
+        core::arch::asm!(
+            "movdqu xmm1, [{key}]",
+            "movq xmm3, [{key} + 16]",
+            "movdqu [{out}], xmm1",
+            "movq [{out} + 16], xmm3",
+            step192!("0x01", "24", "movq [{out} + 40], xmm3\n"),
+            step192!("0x02", "48", "movq [{out} + 64], xmm3\n"),
+            step192!("0x04", "72", "movq [{out} + 88], xmm3\n"),
+            step192!("0x08", "96", "movq [{out} + 112], xmm3\n"),
+            step192!("0x10", "120", "movq [{out} + 136], xmm3\n"),
+            step192!("0x20", "144", "movq [{out} + 160], xmm3\n"),
+            step192!("0x40", "168", "movq [{out} + 184], xmm3\n"),
+            step192!("0x80", "192", ""),
+            key = in(reg) key,
+            out = in(reg) out,
+            out("xmm1") _, out("xmm2") _, out("xmm3") _, out("xmm4") _,
+            options(nostack),
+        );
+    }
+}
 
-        // Decryption runs the round keys backwards, with the inner ones
-        // passed through InvMixColumns so `aesdec` can use them directly.
-        let mut dec = [0u32; MAX_WORDS];
-        dec[..4].copy_from_slice(&enc[4 * rounds..4 * rounds + 4]);
-        for r in 1..rounds {
-            let src = 4 * (rounds - r);
-            // SAFETY: both slices are four words, and `movdqu` asks
-            // nothing of their alignment.
-            core::arch::asm!(
-                "movdqu xmm0, [{src}]",
-                "aesimc xmm0, xmm0",
-                "movdqu [{dst}], xmm0",
-                src = in(reg) enc[src..].as_ptr(),
-                dst = in(reg) dec[4 * r..].as_mut_ptr(),
-                out("xmm0") _,
-                options(nostack),
-            );
+/// Two AES-256 round keys from the two before them. The first takes
+/// the rotated assist with the round constant, as AES-128 does; the
+/// second takes the plain `SubWord`, which the assist leaves in lane
+/// 2 (`0xaa`), with no constant.
+macro_rules! step256 {
+    ($rcon:literal, $off:literal, $second:expr) => {
+        concat!(
+            "aeskeygenassist xmm2, xmm3, ",
+            $rcon,
+            "\n",
+            "pshufd xmm2, xmm2, 0xff\n",
+            fold!("xmm1"),
+            "pxor xmm1, xmm2\n",
+            "movdqu [{out} + ",
+            $off,
+            "], xmm1\n",
+            $second,
+        )
+    };
+}
+
+/// The second round key of a [`step256`] pair.
+macro_rules! step256b {
+    ($off:literal) => {
+        concat!(
+            "aeskeygenassist xmm2, xmm1, 0\n",
+            "pshufd xmm2, xmm2, 0xaa\n",
+            fold!("xmm3"),
+            "pxor xmm3, xmm2\n",
+            "movdqu [{out} + ",
+            $off,
+            "], xmm3\n",
+        )
+    };
+}
+
+/// AES-256: fourteen round keys after the two the key itself makes.
+///
+/// # Safety
+/// Requires AES-NI. `key` must point at 32 readable bytes and `out`
+/// at 240 writable ones.
+unsafe fn expand256(key: *const u8, out: *mut u32) {
+    unsafe {
+        core::arch::asm!(
+            "movdqu xmm1, [{key}]",
+            "movdqu xmm3, [{key} + 16]",
+            "movdqu [{out}], xmm1",
+            "movdqu [{out} + 16], xmm3",
+            step256!("0x01", "32", step256b!("48")),
+            step256!("0x02", "64", step256b!("80")),
+            step256!("0x04", "96", step256b!("112")),
+            step256!("0x08", "128", step256b!("144")),
+            step256!("0x10", "160", step256b!("176")),
+            step256!("0x20", "192", step256b!("208")),
+            step256!("0x40", "224", ""),
+            key = in(reg) key,
+            out = in(reg) out,
+            out("xmm1") _, out("xmm2") _, out("xmm3") _, out("xmm4") _,
+            options(nostack),
+        );
+    }
+}
+
+/// The inverse schedule: the round keys backwards, the inner ones
+/// through `InvMixColumns` so that `aesdec` can take them as they
+/// are. Copies the first and last, which are not transformed.
+///
+/// # Safety
+/// Requires AES-NI. Both pointers must address `4 * (rounds + 1)`
+/// words.
+unsafe fn invert(enc: *const u32, dec: *mut u32, rounds: usize) {
+    unsafe {
+        let last = enc.add(4 * rounds);
+        core::arch::asm!(
+            "movdqu xmm0, [{last}]",
+            "movdqu [{dec}], xmm0",
+            "movdqu xmm0, [{enc}]",
+            "movdqu [{dec} + {tail}], xmm0",
+            // Round `rounds - 1` down to 1, into `dec` slots 1 up.
+            "2:",
+            "sub {src}, 16",
+            "add {dec}, 16",
+            "movdqu xmm0, [{src}]",
+            "aesimc xmm0, xmm0",
+            "movdqu [{dec}], xmm0",
+            "dec {n}",
+            "jnz 2b",
+            enc = in(reg) enc,
+            last = in(reg) last,
+            src = inout(reg) last => _,
+            dec = inout(reg) dec => _,
+            tail = in(reg) 16 * rounds,
+            n = inout(reg) rounds - 1 => _,
+            out("xmm0") _,
+            options(nostack),
+        );
+    }
+}
+
+impl RoundKeys {
+    /// The expanded key both ways round.
+    ///
+    /// # Safety
+    /// Requires AES-NI.
+    unsafe fn new(key: &[u8], size: KeySize) -> Self {
+        let mut keys = RoundKeys {
+            enc: [0; MAX_WORDS],
+            dec: [0; MAX_WORDS],
+            size,
+        };
+        // SAFETY: the caller confirmed the instructions, and both
+        // arrays hold `MAX_WORDS`, which is the widest schedule.
+        unsafe {
+            let (k, enc) = (key.as_ptr(), keys.enc.as_mut_ptr());
+            match size {
+                KeySize::Aes128 => expand128(k, enc),
+                KeySize::Aes192 => expand192(k, enc),
+                KeySize::Aes256 => expand256(k, enc),
+            }
+            invert(keys.enc.as_ptr(), keys.dec.as_mut_ptr(), size.rounds());
         }
-        dec[4 * rounds..4 * rounds + 4].copy_from_slice(&enc[..4]);
-
-        RoundKeys { enc, dec, size }
+        keys
     }
 }
 
@@ -286,6 +492,40 @@ pub(crate) fn keys_either_way<C: BlockCipher>() -> Option<KeysEitherWay<C>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cipher::aes::expand_words;
+    use crate::cipher::aes::portable::bitsliced::sub_word;
+
+    /// The schedule built in registers is the schedule FIPS 197
+    /// section 5.2 writes out word by word, at every width. The
+    /// inverse half is exercised by every decryption test; here only
+    /// its untransformed ends are checked, so that a wrong copy shows
+    /// up as itself.
+    #[test]
+    fn the_schedule_is_the_standard_one() {
+        for (len, size) in [
+            (16, KeySize::Aes128),
+            (24, KeySize::Aes192),
+            (32, KeySize::Aes256),
+        ] {
+            for i in 0..100u32 {
+                let key: std::vec::Vec<u8> = (0..len)
+                    .map(|j| (i.wrapping_mul(97).wrapping_add(j * 31)) as u8)
+                    .collect();
+                let want = expand_words(&key, size, sub_word);
+                // SAFETY: the test runs only where the probe says so.
+                let keys = if has_aesni() {
+                    unsafe { RoundKeys::new(&key, size) }
+                } else {
+                    return;
+                };
+                assert_eq!(keys.enc, want, "{size:?} key {i}");
+                let rounds = size.rounds();
+                assert_eq!(keys.dec[..4], want[4 * rounds..4 * rounds + 4]);
+                assert_eq!(keys.dec[4 * rounds..4 * rounds + 4], want[..4]);
+                assert_eq!(keys.dec[4 * rounds + 4..], want[4 * rounds + 4..]);
+            }
+        }
+    }
 
     /// The kept answers are the processor's own, and they are kept:
     /// a key expansion asks on every call, and GCM-SIV expands a key
