@@ -293,8 +293,8 @@ impl<'a> Public<'a> {
         Modulus::new(&self.words[self.layout.modulus()], self.words[3])
     }
 
-    fn exponent(&self) -> [u64; 1] {
-        [self.words[2]]
+    fn e(&self) -> u64 {
+        self.words[2]
     }
 
     /// Whether `input`, of exactly [`modulus_len`](Self::modulus_len)
@@ -325,7 +325,7 @@ impl<'a> Public<'a> {
         let (value, rest) = scratch.split_at_mut(limbs);
         let (result, rest) = rest.split_at_mut(limbs);
         limbs::from_be_bytes(input, value);
-        self.modulus().modexp(value, &self.exponent(), result, rest);
+        self.modulus().modexp_public(value, self.e(), result, rest);
         limbs::to_be_bytes(result, out);
         scratch.zeroize();
         Ok(())
@@ -594,7 +594,7 @@ impl<'a> Private<'a> {
             // before anything leaves. This also catches a wrong dp or
             // dq, which import cannot.
             let (check, rest) = rest.split_at_mut(limbs);
-            public.modulus().modexp(s, &public.exponent(), check, rest);
+            public.modulus().modexp_public(s, public.e(), check, rest);
             if limbs::equal(check, m) == 0 {
                 return Err(Error::InvalidPrivateKey);
             }

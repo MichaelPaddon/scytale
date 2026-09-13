@@ -26,6 +26,9 @@
 
 use zeroize::Zeroize;
 
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
+
 /// Reads a big-endian byte string into `out`, least significant limb
 /// first, with leading zeros; the string must fit.
 pub(crate) fn from_be_bytes(bytes: &[u8], out: &mut [u64]) {
@@ -283,6 +286,10 @@ pub(crate) struct Modulus<'a> {
     n: &'a [u64],
     inv: u64,
     rr: &'a [u64],
+    /// The product written for the processor, where it has one;
+    /// settled when the view is made, which is one kept answer.
+    #[cfg(target_arch = "x86_64")]
+    fast: Option<x86_64::Adx>,
 }
 
 /// The words [`Modulus::prepare`] writes for a modulus of `limbs`
@@ -293,9 +300,10 @@ pub(crate) const fn modulus_words(limbs: usize) -> usize {
 
 /// The scratch [`Modulus::modexp`] needs for a modulus of `limbs`
 /// limbs: a sixteen-entry table, the base, the accumulator, its
-/// square and the entry chosen from the table.
+/// product, the entry chosen from the table, and the double-length
+/// square.
 pub(crate) const fn modexp_words(limbs: usize) -> usize {
-    20 * limbs
+    22 * limbs
 }
 
 impl<'a> Modulus<'a> {
@@ -341,7 +349,24 @@ impl<'a> Modulus<'a> {
     pub(crate) fn new(words: &'a [u64], inv: u64) -> Self {
         let limbs = words.len() / 2;
         let (n, rr) = words.split_at(limbs);
-        Modulus { n, inv, rr }
+        Modulus {
+            n,
+            inv,
+            rr,
+            #[cfg(target_arch = "x86_64")]
+            fast: x86_64::probe(),
+        }
+    }
+
+    /// The same view with the portable product, for the tests that
+    /// hold the two products against each other.
+    #[cfg(test)]
+    fn portable(self) -> Self {
+        Modulus {
+            #[cfg(target_arch = "x86_64")]
+            fast: None,
+            ..self
+        }
     }
 
     pub(crate) fn modulus(&self) -> &'a [u64] {
@@ -357,6 +382,19 @@ impl<'a> Modulus<'a> {
     /// any value of the length; the result is below `n`. `out` may
     /// not alias either input.
     pub(crate) fn mul(&self, a: &[u64], b: &[u64], out: &mut [u64]) {
+        #[cfg(target_arch = "x86_64")]
+        if let Some(adx) = self.fast {
+            let hi = adx.rows(a, b, self.n, self.inv, out);
+            let borrow = sub_borrow(out, self.n);
+            let keep = hi | (1 - borrow);
+            add_masked(out, self.n, (1 - keep).wrapping_neg());
+            return;
+        }
+        self.mul_portable(a, b, out);
+    }
+
+    /// The product in plain Rust, one carry at a time.
+    fn mul_portable(&self, a: &[u64], b: &[u64], out: &mut [u64]) {
         let limbs = self.limbs();
         debug_assert!(
             a.len() == limbs && b.len() == limbs && out.len() == limbs
@@ -402,6 +440,91 @@ impl<'a> Modulus<'a> {
         let borrow = sub_borrow(t, n);
         let keep = hi | (1 - borrow);
         add_masked(t, n, (1 - keep).wrapping_neg());
+    }
+
+    /// `out = a * a / R mod n`, the Montgomery square, for `a` below
+    /// `n`. `wide` is two lengths of scratch.
+    ///
+    /// Four of every five products in an exponentiation are squares,
+    /// and a square needs only half its cross products, each doubled,
+    /// so it is worth a routine of its own: the products first, into
+    /// the double-length `wide`, then one reduction pass over them.
+    /// The same fixed sequence of limb operations for a given length,
+    /// as the product is.
+    ///
+    /// Where the processor has the block product, that is the square
+    /// too: it measures ahead of this routine at every length, since
+    /// the cross products it spends are cheaper than the carries
+    /// this one spells out.
+    pub(crate) fn square(&self, a: &[u64], out: &mut [u64], wide: &mut [u64]) {
+        let limbs = self.limbs();
+        debug_assert!(a.len() == limbs && out.len() == limbs);
+        #[cfg(target_arch = "x86_64")]
+        if self.fast.is_some() {
+            self.mul(a, a, out);
+            return;
+        }
+        let wide = &mut wide[..2 * limbs];
+        let mul = |x: u64, y: u64| u128::from(x) * u128::from(y);
+
+        // The cross products a[i] * a[j] for i < j, each once. The
+        // slices are cut to the row so that nothing is bounds-checked
+        // inside the loops.
+        wide.fill(0);
+        for (i, &ai) in a.iter().enumerate() {
+            let mut carry = 0u64;
+            let row = &mut wide[2 * i + 1..i + limbs];
+            for (w, &aj) in row.iter_mut().zip(&a[i + 1..]) {
+                let v = u128::from(*w) + mul(ai, aj) + u128::from(carry);
+                *w = v as u64;
+                carry = (v >> 64) as u64;
+            }
+            wide[i + limbs] = carry;
+        }
+        // Doubled, with the squares added on the diagonal in the same
+        // pass: each pair of limbs is shifted up a bit, the bit that
+        // leaves the pair carried into the next, and the square of
+        // the limb they belong to added on.
+        let mut shifted = 0u64;
+        let mut carry = 0u64;
+        for (pair, &ai) in wide.chunks_exact_mut(2).zip(a) {
+            let sq = mul(ai, ai);
+            let next = pair[1] >> 63;
+            let hi = (pair[1] << 1) | (pair[0] >> 63);
+            let lo = (pair[0] << 1) | shifted;
+            shifted = next;
+            let lo = u128::from(lo) + (sq as u64 as u128) + u128::from(carry);
+            pair[0] = lo as u64;
+            let hi = u128::from(hi) + (sq >> 64) + (lo >> 64);
+            pair[1] = hi as u64;
+            carry = (hi >> 64) as u64;
+        }
+
+        // Montgomery reduction of the double-length value: each pass
+        // clears one low limb with a multiple of n, and the carries
+        // run up to a word above the top.
+        let n = &self.n[..limbs];
+        let mut hi = 0u64;
+        for i in 0..limbs {
+            let m = wide[i].wrapping_mul(self.inv);
+            let mut carry = 0u64;
+            let (row, above) = wide[i..].split_at_mut(limbs);
+            for (w, &nj) in row.iter_mut().zip(n) {
+                let v = u128::from(*w) + mul(m, nj) + u128::from(carry);
+                *w = v as u64;
+                carry = (v >> 64) as u64;
+            }
+            let v = u128::from(above[0]) + u128::from(carry) + u128::from(hi);
+            above[0] = v as u64;
+            hi = (v >> 64) as u64;
+        }
+        // The result is the top half, below 2n, so at most one
+        // subtraction of n finishes it.
+        out.copy_from_slice(&wide[limbs..]);
+        let borrow = sub_borrow(out, n);
+        let keep = hi | (1 - borrow);
+        add_masked(out, n, (1 - keep).wrapping_neg());
+        wide.zeroize();
     }
 
     /// `out = a * R mod n`: lifts `a`, which must be below `n`, into
@@ -509,6 +632,46 @@ impl<'a> Modulus<'a> {
         lifted.zeroize();
     }
 
+    /// `out = base ^ e mod n` for a one-word `e` that is no secret,
+    /// with `base` below `n`.
+    ///
+    /// Square-and-multiply over the bits of `e`, from the top: the
+    /// time depends on `e`, which is fine for a public exponent and
+    /// is what makes 65537 cost seventeen squarings and one product
+    /// rather than the eighty operations the fixed-window loop spends
+    /// on a one-limb exponent. Never for a private exponent; that is
+    /// [`modexp`](Self::modexp). `scratch` is [`modexp_words`] long.
+    pub(crate) fn modexp_public(
+        &self,
+        base: &[u64],
+        e: u64,
+        out: &mut [u64],
+        scratch: &mut [u64],
+    ) {
+        let limbs = self.limbs();
+        debug_assert!(base.len() == limbs && out.len() == limbs && e != 0);
+        debug_assert!(scratch.len() >= modexp_words(limbs));
+        let scratch = &mut scratch[..5 * limbs];
+        let (mont_base, rest) = scratch.split_at_mut(limbs);
+        let (acc, rest) = rest.split_at_mut(limbs);
+        let (product, wide) = rest.split_at_mut(limbs);
+        self.lift(base, mont_base);
+        // The top bit is set, so the accumulator starts as the base
+        // and the loop takes the bits below it.
+        acc.copy_from_slice(mont_base);
+        let (mut acc, mut product) = (acc, product);
+        for bit in (0..63 - e.leading_zeros()).rev() {
+            self.square(acc, product, wide);
+            core::mem::swap(&mut acc, &mut product);
+            if (e >> bit) & 1 == 1 {
+                self.mul(acc, mont_base, product);
+                core::mem::swap(&mut acc, &mut product);
+            }
+        }
+        self.lower(acc, out);
+        scratch.zeroize();
+    }
+
     /// `out = base ^ exponent mod n`, with `base` below `n`.
     ///
     /// Fixed four-bit windows over the exponent's full length: the
@@ -531,7 +694,8 @@ impl<'a> Modulus<'a> {
         let (table, rest) = scratch.split_at_mut(16 * limbs);
         let (mont_base, rest) = rest.split_at_mut(limbs);
         let (acc, rest) = rest.split_at_mut(limbs);
-        let (square, chosen) = rest.split_at_mut(limbs);
+        let (square, rest) = rest.split_at_mut(limbs);
+        let (chosen, wide) = rest.split_at_mut(limbs);
 
         // Table entry i is base^i in the Montgomery domain; entry 0
         // is 1, which is R mod n there.
@@ -552,7 +716,7 @@ impl<'a> Modulus<'a> {
         acc.copy_from_slice(&table[..limbs]);
         for window in (0..16 * exponent.len()).rev() {
             for _ in 0..4 {
-                self.mul(acc, acc, product);
+                self.square(acc, product, wide);
                 core::mem::swap(&mut acc, &mut product);
             }
             let digit = (exponent[window >> 4] >> ((window & 15) * 4)) & 15;
@@ -702,7 +866,7 @@ mod tests {
         let mut words = [0u64; 2];
         let inv = modulus(&[1000003], &mut words);
         let m = Modulus::new(&words, inv);
-        let mut scratch = [0u64; 20];
+        let mut scratch = [0u64; modexp_words(1)];
         let x = [123456u64];
         let mut out = [0u64];
         m.modexp(&x, &[0], &mut out, &mut scratch);
@@ -721,6 +885,136 @@ mod tests {
         m.modexp(&xa, &[23], &mut composed, &mut scratch);
         m.modexp(&x, &[17 * 23], &mut out, &mut scratch);
         assert_eq!(composed, out);
+    }
+
+    /// The product written for the processor is the portable one,
+    /// at every length from one limb to the widest, on operands
+    /// that reach every limb and on the edges the random ones miss.
+    #[test]
+    fn the_processor_product_is_the_portable_one() {
+        let mut state = 0x243f_6a88_85a3_08d3u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for limbs in (1..=40).chain([64, 100, 128]) {
+            let mut n = std::vec![0u64; limbs];
+            let mut words = std::vec![0u64; 2 * limbs];
+            let mut a = std::vec![0u64; limbs];
+            let mut b = std::vec![0u64; limbs];
+            let mut fast = std::vec![0u64; limbs];
+            let mut slow = std::vec![0u64; limbs];
+            for _ in 0..20 {
+                for limb in n.iter_mut() {
+                    *limb = next();
+                }
+                n[0] |= 1;
+                n[limbs - 1] |= 1 << 63;
+                let inv = Modulus::prepare(&n, &mut words).expect("odd");
+                let m = Modulus::new(&words, inv);
+                // A below n, b anything of the length: `mul` allows
+                // that much of its first operand.
+                for limb in a.iter_mut().chain(b.iter_mut()) {
+                    *limb = next();
+                }
+                let borrow = less_than(&b, &n);
+                if borrow == 0 {
+                    sub_borrow(&mut b, &n);
+                }
+                m.mul(&a, &b, &mut fast);
+                m.portable().mul(&a, &b, &mut slow);
+                assert_eq!(fast, slow, "{limbs} limbs");
+                // The edges: zero, one, and n - 1 each way round.
+                let mut top = n.clone();
+                sub_borrow(&mut top, &{
+                    let mut one = std::vec![0u64; limbs];
+                    one[0] = 1;
+                    one
+                });
+                let mut one = std::vec![0u64; limbs];
+                one[0] = 1;
+                let zero = std::vec![0u64; limbs];
+                for x in [&zero, &one, &top] {
+                    for y in [&zero, &one, &top] {
+                        m.mul(x, y, &mut fast);
+                        m.portable().mul(x, y, &mut slow);
+                        assert_eq!(fast, slow, "{limbs} limbs, edge");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The square is the product of a value with itself, at every
+    /// length, on random values and on the edges.
+    #[test]
+    fn the_square_is_the_product() {
+        let mut state = 0x1319_8a2e_0370_7344u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for limbs in (1..=40).chain([64, 100, 128]) {
+            let mut n = std::vec![0u64; limbs];
+            let mut words = std::vec![0u64; 2 * limbs];
+            let mut a = std::vec![0u64; limbs];
+            let mut product = std::vec![0u64; limbs];
+            let mut square = std::vec![0u64; limbs];
+            let mut wide = std::vec![0u64; 2 * limbs];
+            for _ in 0..20 {
+                for limb in n.iter_mut() {
+                    *limb = next();
+                }
+                n[0] |= 1;
+                n[limbs - 1] |= 1 << 63;
+                let inv = Modulus::prepare(&n, &mut words).expect("odd");
+                let m = Modulus::new(&words, inv);
+                for limb in a.iter_mut() {
+                    *limb = next();
+                }
+                if less_than(&a, &n) == 0 {
+                    sub_borrow(&mut a, &n);
+                }
+                m.mul(&a, &a, &mut product);
+                m.square(&a, &mut square, &mut wide);
+                assert_eq!(square, product, "{limbs} limbs");
+            }
+            let mut top = n.clone();
+            let mut one = std::vec![0u64; limbs];
+            one[0] = 1;
+            sub_borrow(&mut top, &one);
+            let zero = std::vec![0u64; limbs];
+            let inv = Modulus::prepare(&n, &mut words).expect("odd");
+            let m = Modulus::new(&words, inv);
+            for x in [&zero, &one, &top] {
+                m.mul(x, x, &mut product);
+                m.square(x, &mut square, &mut wide);
+                assert_eq!(square, product, "{limbs} limbs, edge");
+            }
+        }
+    }
+
+    /// The public-exponent loop agrees with the fixed-window one,
+    /// on the exponents RSA uses and on odd ones.
+    #[test]
+    fn public_exponent_agrees_with_the_windowed_one() {
+        let n = [0x8765432187654321u64, 0x1234567812345678, 0xabcd];
+        let mut words = [0u64; 6];
+        let inv = modulus(&n, &mut words);
+        let m = Modulus::new(&words, inv);
+        let x = [0xdeadbeefu64, 0xcafe, 0x1234];
+        let mut scratch = [0u64; modexp_words(3)];
+        for e in [1u64, 2, 3, 17, 65537, 0x1_0000_0001, u64::MAX] {
+            let mut want = [0u64; 3];
+            m.modexp(&x, &[e], &mut want, &mut scratch);
+            let mut got = [0u64; 3];
+            m.modexp_public(&x, e, &mut got, &mut scratch);
+            assert_eq!(got, want, "e = {e}");
+        }
     }
 
     /// A value wider than the modulus reduces to what the bit-by-bit
