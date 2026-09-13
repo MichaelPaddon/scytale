@@ -535,11 +535,11 @@ second counted in millions and thousands of millions:
 
 | What | Implementation | Speed |
 | --- | --- | --- |
-| AES-128-GCM encrypt | `vaes` | 13.8 GB/s |
-| AES-128-GCM encrypt | `aesni` | 8.5 GB/s |
-| AES-128-GCM encrypt | `bitsliced` | 276 MB/s |
+| AES-128-GCM encrypt | `vaes` | 14.2 GB/s |
+| AES-128-GCM encrypt | `aesni` | 8.6 GB/s |
+| AES-128-GCM encrypt | `bitsliced` | 279 MB/s |
 | SHA-256 | `shani` | 2.4 GB/s |
-| SHA-256 | `portable` | 345 MB/s |
+| SHA-256 | `portable` | 335 MB/s |
 | ChaCha20-Poly1305 encrypt | `avx2` | 2.1 GB/s |
 
 ChaCha20-Poly1305 is the one to reach for where the processor has no
