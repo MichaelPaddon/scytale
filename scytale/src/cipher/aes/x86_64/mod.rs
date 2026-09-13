@@ -16,6 +16,7 @@ use core::any::Any;
 
 use super::{Aes, Aes128, Aes192, Aes256, KeySize, MAX_WORDS, expand_words};
 use crate::cipher::{BlockCipher, is};
+use crate::probe::Probe;
 
 /// Whether the processor reports AES-NI (CPUID leaf 1, ECX bit 25)
 /// and `pshufb`, which comes with SSSE3 (bit 9).
@@ -26,6 +27,14 @@ use crate::cipher::{BlockCipher, is};
 /// takes the portable path, rather than every call carrying a branch
 /// for hardware that does not exist.
 pub(crate) fn has_aesni() -> bool {
+    AESNI.yes(ask_aesni)
+}
+
+/// Kept, because a key expansion asks: GCM-SIV derives a key for
+/// every message it encrypts, and `cpuid` serialises the pipeline.
+static AESNI: Probe = Probe::new();
+
+fn ask_aesni() -> bool {
     let features = __cpuid(1).ecx;
     features & (1 << 25) != 0 && features & (1 << 9) != 0
 }
@@ -34,6 +43,14 @@ pub(crate) fn has_aesni() -> bool {
 /// registers: VAES (leaf 7, ECX bit 9), AVX2 (leaf 7, EBX bit 5), and
 /// the OS saving the upper register halves (XCR0 bits 1 and 2).
 pub(super) fn has_vaes256() -> bool {
+    VAES256.yes(ask_vaes256)
+}
+
+/// Kept, as [`AESNI`] is, and asked more dearly: three questions of
+/// the processor rather than one.
+static VAES256: Probe = Probe::new();
+
+fn ask_vaes256() -> bool {
     let leaf1 = __cpuid(1);
     let osxsave = leaf1.ecx & (1 << 27) != 0;
     let avx = leaf1.ecx & (1 << 28) != 0;
@@ -264,4 +281,20 @@ pub(crate) fn keys<C: BlockCipher>() -> Option<Keys<C>> {
 pub(crate) fn keys_either_way<C: BlockCipher>() -> Option<KeysEitherWay<C>> {
     keyed!(either_way);
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The kept answers are the processor's own, and they are kept:
+    /// a key expansion asks on every call, and GCM-SIV expands a key
+    /// for every message.
+    #[test]
+    fn the_probes_keep_what_the_processor_said() {
+        assert_eq!(has_aesni(), ask_aesni());
+        assert_eq!(has_vaes256(), ask_vaes256());
+        assert!(AESNI.asked());
+        assert!(VAES256.asked());
+    }
 }

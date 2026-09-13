@@ -6,6 +6,8 @@
 
 #![allow(unsafe_code)]
 
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
 /// Linux `riscv_hwprobe` (since 6.4): fills `value` for key
 /// `RISCV_HWPROBE_KEY_IMA_EXT_0`, a bit set of extensions present on
 /// every hart. Returns `None` if the kernel lacks the call or the key.
@@ -69,6 +71,30 @@ pub(crate) const EXT_ZVKNHB: u64 = 1 << 23;
 /// whatever the build, and choosing an implementation is then a
 /// function of a single word, which a test can supply.
 pub(crate) fn extensions() -> u64 {
+    // Kept: `hwprobe` is a system call, and the answer cannot change
+    // while the program runs. Everything on this architecture is
+    // decided from this word, a key expansion and the start of a hash
+    // included, so asking each time would put a system call on paths
+    // that run for every message.
+    let kept = EXTENSIONS.load(Ordering::Relaxed);
+    if kept & ASKED != 0 {
+        return kept & !ASKED;
+    }
+    let ext = ask_extensions();
+    EXTENSIONS.store(ext | ASKED, Ordering::Relaxed);
+    ext
+}
+
+/// What [`extensions`] found, with [`ASKED`] set once it has looked.
+/// A race is harmless: the question has one answer, so two threads
+/// store the same word. See [`crate::probe`].
+static EXTENSIONS: AtomicU64 = AtomicU64::new(0);
+
+/// Marks the kept word as filled in, since no extension owns the top
+/// bit and an empty answer is a real one.
+const ASKED: u64 = 1 << 63;
+
+fn ask_extensions() -> u64 {
     let mut ext = hwprobe_ima_ext_0().unwrap_or(0);
     // One arm per extension the crate looks for; `cfg!` folds each to
     // a constant, so this is a handful of ors.
@@ -102,8 +128,24 @@ pub(crate) fn extensions() -> u64 {
 /// Every caller has to ask it that way round, because reading the CSR
 /// on a processor without the extension traps.
 pub(crate) fn vector_bytes(ext: u64) -> usize {
-    if ext & IMA_V == 0 { 0 } else { vlenb() }
+    if ext & IMA_V == 0 {
+        return 0;
+    }
+    // Kept for the same reason as [`extensions`]: a CSR read on every
+    // call, on paths that run for every message.
+    match VECTOR_BYTES.load(Ordering::Relaxed) {
+        0 => {
+            let bytes = vlenb();
+            VECTOR_BYTES.store(bytes, Ordering::Relaxed);
+            bytes
+        }
+        bytes => bytes,
+    }
 }
+
+/// The width [`vector_bytes`] read, or zero before it has looked. A
+/// vector register is never zero bytes wide, so zero can mean both.
+static VECTOR_BYTES: AtomicUsize = AtomicUsize::new(0);
 
 /// Bytes in one vector register. Only valid once the vector extension
 /// is known to be present, as the CSR read traps otherwise.
@@ -151,4 +193,35 @@ pub(crate) mod profile {
     /// What RVA23 requires of every conforming processor, and no
     /// cryptography at all: a vector unit and the bit manipulation.
     pub(crate) const RVA23: u64 = IMA_V | EXT_ZBB | EXT_ZVBB;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The kept answer is what the kernel said, and it is kept: every
+    /// decision on this architecture reads it, a key expansion and
+    /// the start of a hash included, and asking is a system call.
+    #[test]
+    fn the_extensions_are_asked_for_once() {
+        let asked = ask_extensions();
+        assert_eq!(extensions(), asked);
+        assert_eq!(extensions(), asked);
+        assert_ne!(EXTENSIONS.load(Ordering::Relaxed) & ASKED, 0);
+    }
+
+    /// The vector width is kept the same way, and is only read where
+    /// the processor has a vector unit to read it from.
+    #[test]
+    fn the_vector_width_is_asked_for_once() {
+        let ext = extensions();
+        let bytes = vector_bytes(ext);
+        assert_eq!(vector_bytes(ext), bytes);
+        if ext & IMA_V == 0 {
+            assert_eq!(bytes, 0);
+        } else {
+            assert_ne!(bytes, 0);
+            assert_eq!(VECTOR_BYTES.load(Ordering::Relaxed), bytes);
+        }
+    }
 }

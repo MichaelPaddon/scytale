@@ -66,9 +66,14 @@ pub struct Poly1305 {
     /// Bytes of a block not yet complete.
     block: [u8; BLOCK],
     used: usize,
-    /// The powers of `r` the loop written out for this processor
-    /// wants, worked out the first time a run long enough to use them
-    /// arrives. A short message never pays for them.
+    /// Whether this processor has the loop written out for it. Asked
+    /// once, here, rather than on the way past for every run of
+    /// blocks.
+    #[cfg(target_arch = "x86_64")]
+    fast: bool,
+    /// The powers of `r` that loop wants, worked out the first time a
+    /// run long enough to use them arrives. A short message never
+    /// pays for them.
     #[cfg(target_arch = "x86_64")]
     powers: Option<x86_64::Powers>,
 }
@@ -102,6 +107,8 @@ impl Poly1305 {
             h: [0; 3],
             block: [0; BLOCK],
             used: 0,
+            #[cfg(target_arch = "x86_64")]
+            fast: x86_64::supported(),
             #[cfg(target_arch = "x86_64")]
             powers: None,
         }
@@ -152,13 +159,15 @@ impl Poly1305 {
     }
 
     /// Makes sure the powers of `r` are to hand, and says whether
-    /// this processor can use them.
+    /// this processor can use them. What the processor has was
+    /// settled when the authenticator was made; only the powers are
+    /// left until a run arrives that is worth them.
     #[cfg(target_arch = "x86_64")]
     fn ready(&mut self) -> bool {
+        if !self.fast {
+            return false;
+        }
         if self.powers.is_none() {
-            if !x86_64::supported() {
-                return false;
-            }
             self.powers = Some(x86_64::Powers::new(&self.r));
         }
         true
@@ -288,6 +297,8 @@ impl Clone for Poly1305 {
             h: self.h,
             block: self.block,
             used: self.used,
+            #[cfg(target_arch = "x86_64")]
+            fast: self.fast,
             #[cfg(target_arch = "x86_64")]
             powers: self.powers,
         }

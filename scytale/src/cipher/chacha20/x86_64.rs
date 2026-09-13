@@ -18,6 +18,7 @@ use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
 
 use super::{BLOCK_SIZE, Backend, Cipher, Sealed};
 use crate::align::At32;
+use crate::probe::Probe;
 
 /// ChaCha20 with AVX2.
 pub type ChaCha20 = Cipher<Avx2>;
@@ -26,6 +27,13 @@ pub type ChaCha20 = Cipher<Avx2>;
 /// instructions (leaf 7, EBX bit 5) and the OS saving the upper
 /// register halves (XCR0 bits 1 and 2), as for VAES.
 pub(crate) fn has_avx2() -> bool {
+    AVX2.yes(ask_avx2)
+}
+
+/// Kept: ChaCha20-Poly1305 takes a cipher for every message.
+static AVX2: Probe = Probe::new();
+
+fn ask_avx2() -> bool {
     let leaf1 = __cpuid(1);
     let osxsave = leaf1.ecx & (1 << 27) != 0;
     let avx = leaf1.ecx & (1 << 28) != 0;

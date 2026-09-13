@@ -13,6 +13,7 @@
 use super::engine::{Compress32, Compress64, Engine32, Engine64};
 use super::portable::{K256, K512};
 use super::variant;
+use crate::probe::Probe;
 
 /// SHA-224 with the SHA2 instructions.
 pub type Sha224 = Engine32<Armv8, variant::Sha224>;
@@ -29,11 +30,26 @@ pub type Sha512_256 = Engine64<Armv8, variant::Sha512_256>;
 
 /// Whether the SHA-256 instructions are available.
 pub(crate) fn has_sha256() -> bool {
+    SHA256.yes(ask_sha256)
+}
+
+/// Kept, as on every architecture: a hash is started for every
+/// message, every HMAC block and every PBKDF2 iteration.
+static SHA256: Probe = Probe::new();
+
+fn ask_sha256() -> bool {
     cfg!(target_feature = "sha2") || id_register_sha2() >= 1
 }
 
 /// Whether the SHA-512 instructions are available.
 pub(crate) fn has_sha512() -> bool {
+    SHA512.yes(ask_sha512)
+}
+
+/// Kept, as [`SHA256`] is.
+static SHA512: Probe = Probe::new();
+
+fn ask_sha512() -> bool {
     cfg!(target_feature = "sha3") || id_register_sha2() >= 2
 }
 

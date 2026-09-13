@@ -29,6 +29,7 @@ use core::fmt;
 
 use crate::cipher::BlockCipher;
 use crate::cipher::aes::{BLOCK_SIZE, KeySize, MAX_WORDS, expand_words};
+use crate::probe::Probe;
 use crate::{BlockType, Key, KeyType};
 use zeroize::ZeroizeOnDrop;
 
@@ -57,6 +58,14 @@ impl<const K: usize> fmt::Debug for Aes<K> {
 
 /// Whether the AES instructions are available.
 pub(crate) fn has_aes() -> bool {
+    AES.yes(ask_aes)
+}
+
+/// Kept: reading the ID register traps into the kernel, and a key
+/// is expanded for every GCM-SIV message.
+static AES: Probe = Probe::new();
+
+fn ask_aes() -> bool {
     cfg!(target_feature = "aes") || id_register_reports_aes()
 }
 

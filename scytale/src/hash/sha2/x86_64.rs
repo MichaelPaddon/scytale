@@ -12,6 +12,7 @@
 
 #![allow(unsafe_code)]
 
+use crate::probe::Probe;
 use core::arch::x86_64::__cpuid_count;
 
 use super::engine::{Compress32, Engine32};
@@ -28,6 +29,14 @@ pub type Sha256 = Engine32<ShaNi, variant::Sha256>;
 /// Every such processor also has the SSSE3 and SSE4.1 shuffles the
 /// code uses.
 pub(crate) fn has_sha() -> bool {
+    SHA.yes(ask_sha)
+}
+
+/// Kept: `cpuid` serialises the pipeline, and a hash is started
+/// for every message, every HMAC block and every PBKDF2 iteration.
+static SHA: Probe = Probe::new();
+
+fn ask_sha() -> bool {
     __cpuid_count(7, 0).ebx & (1 << 29) != 0
 }
 

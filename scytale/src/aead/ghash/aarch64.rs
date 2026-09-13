@@ -13,6 +13,7 @@
 //! coming in.
 
 #![allow(unsafe_code)]
+use crate::probe::Probe;
 
 /// The field polynomial `x^128 + x^7 + x^2 + x + 1` without its
 /// leading term, written in the reversed bit order.
@@ -150,6 +151,13 @@ pub(super) fn group() -> usize {
 
 /// Whether the polynomial multiply is available.
 pub(crate) fn has_carryless_multiply() -> bool {
+    PMULL.yes(ask_carryless_multiply)
+}
+
+/// Kept: the hash subkey is prepared for every GCM-SIV message.
+static PMULL: Probe = Probe::new();
+
+fn ask_carryless_multiply() -> bool {
     cfg!(target_feature = "aes") || id_register_reports_pmull()
 }
 

@@ -14,6 +14,7 @@
 use super::engine::{LANES, Permutation, Sponge};
 use super::portable::ROUND_CONSTANTS;
 use super::variant;
+use crate::probe::Probe;
 
 /// SHA3-224 with the SHA3 instructions.
 pub type Sha3_224 = Sponge<Armv8, variant::Sha3_224>;
@@ -30,6 +31,13 @@ pub type Shake256 = Sponge<Armv8, variant::Shake256>;
 
 /// Whether the SHA3 instructions are available.
 pub(crate) fn has_sha3() -> bool {
+    SHA3.yes(ask_sha3)
+}
+
+/// Kept: a hash is started for every message.
+static SHA3: Probe = Probe::new();
+
+fn ask_sha3() -> bool {
     cfg!(target_feature = "sha3") || id_register_reports_sha3()
 }
 
