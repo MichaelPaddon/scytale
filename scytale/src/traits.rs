@@ -3,6 +3,7 @@
 //! come from, and how a byte slice is cut into arrays.
 
 use core::fmt;
+use core::num::NonZeroU64;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -96,10 +97,50 @@ pub trait KeyType {
 /// This is not where raw entropy goes: see
 /// [`Entropy`](crate::random::Entropy), which is kept apart so that
 /// unconditioned bits cannot reach a caller by mistake.
+///
+/// An implementation of your own inherits
+/// [the rule](crate::random#fork-snapshots-and-clones-the-rule): any
+/// generator with state is duplicated along with the process, and a
+/// copy of the process must reseed or rebuild it before use. That is
+/// a property of holding state, not of `CtrDrbg`.
 pub trait Random {
     /// Fills the whole of `out`, or fails without leaving anything
     /// worth relying on.
     fn fill(&mut self, out: &mut [u8]) -> Result<(), Error>;
+
+    /// A number drawn uniformly from `0..n`.
+    ///
+    /// This is the call for an index, a shuffle, a coin, or anything
+    /// else that is a number under a bound rather than a run of
+    /// bytes. Taking bytes and reducing them modulo `n` is biased for
+    /// every `n` that is not a power of two: the low values come up
+    /// more often, and the bias is enough to matter. This draws
+    /// sixty-four bits, accepts them only if they fall in the largest
+    /// multiple of `n` that fits, and draws again otherwise, so every
+    /// value under `n` is exactly as likely as every other. Fewer than
+    /// two draws are needed on average for any `n`.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`fill`](Random::fill) refuses with.
+    fn below(&mut self, n: NonZeroU64) -> Result<u64, Error> {
+        let n = n.get();
+        // There are 2^64 words, and the top (2^64 mod n) of them are
+        // the ones that would favour the small residues. Below them
+        // every residue appears the same number of times. The count
+        // is of 2^64, not u64::MAX, which is why the remainder is
+        // taken the long way round; a power of two rejects nothing.
+        let excess = (u64::MAX % n + 1) % n;
+        let top = u64::MAX - excess;
+        let mut bytes = [0u8; 8];
+        loop {
+            self.fill(&mut bytes)?;
+            let x = u64::from_be_bytes(bytes);
+            if x <= top {
+                return Ok(x % n);
+            }
+        }
+    }
 }
 
 /// A secret, wiped when it is dropped.
@@ -327,6 +368,70 @@ mod tests {
             *byte = i as u8 + 1;
         }
         assert_eq!(key.as_ref(), &expected[..]);
+    }
+
+    /// A source that plays back fixed words, then fails.
+    struct Words<'a>(&'a [u64]);
+    impl Random for Words<'_> {
+        fn fill(&mut self, out: &mut [u8]) -> Result<(), Error> {
+            let (first, rest) =
+                self.0.split_first().ok_or(Error::ReseedRequired)?;
+            out.copy_from_slice(&first.to_be_bytes());
+            self.0 = rest;
+            Ok(())
+        }
+    }
+
+    /// The bound of one leaves nothing to choose.
+    #[test]
+    fn below_one_is_zero() {
+        let one = NonZeroU64::new(1).unwrap();
+        let mut rng = Words(&[u64::MAX - 1, 0, 12345]);
+        for _ in 0..3 {
+            assert_eq!(rng.below(one).unwrap(), 0);
+        }
+    }
+
+    /// Every draw stays under the bound, and every value under the
+    /// bound turns up.
+    #[test]
+    fn below_is_uniform_enough_to_cover_the_range() {
+        let seven = NonZeroU64::new(7).unwrap();
+        let mut rng =
+            crate::random::CtrDrbg::from_seed(&[0x5au8; 48]).expect("seed");
+        let mut seen = [0u32; 7];
+        for _ in 0..1000 {
+            let x = rng.below(seven).unwrap();
+            assert!(x < 7, "{x}");
+            seen[x as usize] += 1;
+        }
+        // About 143 each; the band is roughly five standard deviations.
+        for (i, count) in seen.iter().enumerate() {
+            assert!((90..=200).contains(count), "residue {i}: {count}");
+        }
+    }
+
+    /// A word past the accepted zone is thrown away, not reduced, and
+    /// the next one is used instead.
+    #[test]
+    fn below_rejects_rather_than_reduces() {
+        let three = NonZeroU64::new(3).unwrap();
+        // u64::MAX is 0 mod 3, so a reduction would say 0 and a
+        // rejection says what the next word says.
+        let mut rng = Words(&[u64::MAX, 5]);
+        assert_eq!(rng.below(three).unwrap(), 2);
+        // A power of two has no rejection zone at all.
+        let eight = NonZeroU64::new(8).unwrap();
+        let mut rng = Words(&[u64::MAX]);
+        assert_eq!(rng.below(eight).unwrap(), 7);
+    }
+
+    /// A source that fails takes the draw down with it.
+    #[test]
+    fn below_passes_the_failure_on() {
+        let two = NonZeroU64::new(2).unwrap();
+        let mut rng = Words(&[]);
+        assert_eq!(rng.below(two).unwrap_err(), Error::ReseedRequired);
     }
 
     #[test]

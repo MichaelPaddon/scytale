@@ -206,11 +206,18 @@ defines it, and so is exposed to fault attacks on the nonce.
 - Seed material is drawn at twice the required length and
   conditioned through the CTR_DRBG derivation function; the
   generator needs `MIN_SEED` (48 bytes: 256 bits of strength plus a
-  128-bit nonce) and refuses less.
-- A generator seeded by the caller (`entropy::External`) has no
-  source to return to. After `RESEED_INTERVAL` (2^48) requests it
-  fails with `Error::ReseedRequired` until `reseed_from` is given
-  fresh material. It never silently continues.
+  128-bit nonce) and refuses less. The construction without the
+  derivation function is implemented so that its vectors run, but is
+  crate-private: it trusts every byte of its seed as full entropy,
+  and that is not a contract to offer callers. Additional input, at
+  a reseeding or a request, is never credited as entropy.
+- There is no public way to build a generator from a seed alone.
+  Entropy the caller gathers goes in through an `Entropy`
+  implementation, so every generator a caller can hold has a source
+  to return to. After `RESEED_INTERVAL` (2^48) requests it reseeds
+  from that source; if the source refuses, `fill` fails with the
+  source's error until a reseeding succeeds. It never silently
+  continues.
 - One request is capped at `MAX_REQUEST` (65536) bytes;
   `Error::RequestTooLarge` otherwise.
 - The generator is checked against the ACVP CTR_DRBG vectors. The
@@ -221,22 +228,43 @@ defines it, and so is exposed to fault attacks on the nonce.
 ## RNG across fork, virtual machines and snapshots
 
 A `CtrDrbg` is a value you hold, and its state is the whole secret.
-Anything that duplicates the process duplicates the next bytes:
+Anything that duplicates the process duplicates the next bytes. The
+rule, stated here, in the README and on every constructor: **the copy
+must call `reseed` or build a fresh generator before it uses one, and
+the library does not do it for you.**
 
-- **`fork`**: both processes hold the same generator and will
-  produce the same output. The child must drop it and build another,
-  or call `reseed`, before using it. The library cannot detect a
-  fork without a system call per request, which is what holding a
-  generator exists to avoid, so it does not try.
-- **Virtual machine snapshot and restore, container checkpointing,
-  live migration with cloning**: every restored copy continues from
-  the same state. The same rule applies and the library cannot see
-  it happen. The operating system's generator is told about VM
-  clones on platforms that support it (virtio-rng, `vmgenid`), so a
-  fresh `from_system` after restore is sound; a generator built
-  before the snapshot is not.
+- **What makes a copy**: `fork` and everything built on it, `clone`
+  without shared memory, `vfork`; a virtual machine restored from a
+  snapshot; a container restored from a checkpoint (CRIU); live
+  migration that leaves the original running; a disk image cloned
+  with a warm process on it. Every one duplicates the state exactly,
+  and the next request on each side returns the same bytes.
+- **What to do**: in the copy, before the generator is used for
+  anything, call `reseed`, which draws fresh material from the
+  generator's source, or drop it and build another. Do it where the
+  copy is made: the child side of a `pthread_atfork` handler, the
+  first thing a spawned worker does, the resume hook of whatever
+  restores the snapshot. Not lazily on first use, because the first
+  use is the nonce. Better still, do not share a generator across the
+  copy: build one per worker after the worker exists.
+- **After a snapshot restore** the operating system's generator is
+  the source that knows a clone happened: it is told through
+  `vmgenid` and virtio-rng where the hypervisor supports them, and
+  nothing in user space is. A generator on `entropy::System`
+  reseeded after restore is sound; one built before the snapshot and
+  not reseeded is not.
+- **Why the library does not detect it**: the only hook is
+  `pthread_atfork`, which a raw `clone` or `vfork` never runs, which
+  does not exist on a build with no C library, and which knows
+  nothing about snapshots, since no operating system reports a clone
+  to user space. A check that is silently wrong on some platforms is
+  worse than a rule that is true on all of them. Detection was
+  considered and rejected on those grounds; it is not a gap awaiting
+  a patch.
 - The generator is deliberately not `Clone`, so a second copy in the
-  same process is not something that can happen by accident.
+  same process is not something that can happen by accident, and
+  there is no public constructor from a seed alone, so every
+  generator a caller holds has a source to reseed from.
 - The state is zeroized on drop.
 - A repeated output is a repeated nonce, and a repeated GCM or
   ChaCha20-Poly1305 nonce loses the key. Ed25519, RFC 6979 ECDSA and

@@ -27,33 +27,91 @@
 //!
 //! [`from_system`](CtrDrbg::from_system) asks this machine for the
 //! seed. To choose the source yourself, name it:
-//! [`CtrDrbg::try_new(entropy::Processor::try_new()?)`](CtrDrbg::try_new),
-//! or [`CtrDrbg::<entropy::External>::from_seed`](CtrDrbg::from_seed)
-//! for entropy you gathered.
+//! [`CtrDrbg::try_new(entropy::Processor::try_new()?)`](CtrDrbg::try_new).
+//! For entropy you gather some other way, implement [`Entropy`] over
+//! it and hand that to [`try_new`](CtrDrbg::try_new); there is no
+//! way to build a generator from a seed you hold, on purpose, and the
+//! [rule below](#fork-snapshots-and-clones-the-rule) is why.
+//!
+//! # Fork, snapshots and clones: the rule
+//!
+//! **A copy of this process holds a copy of this generator, and both
+//! copies will hand out the same bytes. The library cannot see the
+//! copy being made. Whoever makes it must reseed or rebuild the
+//! generator in the copy before it is used again. That is your
+//! responsibility, and nothing here does it for you.**
+//!
+//! What makes a copy: `fork`, and everything built on it, which is
+//! most process spawning in most languages; `clone` and `vfork`;
+//! restoring a virtual machine from a snapshot; restoring a container
+//! from a checkpoint; live migration that leaves the original
+//! running; cloning a disk image with a warm process on it. In every
+//! one of these the state is duplicated exactly, and the next request
+//! on each side returns the same bytes.
+//!
+//! What that costs, primitive by primitive:
+//!
+//! - **AEADs.** A random nonce comes out twice. A repeated nonce under
+//!   GCM or ChaCha20-Poly1305 loses the authentication key and the
+//!   XOR of the two plaintexts. This is the worst case and the most
+//!   common one.
+//! - **Key generation.** RSA and ML-KEM keys come out twice, and so
+//!   do ML-KEM shared secrets on encapsulation: two parties who each
+//!   believed they held a fresh secret hold the same one.
+//! - **Randomised signing and encryption.** RSA-PSS salts, OAEP seeds,
+//!   and the hedge in ML-DSA and SLH-DSA fall back to the
+//!   deterministic security of the scheme, which is still sound.
+//! - **Deterministic signing.** Ed25519, RFC 6979 ECDSA, and ML-DSA
+//!   and SLH-DSA in their deterministic modes draw nothing when they
+//!   sign, and are unaffected.
+//!
+//! What to do, in the copy, before it uses the generator for
+//! anything:
+//!
+//! - Call [`reseed`](CtrDrbg::reseed). The generator draws fresh
+//!   material from its source and the two copies part ways from
+//!   there. Or drop it and build another; the difference is only
+//!   cost.
+//! - Do it where the copy is made: the child side of a
+//!   `pthread_atfork` handler, the first thing a worker does after
+//!   it is spawned, the resume hook of whatever restores the
+//!   snapshot. Do not do it lazily on first use, because the first
+//!   use is the nonce.
+//! - After a snapshot restore, the operating system's own generator
+//!   is the source that knows a clone happened: it is told through
+//!   `vmgenid` and virtio-rng where the hypervisor supports them,
+//!   and nothing in user space is. A generator on
+//!   [`entropy::System`] reseeded after restore is sound; one built
+//!   before the snapshot and not reseeded is not.
+//! - Better still, do not share a generator across the copy at all:
+//!   build one per worker after the worker exists.
+//!
+//! Why the library does not detect it: the only hook is
+//! `pthread_atfork`, which a raw `clone` or `vfork` never runs, which
+//! does not exist on a build with no C library, and which knows
+//! nothing about snapshots, since no operating system tells user
+//! space that a machine was cloned. A check that is silently wrong
+//! on some platforms is worse than a rule that is true on all of
+//! them, so the rule is stated instead, here and on every
+//! constructor.
+//!
+//! What the library does guarantee, so that the boundary is sharp:
+//! the generator is not `Clone`, so a second copy in one process is
+//! not something that happens by accident; it is wiped when dropped;
+//! it fails loudly rather than carrying on when it runs out; and a
+//! refused call leaves its state exactly as it was.
 //!
 //! # Why you hold it, and what that costs you
 //!
 //! This used to be a function with no state at all, which asked the
-//! operating system afresh every call. That refused a real problem by
-//! having nothing to duplicate: `fork` gives both processes the same
-//! next bytes, and restoring a virtual machine snapshot gives every
-//! restored copy the same. Either repeats a nonce, and a repeated
-//! nonce is enough to lose the key.
-//!
-//! It also had nowhere to put the things a generator needs. A raw
-//! entropy source has to be watched for failure, and the tests that
-//! do the watching span more samples than any single call draws. Raw
-//! entropy has to be conditioned before use, and a function with no
-//! state has nothing to condition it with. So the state exists now,
-//! and it belongs to you:
-//!
-//! - **After `fork`, the child must not keep using the parent's
-//!   generator.** Drop it and build another, or call
-//!   [`reseed`](CtrDrbg::reseed).
-//! - **After a virtual machine is restored from a snapshot, the same
-//!   applies.** Nothing here can see that it happened.
-//! - **The state is wiped when the object is dropped**, so the window
-//!   is as short as you make it.
+//! operating system afresh every call. That refused the problem above
+//! by having nothing to duplicate. It also had nowhere to put the
+//! things a generator needs. A raw entropy source has to be watched
+//! for failure, and the tests that do the watching span more samples
+//! than any single call draws. Raw entropy has to be conditioned
+//! before use, and a function with no state has nothing to condition
+//! it with. So the state exists now, and it belongs to you, with the
+//! rule above as the price.
 //!
 //! Whoever forked is the one who knows they forked. Nothing in this
 //! module can find that out without asking the kernel on every call,
@@ -71,7 +129,7 @@
 //! | --- | --- |
 //! | [`entropy::System`] | the system, or the processor if there is none |
 //! | [`entropy::Processor`] | the processor's own, health tested |
-//! | [`entropy::External`] | nothing; you supply the entropy |
+//! | yours | whatever you implement [`Entropy`] over |
 //!
 //! A board with a generator of its own on a bus, or a ring
 //! oscillator, or a chip on I2C, implements [`Entropy`] over it and
@@ -85,17 +143,45 @@
 //! a process number is worse than none, because it looks as though it
 //! worked.
 //!
+//! # Seeding, and what is deliberately not offered
+//!
+//! Every seeding runs the material through the standard's derivation
+//! function, which is what lets a source of any length and any
+//! density be accepted. SP 800-90A also defines the generator without
+//! it, for material that is already full entropy and exactly a seed
+//! long. That construction is implemented, so that the vectors for it
+//! can be run and the arithmetic checked in both shapes, but it is
+//! not offered: a source the generator draws from is oversampled
+//! precisely because it is not trusted to be full entropy, and a
+//! constructor that trusts a caller's bytes as full entropy is a
+//! constructor that will be handed something weaker.
+//!
+//! Nor is there a way to build a generator from a seed you hold. A
+//! generator built that way has no source to go back to, so it cannot
+//! obey the rule above and cannot reseed itself when it runs out; and
+//! a seed that is a constant, a hash of something guessable, or a
+//! test value looks exactly like a good one until it is too late.
+//! Implement [`Entropy`] over what you have instead. A fixed sequence
+//! for a test implements [`Random`] directly.
+//!
+//! What the generator does take is additional input: caller bytes
+//! mixed into the state at a reseeding through
+//! [`reseed_with`](CtrDrbg::reseed_with), or at a single request
+//! through [`fill_with`](CtrDrbg::fill_with). They are not entropy
+//! and are not counted as any; they bind the output to something the
+//! caller knows, such as a request number or a time.
+//!
 //! # Running out
 //!
 //! One seeding does not last forever, and both limits refuse rather
 //! than quietly carrying on:
 //!
 //! - A single request may ask for at most [`MAX_REQUEST`] bytes.
-//! - After [`RESEED_INTERVAL`] requests the generator must be
-//!   reseeded. Where it has a source of its own it does that itself
-//!   and you never see it. Where it does not, because you seeded it
-//!   yourself, [`fill`](Random::fill) fails with
-//!   [`Error::ReseedRequired`] until you supply fresh entropy through
+//! - After [`RESEED_INTERVAL`] requests the generator reseeds itself
+//!   from its source, and you never see it. If the source refuses,
+//!   [`fill`](Random::fill) fails with the source's error and keeps
+//!   failing until a reseeding succeeds, through
+//!   [`reseed`](CtrDrbg::reseed) or fresh entropy handed to
 //!   [`reseed_from`](CtrDrbg::reseed_from).
 //!
 //! You may reseed at any time, and doing so mixes the new material
@@ -124,8 +210,11 @@ use crate::{Error, Key, Random};
 /// AES-256: the key length the generator uses, in bytes.
 const KEY: usize = 32;
 
-/// The generator's internal seed, a key and a counter block.
-const SEED: usize = KEY + BLOCK_SIZE;
+/// The generator's internal seed, a key and a counter block, in bytes.
+///
+/// Also the exact length the construction without the derivation
+/// function takes, and the most additional input it accepts.
+pub(crate) const SEED: usize = KEY + BLOCK_SIZE;
 
 /// The least entropy a generator can be built or reseeded from, in
 /// bytes.
@@ -189,9 +278,8 @@ pub trait Entropy {
 /// by seeding two.
 #[derive(ZeroizeOnDrop)]
 pub struct CtrDrbg<S: Entropy = entropy::System> {
-    /// Where a reseeding gets its material.
-    /// [`External`](entropy::External) means there is nowhere, and
-    /// the caller must bring it.
+    /// Where a reseeding gets its material. The crate's own tests
+    /// use a source that has nowhere, and so refuses.
     #[zeroize(skip)]
     source: S,
     /// The key and counter block that are the generator's whole
@@ -202,10 +290,27 @@ pub struct CtrDrbg<S: Entropy = entropy::System> {
     /// SP 800-90A counts it.
     #[zeroize(skip)]
     counter: u64,
+    /// Whether seed material and additional input go through the
+    /// derivation function, or straight in at a fixed width.
+    #[zeroize(skip)]
+    derivation: bool,
 }
 
 impl<S: Entropy> CtrDrbg<S> {
     /// A generator seeded from `source`.
+    ///
+    /// The source is kept, and is where every later reseeding
+    /// comes from. This is the way to seed from hardware of your
+    /// own, or from entropy gathered some other way: implement
+    /// [`Entropy`] over it.
+    ///
+    /// # Fork and snapshots
+    ///
+    /// A copy of this process holds a copy of this generator, and
+    /// both will hand out the same bytes. Call
+    /// [`reseed`](CtrDrbg::reseed) in the copy before it is used, or
+    /// build a fresh one there. See
+    /// [the rule](self#fork-snapshots-and-clones-the-rule).
     ///
     /// # Errors
     ///
@@ -214,7 +319,8 @@ impl<S: Entropy> CtrDrbg<S> {
     pub fn try_new(mut source: S) -> Result<Self, Error> {
         let mut raw = [0u8; MIN_SEED * OVERSAMPLE];
         let drawn = source.fill(&mut raw);
-        let built = drawn.and_then(|()| Self::instantiate(&raw, source));
+        let built =
+            drawn.and_then(|()| Self::instantiate(&raw, &[], source, true));
         raw.zeroize();
         built
     }
@@ -222,14 +328,18 @@ impl<S: Entropy> CtrDrbg<S> {
     /// Reseeds from the generator's own source.
     ///
     /// Called automatically once [`RESEED_INTERVAL`] requests have
-    /// been made, so there is rarely a reason to call it. After a
-    /// `fork` or a restored snapshot there is: it is the cheaper
-    /// alternative to dropping the generator and building another.
+    /// been made, so in ordinary running there is no reason to call
+    /// it. After a `fork`, a restored snapshot, or anything else that
+    /// copies the process there is every reason: this is the call
+    /// [the rule](self#fork-snapshots-and-clones-the-rule) asks for,
+    /// in the copy, before the generator is used again. It is the
+    /// cheaper alternative to dropping the generator and building
+    /// another, and does the same thing.
     ///
     /// # Errors
     ///
-    /// [`Error::ReseedRequired`] where the generator has no source of
-    /// its own, and whatever the source refuses with otherwise.
+    /// Whatever the source refuses with. The generator is left
+    /// exactly as it was, which after a copy is still unsafe to use.
     pub fn reseed(&mut self) -> Result<(), Error> {
         let mut raw = [0u8; MIN_SEED * OVERSAMPLE];
         let drawn = self.source.fill(&mut raw);
@@ -242,19 +352,39 @@ impl<S: Entropy> CtrDrbg<S> {
     ///
     /// The new material is combined with what is already there rather
     /// than replacing it, so this can only improve a generator, never
-    /// weaken one.
+    /// weaken one. It is for entropy that arrives from somewhere other
+    /// than the generator's source: a second device, material handed
+    /// over by a protocol. It also satisfies
+    /// [the rule](self#fork-snapshots-and-clones-the-rule) after a
+    /// copy, provided the entropy is fresh on the copy's side;
+    /// [`reseed`](CtrDrbg::reseed) is the simpler way to do that.
     ///
     /// # Errors
     ///
     /// [`Error::InvalidSeedLength`] if `entropy` is shorter than
     /// [`MIN_SEED`]. The generator is left exactly as it was.
     pub fn reseed_from(&mut self, entropy: &[u8]) -> Result<(), Error> {
-        if entropy.len() < MIN_SEED {
-            return Err(Error::InvalidSeedLength(entropy.len()));
-        }
+        self.reseed_with(entropy, &[])
+    }
+
+    /// [`reseed_from`](CtrDrbg::reseed_from), with additional input
+    /// mixed in alongside the entropy.
+    ///
+    /// Additional input is whatever the caller wants the new state
+    /// bound to: a counter, a time, a name. It is not credited as
+    /// entropy, and `entropy` must be enough on its own.
+    ///
+    /// # Errors
+    ///
+    /// As `reseed_from`. The generator is left exactly as it was.
+    pub fn reseed_with(
+        &mut self,
+        entropy: &[u8],
+        additional: &[u8],
+    ) -> Result<(), Error> {
         let mut seed = [0u8; SEED];
-        let derived = derive(entropy, &mut seed);
-        let done = derived.and_then(|()| self.update(&seed));
+        let mixed = self.seed_block(entropy, additional, &mut seed);
+        let done = mixed.and_then(|()| self.update(&seed));
         seed.zeroize();
         if done.is_ok() {
             self.counter = 1;
@@ -262,20 +392,146 @@ impl<S: Entropy> CtrDrbg<S> {
         done
     }
 
-    /// Builds a generator from material that has already been
-    /// gathered.
-    fn instantiate(material: &[u8], source: S) -> Result<Self, Error> {
+    /// Fills `out` with random bytes, with additional input mixed
+    /// into the state before they are made.
+    ///
+    /// This is [`fill`](Random::fill) with the request bound to
+    /// something the caller knows. The input is not entropy and does
+    /// not count as a reseeding; with nothing in it this is exactly
+    /// `fill`. It does not repair a generator duplicated by a copy of
+    /// the process: two copies given the same input still agree.
+    ///
+    /// # Errors
+    ///
+    /// As `fill`. A refused request leaves the generator exactly as
+    /// it was.
+    pub fn fill_with(
+        &mut self,
+        out: &mut [u8],
+        additional: &[u8],
+    ) -> Result<(), Error> {
+        if out.len() > MAX_REQUEST {
+            return Err(Error::RequestTooLarge(out.len()));
+        }
+        // Prepared before anything moves, so that a refused input
+        // refuses the whole request. Empty input leaves the zero
+        // block the standard uses in its place.
         let mut seed = [0u8; SEED];
-        let derived = derive(material, &mut seed);
+        let done = if additional.is_empty() {
+            self.generate(out, None)
+        } else {
+            self.extra_block(additional, &mut seed)
+                .and_then(|()| self.generate(out, Some(&seed)))
+        };
+        seed.zeroize();
+        done
+    }
+
+    /// The request itself: mixes `extra` in, runs the counter over
+    /// `out`, and mixes `extra` in again to move the generator past
+    /// what was handed out. With no extra the second mixing is of
+    /// a zero block, as the standard has it.
+    fn generate(
+        &mut self,
+        out: &mut [u8],
+        extra: Option<&[u8; SEED]>,
+    ) -> Result<(), Error> {
+        // The standard folds the additional input into this reseeding
+        // and then requests with none. Here the source is drawn alone
+        // and the input still goes in afterwards, which mixes more,
+        // never less.
+        if self.counter > RESEED_INTERVAL {
+            self.reseed()?;
+        }
+        if let Some(extra) = extra {
+            self.update(extra)?;
+        }
+        let extra = extra.unwrap_or(&[0u8; SEED]);
+        let aes = Aes256::new(&self.key);
+        for chunk in out.chunks_mut(BLOCK_SIZE) {
+            increment(&mut self.v);
+            let mut block = self.v;
+            aes.encrypt_one(&mut block);
+            chunk.copy_from_slice(&block[..chunk.len()]);
+            block.zeroize();
+        }
+        // Moves the generator past what was just handed out, so that
+        // nothing already given away can be worked forward again.
+        self.update(extra)?;
+        self.counter += 1;
+        Ok(())
+    }
+
+    /// Builds a generator from material that has already been
+    /// gathered, with or without the derivation function in the way.
+    fn instantiate(
+        entropy: &[u8],
+        personalization: &[u8],
+        source: S,
+        derivation: bool,
+    ) -> Result<Self, Error> {
         let mut rng = CtrDrbg {
             source,
             key: Key::zeroed(),
             v: [0u8; BLOCK_SIZE],
             counter: 1,
+            derivation,
         };
-        let done = derived.and_then(|()| rng.update(&seed));
+        let mut seed = [0u8; SEED];
+        let mixed = rng.seed_block(entropy, personalization, &mut seed);
+        let done = mixed.and_then(|()| rng.update(&seed));
         seed.zeroize();
         done.map(|()| rng)
+    }
+
+    /// Turns entropy and whatever accompanies it into one seed's
+    /// worth, the way this generator was built to.
+    ///
+    /// With the derivation function that is a condensation of both
+    /// runs together. Without it the entropy is the seed, and the
+    /// extra is padded out and XORed over it, as the standard says.
+    fn seed_block(
+        &self,
+        entropy: &[u8],
+        extra: &[u8],
+        out: &mut [u8; SEED],
+    ) -> Result<(), Error> {
+        if self.derivation {
+            if entropy.len() < MIN_SEED {
+                return Err(Error::InvalidSeedLength(entropy.len()));
+            }
+            return derive(&[entropy, extra], out);
+        }
+        if entropy.len() != SEED {
+            return Err(Error::InvalidSeedLength(entropy.len()));
+        }
+        if extra.len() > SEED {
+            return Err(Error::InvalidLength(extra.len()));
+        }
+        out.copy_from_slice(entropy);
+        for (o, e) in out.iter_mut().zip(extra) {
+            *o ^= e;
+        }
+        Ok(())
+    }
+
+    /// Turns additional input on its own into one seed's worth, the
+    /// way this generator was built to: derived, or padded with zeros.
+    fn extra_block(
+        &self,
+        additional: &[u8],
+        out: &mut [u8; SEED],
+    ) -> Result<(), Error> {
+        if self.derivation {
+            return derive(&[additional], out);
+        }
+        if additional.len() > SEED {
+            return Err(Error::InvalidLength(additional.len()));
+        }
+        let (head, tail) = out.split_at_mut(additional.len());
+        head.copy_from_slice(additional);
+        tail.fill(0);
+        Ok(())
     }
 
     /// The CTR_DRBG update: runs the generator forward far enough to
@@ -307,9 +563,19 @@ impl CtrDrbg<entropy::System> {
     /// operating system where there is one, the processor's
     /// generator where there is not.
     ///
-    /// This is the one to reach for. The others exist for a
-    /// processor source chosen deliberately, or for entropy the
-    /// caller gathers.
+    /// This is the one to reach for. [`try_new`](CtrDrbg::try_new)
+    /// exists for a processor source chosen deliberately, or for
+    /// entropy the caller gathers.
+    ///
+    /// # Fork and snapshots
+    ///
+    /// A copy of this process holds a copy of this generator, and
+    /// both will hand out the same bytes. Call
+    /// [`reseed`](CtrDrbg::reseed) in the copy before it is used, or
+    /// build a fresh one there. The system source is the one that is
+    /// told about virtual machine clones, so a reseeding after a
+    /// restore is sound. See
+    /// [the rule](self#fork-snapshots-and-clones-the-rule).
     ///
     /// # Errors
     ///
@@ -324,47 +590,42 @@ impl CtrDrbg<entropy::System> {
     }
 }
 
+/// The generators the vector suites and the unit tests are built on:
+/// seeded from bytes the test holds, with no source to go back to.
+///
+/// Neither constructor is public, on purpose, and neither exists
+/// outside the test build. A generator with no source cannot obey
+/// the fork rule and cannot reseed itself when it runs out, and a
+/// seed that is a constant or a test value behaves exactly like a
+/// good one. A caller with entropy of their own implements
+/// [`Entropy`]; a caller wanting a fixed sequence implements
+/// [`Random`].
+#[cfg(test)]
 impl CtrDrbg<entropy::External> {
-    /// A generator seeded from entropy you supply, with no source of
-    /// its own to go back to.
-    ///
-    /// For a board whose hardware generator is read some other way,
-    /// and for tests that need a generator that cannot reach for
-    /// anything.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::InvalidSeedLength`] if `seed` is shorter than
-    /// [`MIN_SEED`]. It must be full entropy over its whole length.
-    pub fn from_seed(seed: &[u8]) -> Result<Self, Error> {
-        if seed.len() < MIN_SEED {
-            return Err(Error::InvalidSeedLength(seed.len()));
-        }
-        Self::instantiate(seed, entropy::External)
+    /// A generator seeded through the derivation function from
+    /// `seed`, which must be at least [`MIN_SEED`] bytes.
+    pub(crate) fn from_seed(seed: &[u8]) -> Result<Self, Error> {
+        Self::instantiate(seed, &[], entropy::External, true)
+    }
+
+    /// A generator seeded without the derivation function: the
+    /// standard's construction for material that is already full
+    /// entropy and exactly a seed long, with the personalization
+    /// padded and XORed over it. Exists so that the vectors for that
+    /// construction can be run; reseeding one takes exactly `SEED`
+    /// bytes, and additional input to one is at most `SEED` bytes,
+    /// refused with [`Error::InvalidLength`] otherwise.
+    pub(crate) fn from_full_entropy(
+        entropy: &[u8; SEED],
+        personalization: &[u8],
+    ) -> Result<Self, Error> {
+        Self::instantiate(entropy, personalization, entropy::External, false)
     }
 }
 
 impl<S: Entropy> Random for CtrDrbg<S> {
     fn fill(&mut self, out: &mut [u8]) -> Result<(), Error> {
-        if out.len() > MAX_REQUEST {
-            return Err(Error::RequestTooLarge(out.len()));
-        }
-        if self.counter > RESEED_INTERVAL {
-            self.reseed()?;
-        }
-        let aes = Aes256::new(&self.key);
-        for chunk in out.chunks_mut(BLOCK_SIZE) {
-            increment(&mut self.v);
-            let mut block = self.v;
-            aes.encrypt_one(&mut block);
-            chunk.copy_from_slice(&block[..chunk.len()]);
-            block.zeroize();
-        }
-        // Moves the generator past what was just handed out, so that
-        // nothing already given away can be worked forward again.
-        self.update(&[0u8; SEED])?;
-        self.counter += 1;
-        Ok(())
+        self.fill_with(out, &[])
     }
 }
 
@@ -373,6 +634,7 @@ impl<S: Entropy> fmt::Debug for CtrDrbg<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CtrDrbg")
             .field("requests_since_seeding", &(self.counter - 1))
+            .field("derivation_function", &self.derivation)
             .finish()
     }
 }
@@ -395,11 +657,17 @@ fn increment(v: &mut [u8; BLOCK_SIZE]) {
 /// This is what lets a caller hand over a hundred bytes from a ring
 /// oscillator, or two hundred rate-limited samples from `rdseed`, and
 /// get a seed that is worth its full length.
-fn derive(input: &[u8], out: &mut [u8; SEED]) -> Result<(), Error> {
+///
+/// The input is the concatenation of `parts`. They arrive separately
+/// because entropy and additional input come from different places
+/// and there is no allocator to join them with; the chaining absorbs
+/// them as though they were one run.
+fn derive(parts: &[&[u8]], out: &mut [u8; SEED]) -> Result<(), Error> {
     // The length goes into the input as a thirty-two bit number, so
     // it has to fit in one.
-    let Ok(length) = u32::try_from(input.len()) else {
-        return Err(Error::InvalidLength(input.len()));
+    let total: usize = parts.iter().map(|p| p.len()).sum();
+    let Ok(length) = u32::try_from(total) else {
+        return Err(Error::InvalidLength(total));
     };
 
     // The fixed key the standard names for this first pass: the bytes
@@ -421,7 +689,9 @@ fn derive(input: &[u8], out: &mut [u8; SEED]) -> Result<(), Error> {
         chain.update(&start);
         chain.update(&length.to_be_bytes());
         chain.update(&(SEED as u32).to_be_bytes());
-        chain.update(input);
+        for part in parts {
+            chain.update(part);
+        }
         // The standard's padding: a set bit, then zeros.
         chain.update(&[0x80]);
         chunk.copy_from_slice(&chain.finish());
@@ -686,9 +956,165 @@ mod tests {
         spoiled[499] ^= 1;
         let mut first = [0u8; SEED];
         let mut second = [0u8; SEED];
-        derive(&long, &mut first).expect("derive");
-        derive(&spoiled, &mut second).expect("derive");
+        derive(&[&long], &mut first).expect("derive");
+        derive(&[&spoiled], &mut second).expect("derive");
         assert_ne!(first, second);
+    }
+
+    /// Material in pieces must derive to the same seed as the same
+    /// bytes in one run, or the pieces would not be a concatenation.
+    #[test]
+    fn the_derivation_function_joins_its_parts() {
+        let whole = [0x44u8; 70];
+        let mut joined = [0u8; SEED];
+        let mut split = [0u8; SEED];
+        derive(&[&whole], &mut joined).expect("derive");
+        derive(&[&whole[..17], &whole[17..], &[]], &mut split).expect("derive");
+        assert_eq!(joined, split);
+    }
+
+    /// With nothing to add, a request with additional input is the
+    /// plain request, byte for byte.
+    #[test]
+    fn empty_additional_input_is_a_plain_request() {
+        let mut plain = CtrDrbg::from_seed(&seed()).expect("seed");
+        let mut with = CtrDrbg::from_seed(&seed()).expect("seed");
+        let mut a = [0u8; 40];
+        let mut b = [0u8; 40];
+        plain.fill(&mut a).expect("fill");
+        with.fill_with(&mut b, &[]).expect("fill_with");
+        assert_eq!(a, b);
+        plain.fill(&mut a).expect("fill");
+        with.fill_with(&mut b, &[]).expect("fill_with");
+        assert_eq!(a, b, "and the state moved on the same way");
+    }
+
+    /// Additional input must change the output, the same input from
+    /// the same state must repeat it, and it counts as a request, not
+    /// a reseeding.
+    #[test]
+    fn additional_input_binds_the_request() {
+        let mut plain = CtrDrbg::from_seed(&seed()).expect("seed");
+        let mut first = CtrDrbg::from_seed(&seed()).expect("seed");
+        let mut again = CtrDrbg::from_seed(&seed()).expect("seed");
+        let mut other = CtrDrbg::from_seed(&seed()).expect("seed");
+        let mut a = [0u8; 32];
+        let mut b = [0u8; 32];
+        let mut c = [0u8; 32];
+        let mut d = [0u8; 32];
+        plain.fill(&mut a).expect("fill");
+        first.fill_with(&mut b, b"request 1").expect("fill_with");
+        again.fill_with(&mut c, b"request 1").expect("fill_with");
+        other.fill_with(&mut d, b"request 2").expect("fill_with");
+        assert_ne!(a, b);
+        assert_eq!(b, c);
+        assert_ne!(b, d);
+        assert_eq!(first.counter, 2);
+    }
+
+    /// Reseeding with additional input alongside the entropy is, with
+    /// the derivation function, the same as reseeding from the two
+    /// joined: the derivation function sees one run either way.
+    #[test]
+    fn reseed_with_is_reseed_from_the_concatenation() {
+        let mut split = CtrDrbg::from_seed(&seed()).expect("seed");
+        let mut joined = CtrDrbg::from_seed(&seed()).expect("seed");
+        let entropy = [0x66u8; MIN_SEED];
+        let additional = [0x77u8; 20];
+        let mut both = [0u8; MIN_SEED + 20];
+        both[..MIN_SEED].copy_from_slice(&entropy);
+        both[MIN_SEED..].copy_from_slice(&additional);
+        split.reseed_with(&entropy, &additional).expect("reseed");
+        joined.reseed_from(&both).expect("reseed");
+        let mut a = [0u8; 32];
+        let mut b = [0u8; 32];
+        split.fill(&mut a).expect("fill");
+        joined.fill(&mut b).expect("fill");
+        assert_eq!(a, b);
+    }
+
+    /// The construction without the derivation function takes its
+    /// seed as it is, so the personalization must show in the output
+    /// and must be no longer than a seed.
+    #[test]
+    fn full_entropy_takes_a_personalization_up_to_a_seed() {
+        let mut bare = CtrDrbg::from_full_entropy(&seed(), &[]).expect("no df");
+        let mut named =
+            CtrDrbg::from_full_entropy(&seed(), b"instance").expect("no df");
+        let mut a = [0u8; 32];
+        let mut b = [0u8; 32];
+        bare.fill(&mut a).expect("fill");
+        named.fill(&mut b).expect("fill");
+        assert_ne!(a, b);
+        assert_eq!(
+            CtrDrbg::from_full_entropy(&seed(), &[0u8; SEED + 1]).err(),
+            Some(Error::InvalidLength(SEED + 1))
+        );
+        CtrDrbg::from_full_entropy(&seed(), &[0u8; SEED])
+            .expect("a whole seed of personalization");
+    }
+
+    /// The two constructions must not agree: a seed the derivation
+    /// function has been over is not the seed itself.
+    #[test]
+    fn the_two_constructions_differ() {
+        let mut derived = CtrDrbg::from_seed(&seed()).expect("seed");
+        let mut direct =
+            CtrDrbg::from_full_entropy(&seed(), &[]).expect("no df");
+        let mut a = [0u8; 32];
+        let mut b = [0u8; 32];
+        derived.fill(&mut a).expect("fill");
+        direct.fill(&mut b).expect("fill");
+        assert_ne!(a, b);
+    }
+
+    /// Without the derivation function the lengths are fixed, and
+    /// anything else is refused with the generator left as it was.
+    #[test]
+    fn full_entropy_refuses_the_wrong_lengths() {
+        let mut rng = CtrDrbg::from_full_entropy(&seed(), &[]).expect("no df");
+        let mut untouched =
+            CtrDrbg::from_full_entropy(&seed(), &[]).expect("no df");
+        assert_eq!(
+            rng.reseed_from(&[0u8; SEED - 1]).err(),
+            Some(Error::InvalidSeedLength(SEED - 1))
+        );
+        assert_eq!(
+            rng.reseed_from(&[0u8; SEED + 1]).err(),
+            Some(Error::InvalidSeedLength(SEED + 1))
+        );
+        assert_eq!(
+            rng.reseed_with(&[0u8; SEED], &[0u8; SEED + 1]).err(),
+            Some(Error::InvalidLength(SEED + 1))
+        );
+        let mut a = [0u8; 32];
+        assert_eq!(
+            rng.fill_with(&mut a, &[0u8; SEED + 1]).err(),
+            Some(Error::InvalidLength(SEED + 1))
+        );
+        let mut b = [0u8; 32];
+        rng.fill(&mut a).expect("fill");
+        untouched.fill(&mut b).expect("fill");
+        assert_eq!(a, b, "nothing refused touched the state");
+        // And the fixed lengths themselves are taken.
+        rng.reseed_with(&[0x88u8; SEED], &[0x99u8; SEED])
+            .expect("reseed");
+        rng.fill_with(&mut a, &[0xaau8; SEED]).expect("fill_with");
+    }
+
+    /// Additional input to that construction is padded, not derived,
+    /// so all-zero input is still input: it must be mixed in rather
+    /// than mistaken for none.
+    #[test]
+    fn zero_additional_input_is_still_input_without_the_df() {
+        let mut none = CtrDrbg::from_full_entropy(&seed(), &[]).expect("no df");
+        let mut zeros =
+            CtrDrbg::from_full_entropy(&seed(), &[]).expect("no df");
+        let mut a = [0u8; 32];
+        let mut b = [0u8; 32];
+        none.fill(&mut a).expect("fill");
+        zeros.fill_with(&mut b, &[0u8; 8]).expect("fill_with");
+        assert_ne!(a, b);
     }
 
     /// The counter block is one big-endian number, and must carry

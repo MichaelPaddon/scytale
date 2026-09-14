@@ -11,17 +11,21 @@
 //! | --- | --- |
 //! | [`System`] | whoever on this machine is best placed to know |
 //! | [`Processor`] | the processor's own generator, health tested |
-//! | [`External`] | nothing at all; the caller supplies everything |
+//! | yours | whatever you implement [`Entropy`] over |
 //!
 //! A board with a generator of its own implements
 //! [`Entropy`] over it and is served as well
-//! as a machine with an instruction for it.
+//! as a machine with an instruction for it. That is also how entropy
+//! gathered some other way goes in: there is deliberately no way to
+//! hand the generator a seed and nothing else, since a generator
+//! with no source cannot reseed itself, after a `fork` or when it
+//! runs out.
 //!
 //! # Example
 //!
 //! ```
-//! use scytale::Random;
-//! use scytale::random::{CtrDrbg, entropy};
+//! use scytale::{Error, Random};
+//! use scytale::random::{CtrDrbg, Entropy, entropy};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! // The usual case: let the system feed the generator.
@@ -37,12 +41,22 @@
 //!     own.fill(&mut key)?;
 //! }
 //!
-//! // Material gathered some other way, for a bare board or a test.
-//! // It must be full entropy over its whole length, and at least
-//! // `MIN_SEED` bytes of it.
-//! let seed = [0x5au8; scytale::random::MIN_SEED];
-//! let mut fixed = CtrDrbg::<entropy::External>::from_seed(&seed)?;
-//! fixed.fill(&mut key)?;
+//! // Hardware of your own: a noise source on a bus, read however
+//! // the board reads it. The generator conditions what it gets and
+//! // comes back for more when it needs to, so the source need not
+//! // be full entropy, only honest about failing.
+//! struct Board;
+//! impl Entropy for Board {
+//!     fn fill(&mut self, out: &mut [u8]) -> Result<(), Error> {
+//!         for byte in out.iter_mut() {
+//!             *byte = read_noise_register();
+//!         }
+//!         Ok(())
+//!     }
+//! }
+//! let mut own = CtrDrbg::try_new(Board)?;
+//! own.fill(&mut key)?;
+//! # fn read_noise_register() -> u8 { 0x5a }
 //! # Ok(())
 //! # }
 //! ```
@@ -191,19 +205,20 @@ impl Entropy for Inner {
 #[cfg(target_os = "none")]
 type Inner = Processor;
 
-/// No source of its own: entropy arrives only when the caller brings
-/// it.
+/// No source of its own: the generators the vector suites and the
+/// unit tests are built on hold this.
 ///
-/// A generator built on this works exactly as any other until it has
-/// drawn as much as one seeding allows, and then stops with
+/// A generator on this works exactly as any other until it has drawn
+/// as much as one seeding allows, and then stops with
 /// [`Error::ReseedRequired`] until it is given fresh material. It
-/// never quietly carries on, and it never invents anything.
-///
-/// This is what a generator seeded by
-/// [`CtrDrbg::from_seed`](crate::random::CtrDrbg::from_seed) holds.
+/// never quietly carries on, and it never invents anything. It also
+/// cannot recover from a `fork` on its own, which is one of the
+/// reasons it is not offered to callers.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default)]
-pub struct External;
+pub(crate) struct External;
 
+#[cfg(test)]
 impl Entropy for External {
     fn fill(&mut self, _out: &mut [u8]) -> Result<(), Error> {
         Err(Error::ReseedRequired)

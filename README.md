@@ -123,7 +123,7 @@ The API documentation is on [docs.rs](https://docs.rs/scytale), and
 test vectors, against the NIST Automated Cryptographic Validation
 Program (ACVP) vectors, and against Project Wycheproof, whose cases
 are chosen to break implementations rather than to exercise them.
-The corpus is 109 files holding 74,433 cases, and every case this
+The corpus is 109 files holding 74,525 cases, and every case this
 build can run is run; the Monte Carlo groups chain a thousand cipher
 calls per case, with the key re-derived at each step. Every
 implementation is put through the whole vector set for its primitive,
@@ -324,16 +324,22 @@ AES-256 driven by a counter, with its key and counter replaced after
 every request, checked against the ACVP vectors for that mechanism
 alongside everything else. Seed material of any length and any
 density is condensed by the standard's derivation function, so
-entropy from a slow or biased source is worth its full weight.
+entropy from a slow or biased source is worth its full weight. The
+generator takes additional input at a reseeding or a single request,
+to bind the output to something the caller knows, and `below` draws
+an unbiased number under a bound, so an index or a shuffle never
+comes from a byte reduced modulo something.
 
 `from_system` asks this machine for the seed, which is what almost
-every caller wants. The sources are named individually under
-`random::entropy` for the cases that are not: `entropy::Processor`
-for the processor's own generator, and `entropy::External` for a
-generator seeded with entropy you gathered, through
-`CtrDrbg::<entropy::External>::from_seed`. What your code should
-take is the `Random` trait, so a second generator, or a fixed
-sequence in a test, drops in without it noticing.
+every caller wants. `entropy::Processor` names the processor's own
+generator for the cases that are not, and entropy you gather any
+other way goes in by implementing `random::Entropy` over it and
+handing that to `CtrDrbg::try_new`. There is deliberately no way to
+build a generator from a seed alone: one with no source cannot reseed
+itself, and a seed that is a constant or a test value looks exactly
+like a good one. What your code should take is the `Random` trait,
+so a second generator, or a fixed sequence in a test, drops in
+without it noticing.
 
 | Where it runs | What seeds it |
 | --- | --- |
@@ -363,16 +369,25 @@ Where the processor has no such instruction either, construction
 fails and the program does not start, rather than every later call
 failing. That is not the end of the road on such a board: a hardware
 generator on a bus, a ring oscillator or a chip on I2C is supplied
-through the `random::Entropy` trait, and entropy gathered some other
-way goes in through `CtrDrbg::from_seed`. Either is served exactly
-as well as a machine with an instruction for it.
+through the `random::Entropy` trait, and so is entropy gathered some
+other way. Either is served exactly as well as a machine with an
+instruction for it.
 
-Because the generator has state, it is yours to look after. After a
-`fork`, or after a virtual machine is restored from a snapshot, the
-state has been duplicated and the child must reseed or start again;
-nothing here can detect that without asking the kernel on every call,
-which is most of the reason to hold a generator at all. The state is
-wiped when the generator is dropped.
+Because the generator has state, it is yours to look after, and the
+rule is this: **a copy of the process holds a copy of the generator,
+both copies will hand out the same bytes, and the copy must call
+`reseed` or build a fresh generator before it uses one.** A `fork`,
+a virtual machine restored from a snapshot, a container restored from
+a checkpoint, or a live migration that clones all make such a copy.
+Do it where the copy is made, in an `atfork` handler or the first
+thing a worker does, not lazily on first use, because the first use
+is the nonce. The library does not detect any of this, deliberately:
+the only hook is bypassed by raw `clone`, absent without a C library
+and blind to snapshots, and a check that is silently wrong on some
+platforms is worse than a rule that is true on all of them. The
+reasoning and what each primitive loses are in SECURITY.md and the
+`random` module documentation. The state is wiped when the generator
+is dropped.
 
 ## Supported architectures
 
