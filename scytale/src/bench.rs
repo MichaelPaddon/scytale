@@ -92,6 +92,7 @@ use crate::kex::{ecdh, x25519};
 use crate::mac::Mac;
 use crate::mac::cmac::Cmac;
 use crate::mac::hmac::Hmac;
+use crate::mac::kmac::Kmac128;
 use crate::mac::poly1305::Poly1305;
 use crate::pke::rsa as oaep;
 use crate::random::CtrDrbg;
@@ -763,10 +764,11 @@ where
 /// be named from out here: SHA-1 has no hardware anywhere, the
 /// generator builds its own cipher, and Poly1305 and the AEAD over
 /// ChaCha20 each take the best the processor has without being asked.
-const DISPATCHING: [&str; 5] = [
+const DISPATCHING: [&str; 6] = [
     "sha-1",
     "ctr-drbg",
     "poly1305",
+    "kmac128",
     "chacha20-poly1305-enc",
     "chacha20-poly1305-dec",
 ];
@@ -793,6 +795,7 @@ fn single_section(options: &Options) -> bool {
     // and the automatic ChaCha20 always exists.
     let mut mac = Poly1305::try_new(&Key::from(KEY256)).expect("poly1305");
     let aead = ChaCha20Poly1305::new(&Key::from(KEY256));
+    let mut kmac = Kmac128::new(&KEY256, b"");
     let mut tags = [[0u8; 16]; 2];
     let (enc_tag, dec_tag) = tags.split_at_mut(1);
     let mut tasks: Vec<Task<'_>> = vec![
@@ -816,6 +819,13 @@ fn single_section(options: &Options) -> bool {
                 mac.reset();
                 mac.update(d);
                 black_box(mac.finalize());
+            }),
+        ),
+        (
+            "kmac128",
+            Box::new(|d: &mut [u8]| {
+                kmac.update(d);
+                black_box(Mac::finalize(&mut kmac));
             }),
         ),
         (

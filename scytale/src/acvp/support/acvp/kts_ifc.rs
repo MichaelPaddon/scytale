@@ -3,10 +3,9 @@
 //!
 //! Every group in the suite is `KTS-OAEP-Party_V-confirmation`, so
 //! every one asks for key confirmation over the transported key. The
-//! crate does no key confirmation, and the tag here is HMAC-SHA-1 or
-//! KMAC-128, neither of which it has: `macKey`, `macData` and `tag`
-//! are therefore **not checked**. What runs is the OAEP transport
-//! alone, which is the part the crate owns.
+//! crate does no key confirmation, so `macKey`, `macData` and `tag`,
+//! an HMAC-SHA-1 or KMAC-128 tag, are **not checked**. What runs is
+//! the OAEP transport alone, which is the part the crate owns.
 //!
 //! That still leaves a real test. The mode is `noKdfKc`, so the
 //! transported secret is the derived keying material itself with no

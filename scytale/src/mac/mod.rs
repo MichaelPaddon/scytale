@@ -8,11 +8,11 @@
 //! timing, how much of a guess was right.
 //!
 //! [`hmac`] builds a MAC from any hash, [`cmac`] one from a block
-//! cipher, and [`poly1305`] is the one-time authenticator that
-//! ChaCha20-Poly1305 is built on. Hashing the key in front of the
-//! message does not make a MAC: for the SHA-2 family anyone holding a
-//! message's digest can extend the message and compute the digest of
-//! the extension, key unseen.
+//! cipher, [`kmac`] is the SHA-3 family's own, and [`poly1305`] is
+//! the one-time authenticator that ChaCha20-Poly1305 is built on.
+//! Hashing the key in front of the message does not make a MAC: for
+//! the SHA-2 family anyone holding a message's digest can extend the
+//! message and compute the digest of the extension, key unseen.
 //!
 //! ```
 //! use scytale::mac::hmac::HmacSha256;
@@ -48,6 +48,7 @@
 
 pub mod cmac;
 pub mod hmac;
+pub mod kmac;
 pub mod poly1305;
 
 use crate::{Error, KeyType};
@@ -109,6 +110,7 @@ mod tests {
     use crate::cipher::aes::Aes256;
     use crate::mac::cmac::Cmac;
     use crate::mac::hmac::{HmacSha256, HmacSha512_256};
+    use crate::mac::kmac::{Kmac128, Kmac256};
     use crate::mac::poly1305::Poly1305;
 
     /// Fed through an object, a MAC gives the tag its type gives.
@@ -139,6 +141,19 @@ mod tests {
         let key = Key::from([7u8; 32]);
         let mut cmac = Cmac::<Aes256>::new(&key);
         assert_eq!(tag16(&mut cmac), Cmac::<Aes256>::mac(&key, b"message"));
+
+        fn tag32(
+            mac: &mut dyn Mac<Key = Key<[u8; 32]>, Tag = [u8; 32]>,
+        ) -> [u8; 32] {
+            mac.update(b"message");
+            mac.finalize()
+        }
+        let mut kmac = Kmac128::try_new(&Key::from([7u8; 32])).unwrap();
+        let mut direct = Kmac128::new(&[7u8; 32], b"");
+        direct.update(b"message");
+        let mut expected = [0u8; 32];
+        direct.finalize_to(&mut expected);
+        assert_eq!(tag32(&mut kmac), expected);
     }
 
     /// `finalize` and `verify` leave the keyed state at the start of
@@ -163,6 +178,8 @@ mod tests {
         check::<HmacSha512_256>(&Key::from([3u8; 128]));
         check::<Poly1305>(&Key::from([7u8; 32]));
         check::<Cmac<Aes256>>(&Key::from([7u8; 32]));
+        check::<Kmac128>(&Key::from([7u8; 32]));
+        check::<Kmac256>(&Key::from([7u8; 32]));
     }
 
     #[test]
@@ -171,5 +188,6 @@ mod tests {
         assert_eq!(HmacSha512_256::zero_key(), Key::from([0u8; 128]));
         assert_eq!(Poly1305::zero_key(), Key::from([0u8; 32]));
         assert_eq!(Cmac::<Aes256>::zero_key(), Key::from([0u8; 32]));
+        assert_eq!(Kmac256::zero_key(), Key::from([0u8; 32]));
     }
 }

@@ -123,7 +123,7 @@ The API documentation is on [docs.rs](https://docs.rs/scytale), and
 test vectors, against the NIST Automated Cryptographic Validation
 Program (ACVP) vectors, and against Project Wycheproof, whose cases
 are chosen to break implementations rather than to exercise them.
-The corpus is 111 files holding 83,591 cases, and every case this
+The corpus is 115 files holding 85,393 cases, and every case this
 build can run is run; the Monte Carlo groups chain a thousand cipher
 calls per case, with the key re-derived at each step. Every
 implementation is put through the whole vector set for its primitive,
@@ -170,8 +170,8 @@ the machinery behind it:
 | --- | --- | --- |
 | `aead` | authenticated encryption | GCM, GCM-SIV, XPN, CCM, ChaCha20-Poly1305 |
 | `cipher` | encryption | AES, ChaCha20, and the modes built on them |
-| `hash` | digests | SHA-2, SHA-3, SHAKE; SHA-1 for what still names it |
-| `mac` | message authentication | HMAC, CMAC, Poly1305 |
+| `hash` | digests | SHA-2, SHA-3, SHAKE, cSHAKE; SHA-1 for what still names it |
+| `mac` | message authentication | HMAC, CMAC, KMAC, Poly1305 |
 | `kdf` | key derivation | HKDF, PBKDF2 |
 | `kem` | key encapsulation | ML-KEM-512, -768 and -1024 |
 | `kex` | key agreement | X25519, ECDH over P-256 and P-384 |
@@ -258,6 +258,7 @@ too.
 | SHA-512/224, SHA-512/256 | 28, 32 bytes | truncated; no length extension |
 | SHA3-224 to SHA3-512 (FIPS 202) | 28 to 64 bytes | no length extension |
 | SHAKE128, SHAKE256 | any length | extendable output |
+| cSHAKE128, cSHAKE256 (SP 800-185) | any length | SHAKE with a function name and customization |
 | SHA-1 (FIPS 180-4) | 20 bytes | broken for collisions; for HMAC, HKDF and OAEP in old protocols only |
 
 All of them take bit strings as well as bytes, as the standards
@@ -269,6 +270,7 @@ define them.
 | --- | --- |
 | HMAC (FIPS 198-1) | over any hash; constant-time verify |
 | CMAC (SP 800-38B) | over any block cipher; constant-time verify |
+| KMAC128, KMAC256 (SP 800-185) | over cSHAKE; any output length, KMACXOF, bit strings |
 | Poly1305 (RFC 8439) | one-time key; for the AEAD |
 
 ### Key derivation
@@ -410,7 +412,7 @@ is dropped.
 | aarch64 | ARMv8 SHA512 extension | SHA-512 |
 | riscv64 | vector cryptography (Zvknha, Zvknhb) | SHA-256, SHA-512 |
 | riscv64 | scalar cryptography (Zknh) | SHA-256, SHA-512 |
-| aarch64 | ARMv8 SHA3 extension | SHA-3, SHAKE |
+| aarch64 | ARMv8 SHA3 extension | SHA-3, SHAKE, cSHAKE, KMAC |
 | x86-64 | AVX2 | ChaCha20 |
 | aarch64 | NEON | ChaCha20 |
 | riscv64 | vector extension with Zvkb | ChaCha20 |
@@ -430,8 +432,8 @@ GHASH is the hash inside GCM, GCM-SIV and XPN. Without a carry-less
 multiply instruction it costs more than the cipher does. SHA-224 and
 SHA-384 and the SHA-512/t pair use the SHA-256 and SHA-512 code, so
 whatever accelerates those accelerates them. x86-64 has no SHA-512
-instruction in common use, so SHA-512 is portable there. Every SHA-3
-and SHAKE function is the one Keccak permutation, which only AArch64
+instruction in common use, so SHA-512 is portable there. Every SHA-3,
+SHAKE and cSHAKE function, and KMAC, is the one Keccak permutation, which only AArch64
 has instructions for; elsewhere it is portable. ChaCha20 needs no
 special instructions, only a vector unit: several blocks are computed
 at once, eight with AVX2, four with NEON, and as many as a register

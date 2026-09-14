@@ -62,8 +62,9 @@ excluded.
 | GHASH, accelerated | `pclmulqdq`, `pmull`, Zvbc/Zbc/Zvkg | carry-less multiply instructions are data-independent |
 | POLYVAL (GCM-SIV) | over the GHASH multiply | same |
 | Poly1305, portable and x86-64 | limb arithmetic, final reduction chosen by mask | no branch or index on key or message |
-| SHA-1, SHA-2, SHA-3, SHAKE | all backends | no data-dependent control flow; hashing a secret leaks only its length |
+| SHA-1, SHA-2, SHA-3, SHAKE, cSHAKE | all backends | no data-dependent control flow; hashing a secret leaks only its length |
 | HMAC, HKDF, PBKDF2 | over the hashes | as the hash; `Mac::verify` compares with `constant_time::equal` |
+| KMAC | over cSHAKE | as the hash; `verify_tag`, `verify_bits` and `Mac::verify` compare with `constant_time::equal` |
 | CTR, CBC, CFB, OFB, XTS | over the cipher | as the cipher; CBC has no padding, so no padding oracle |
 | CMAC | over the cipher | as the cipher; subkey doubling masks rather than branches; `Mac::verify` compares with `constant_time::equal` |
 | KW, KWP | over the cipher | the integrity check value is compared with `constant_time::equal` |

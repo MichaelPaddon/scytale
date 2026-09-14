@@ -1,5 +1,6 @@
-//! SHA-3 (FIPS 202): SHA3-224, SHA3-256, SHA3-384 and SHA3-512, and
-//! the extendable-output functions SHAKE128 and SHAKE256.
+//! SHA-3 (FIPS 202): SHA3-224, SHA3-256, SHA3-384 and SHA3-512, the
+//! extendable-output functions SHAKE128 and SHAKE256, and their
+//! customizable forms cSHAKE128 and cSHAKE256 (SP 800-185).
 //!
 //! One function underneath, really: the Keccak-f\[1600\] permutation
 //! used as a sponge. The six differ in how much of the 1600-bit
@@ -36,9 +37,11 @@
 //! wants a hash that cannot be length-extended: a SHA-3 digest gives
 //! away nothing about the state that made it. SHAKE is the choice
 //! where the output length is the caller's to decide, and is what
-//! the newer standards build key derivation on. SHA3-256 and
-//! SHAKE128 are the usual picks; the larger digests cost more per
-//! byte because less of each permutation is message.
+//! the newer standards build key derivation on. cSHAKE is SHAKE with
+//! a label absorbed first, for outputs that must not coincide across
+//! purposes; KMAC, in [`mac::kmac`](crate::mac::kmac), is built on it.
+//! SHA3-256 and SHAKE128 are the usual picks; the larger digests cost
+//! more per byte because less of each permutation is message.
 //!
 //! # Bit strings
 //!
@@ -59,6 +62,7 @@
 
 #[cfg(target_arch = "aarch64")]
 pub(crate) mod aarch64;
+pub(crate) mod cshake;
 pub(crate) mod engine;
 pub(crate) mod portable;
 
@@ -100,6 +104,8 @@ pub(crate) mod variant {
     variant!(/** SHA3-512. */ Sha3_512, 72, 0x06);
     variant!(/** SHAKE128. */ Shake128, 168, 0x1f);
     variant!(/** SHAKE256. */ Shake256, 136, 0x1f);
+    variant!(/** cSHAKE128. */ CShake128, 168, 0x04);
+    variant!(/** cSHAKE256. */ CShake256, 136, 0x04);
 
     impl DigestVariant for Sha3_224 {
         type Output = [u8; 28];
@@ -131,6 +137,8 @@ pub(crate) mod variant {
     }
     impl XofVariant for Shake128 {}
     impl XofVariant for Shake256 {}
+    impl XofVariant for CShake128 {}
+    impl XofVariant for CShake256 {}
 }
 
 /// The implementation the processor gets, chosen once.
@@ -304,6 +312,70 @@ impl<V: XofVariant> Xof for Auto<V> {
     }
 }
 
+/// A sponge whose domain bits are chosen when it is finalized, which
+/// is what cSHAKE and KMAC are built over. Implemented for the
+/// dispatching type and for each implementation, so the vector suites
+/// can drive every one.
+pub(crate) trait SuffixXof: BitXof + BlockType + Clone {
+    /// Ends the message with `suffix` and the padding.
+    fn finalize_suffix_xof(&mut self, suffix: u8) -> Self::Reader;
+
+    /// Ends the message with the first `bits` bits of `last`, one to
+    /// seven, then `suffix` and the padding.
+    fn finalize_bits_suffix_xof(
+        &mut self,
+        suffix: u8,
+        last: u8,
+        bits: u32,
+    ) -> Result<Self::Reader, Error>;
+}
+
+impl<V: XofVariant> SuffixXof for Auto<V> {
+    fn finalize_suffix_xof(&mut self, suffix: u8) -> Self::Reader {
+        AutoReader(match &mut self.0 {
+            #[cfg(target_arch = "aarch64")]
+            Inner::Armv8(s) => {
+                InnerReader::Armv8(s.finalize_suffix_xof(suffix))
+            }
+            Inner::Portable(s) => {
+                InnerReader::Portable(s.finalize_suffix_xof(suffix))
+            }
+        })
+    }
+
+    fn finalize_bits_suffix_xof(
+        &mut self,
+        suffix: u8,
+        last: u8,
+        bits: u32,
+    ) -> Result<Self::Reader, Error> {
+        Ok(AutoReader(match &mut self.0 {
+            #[cfg(target_arch = "aarch64")]
+            Inner::Armv8(s) => InnerReader::Armv8(
+                s.finalize_bits_suffix_xof(suffix, last, bits)?,
+            ),
+            Inner::Portable(s) => InnerReader::Portable(
+                s.finalize_bits_suffix_xof(suffix, last, bits)?,
+            ),
+        }))
+    }
+}
+
+impl<P: engine::Permutation, V: XofVariant> SuffixXof for Sponge<P, V> {
+    fn finalize_suffix_xof(&mut self, suffix: u8) -> Self::Reader {
+        Sponge::finalize_suffix_xof(self, suffix)
+    }
+
+    fn finalize_bits_suffix_xof(
+        &mut self,
+        suffix: u8,
+        last: u8,
+        bits: u32,
+    ) -> Result<Self::Reader, Error> {
+        Sponge::finalize_bits_suffix_xof(self, suffix, last, bits)
+    }
+}
+
 impl<V: XofVariant> BitXof for Auto<V> {
     fn finalize_bits_xof(
         &mut self,
@@ -321,6 +393,8 @@ impl<V: XofVariant> BitXof for Auto<V> {
         }))
     }
 }
+
+pub use cshake::{CShake128, CShake128Reader, CShake256, CShake256Reader};
 
 #[cfg(test)]
 pub(crate) mod tests {

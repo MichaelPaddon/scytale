@@ -39,6 +39,12 @@ pub type Shake128 = Sponge<Armv8, variant::Shake128>;
 /// SHAKE256 with the SHA3 instructions.
 #[cfg(test)]
 pub type Shake256 = Sponge<Armv8, variant::Shake256>;
+/// The sponge under cSHAKE128, with the SHA3 instructions.
+#[cfg(test)]
+pub type CShake128 = Sponge<Armv8, variant::CShake128>;
+/// The sponge under cSHAKE256, with the SHA3 instructions.
+#[cfg(test)]
+pub type CShake256 = Sponge<Armv8, variant::CShake256>;
 
 /// Whether the SHA3 instructions are available.
 pub(crate) fn has_sha3() -> bool {

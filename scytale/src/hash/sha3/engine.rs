@@ -383,6 +383,35 @@ impl<P: Permutation, V: XofVariant> BitXof for Sponge<P, V> {
     }
 }
 
+impl<P: Permutation, V: XofVariant> Sponge<P, V> {
+    /// As [`Xof::finalize_xof`], with the domain bits given here
+    /// rather than by the variant.
+    ///
+    /// cSHAKE needs that: with an empty name and customization it is
+    /// SHAKE, suffix and all.
+    pub(crate) fn finalize_suffix_xof(&mut self, suffix: u8) -> Reader<P, V> {
+        Reader {
+            state: self.finish(u16::from(suffix)),
+            _marker: PhantomData,
+        }
+    }
+
+    /// As [`BitXof::finalize_bits_xof`], with the domain bits given
+    /// here.
+    pub(crate) fn finalize_bits_suffix_xof(
+        &mut self,
+        suffix: u8,
+        last: u8,
+        bits: u32,
+    ) -> Result<Reader<P, V>, Error> {
+        let trailer = trailer(suffix, last, bits)?;
+        Ok(Reader {
+            state: self.finish(trailer),
+            _marker: PhantomData,
+        })
+    }
+}
+
 impl<P: Permutation, V: Variant> Clone for Sponge<P, V> {
     fn clone(&self) -> Self {
         Sponge {

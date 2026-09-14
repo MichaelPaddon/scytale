@@ -58,11 +58,12 @@
 //!
 //! [`sha3`] is a different design, not a successor: choose it when a
 //! protocol names it, or for a digest that cannot be length extended
-//! without settling for a truncated one. Its SHAKE functions give
-//! output of whatever length is asked for, through [`Xof`] and
-//! [`XofReader`] rather than [`Hash`], which is what to reach for
-//! when the length is the caller's to decide. Without hardware for
-//! it (only AArch64 has any) SHA-3 costs more per byte than SHA-2.
+//! without settling for a truncated one. Its SHAKE and cSHAKE
+//! functions give output of whatever length is asked for, through
+//! [`Xof`] and [`XofReader`] rather than [`Hash`], which is what to
+//! reach for when the length is the caller's to decide. Without
+//! hardware for it (only AArch64 has any) SHA-3 costs more per byte
+//! than SHA-2.
 //!
 //! [`sha1`] is not a choice at all. It is broken for collisions and
 //! is here only so that the protocols and formats that still name it
@@ -223,7 +224,9 @@ mod tests {
     use crate::BlockType;
     use crate::hash::sha1::Sha1;
     use crate::hash::sha2::{Sha256, Sha512, Sha512_256};
-    use crate::hash::sha3::{self, Sha3_256, Shake128, Shake256};
+    use crate::hash::sha3::{
+        self, CShake128, CShake256, Sha3_256, Shake128, Shake256,
+    };
 
     /// Fed through an object, a hash gives the digest its type gives.
     #[test]
@@ -254,6 +257,20 @@ mod tests {
         let mut expected = [0u8; 40];
         fresh.finalize_xof().squeeze(&mut expected);
         assert_eq!(squeeze(&mut shake), expected);
+
+        fn squeeze_c(
+            xof: &mut dyn Xof<Reader = sha3::CShake128Reader>,
+        ) -> [u8; 40] {
+            xof.update(b"abc");
+            let mut out = [0u8; 40];
+            xof.finalize_xof().squeeze(&mut out);
+            out
+        }
+        let mut custom = CShake128::new(b"", b"label");
+        let mut fresh = CShake128::new(b"", b"label");
+        fresh.update(b"abc");
+        fresh.finalize_xof().squeeze(&mut expected);
+        assert_eq!(squeeze_c(&mut custom), expected);
     }
 
     /// `finalize` leaves a new hash: the next message hashes alone.
@@ -292,6 +309,8 @@ mod tests {
         }
         check::<Shake128>();
         check::<Shake256>();
+        check::<CShake128>();
+        check::<CShake256>();
     }
 
     /// The block each hash is built on, as the standards give it.
@@ -307,6 +326,8 @@ mod tests {
         assert_eq!(block::<Sha3_256>(), 136);
         assert_eq!(block::<Shake128>(), 168);
         assert_eq!(block::<Shake256>(), 136);
+        assert_eq!(block::<CShake128>(), 168);
+        assert_eq!(block::<CShake256>(), 136);
         assert_eq!(Sha256::zero_block(), [0u8; 64]);
         assert_eq!(Shake128::zero_block(), [0u8; 168]);
     }

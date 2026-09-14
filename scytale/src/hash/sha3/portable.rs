@@ -32,6 +32,12 @@ pub type Shake128 = Sponge<Keccak, variant::Shake128>;
 /// SHAKE256, portably.
 #[cfg(test)]
 pub type Shake256 = Sponge<Keccak, variant::Shake256>;
+/// The sponge under cSHAKE128, portably.
+#[cfg(test)]
+pub type CShake128 = Sponge<Keccak, variant::CShake128>;
+/// The sponge under cSHAKE256, portably.
+#[cfg(test)]
+pub type CShake256 = Sponge<Keccak, variant::CShake256>;
 
 /// The round constants, one per round, for iota.
 pub(crate) static ROUND_CONSTANTS: [u64; 24] = [
