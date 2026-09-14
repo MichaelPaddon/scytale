@@ -1131,10 +1131,11 @@ fn sig_ops(options: &Options) -> bool {
         return false;
     };
     let ed_secret = KEY256;
-    let (Ok(ed_public), Ok(ed_signature)) = (
-        ed25519::public_key(&ed_secret),
-        ed25519::sign(&ed_secret, MESSAGE),
-    ) else {
+    let Ok(ed_key) = ed25519::PrivateKey::try_new(&Key::from(ed_secret)) else {
+        return false;
+    };
+    let ed_public = ed_key.public_key().bytes();
+    let Ok(ed_signature) = ed_key.sign(MESSAGE) else {
         return false;
     };
     let (Ok(p256), Ok(p384)) = (
@@ -1167,7 +1168,7 @@ fn sig_ops(options: &Options) -> bool {
         (
             "ed25519-sign",
             Box::new(|| {
-                black_box(ed25519::sign(&ed_secret, MESSAGE)).ok();
+                black_box(ed_key.sign(MESSAGE)).ok();
             }),
         ),
         (
