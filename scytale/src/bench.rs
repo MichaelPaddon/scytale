@@ -65,7 +65,7 @@ use std::time::Duration;
 use cpu_time::ThreadTime;
 
 use crate::Key;
-use crate::aead::{Aead, ChaCha20Poly1305, Gcm, GcmSiv, Xpn};
+use crate::aead::{Aead, Ccm, ChaCha20Poly1305, Gcm, GcmSiv, Xpn};
 use crate::cipher::chacha20;
 use crate::cipher::mode::{Cbc, Cfb1, Cfb8, Cfb128, Ctr, Kw, Kwp, Ofb, Xts};
 use crate::cipher::mode::{Ff1, Ff3_1};
@@ -1590,7 +1590,7 @@ fn fpe_ops(options: &Options) -> bool {
 /// they name so that a filter can be applied before any key is
 /// expanded, which is what lets an unsupported implementation be
 /// skipped silently.
-const ALGORITHMS: [&str; 21] = [
+const ALGORITHMS: [&str; 22] = [
     "aes-128-ecb-enc",
     "aes-128-ecb-dec",
     "aes-256-ecb-enc",
@@ -1608,6 +1608,7 @@ const ALGORITHMS: [&str; 21] = [
     "aes-256-gcm-enc",
     "aes-128-gcm-siv-enc",
     "aes-128-xpn-enc",
+    "aes-128-ccm-enc",
     "aes-128-xts-enc",
     "aes-128-xts-dec",
     "aes-128-kw-wrap",
@@ -1633,6 +1634,7 @@ struct Keys<
     gcm256: Option<Gcm<B>>,
     siv: Option<GcmSiv<A>>,
     xpn: Option<Xpn<A>>,
+    ccm: Option<Ccm<A>>,
     xts: Option<Xts<A>>,
     kw: Kw<A>,
     kwp: Kwp<A>,
@@ -1642,7 +1644,7 @@ struct Keys<
     wrapped: [Vec<u8>; 2],
     /// A tag buffer for each row that writes one; separate buffers so
     /// the rows borrow disjointly.
-    tags: [[u8; 16]; 5],
+    tags: [[u8; 16]; 6],
 }
 
 /// Key material. Fixed rather than drawn, so that a run repeats.
@@ -1700,6 +1702,7 @@ where
             gcm256: Gcm::with_implementation(&k256, implementation),
             siv: GcmSiv::with_implementation(&k128, implementation),
             xpn: Xpn::with_implementation(&k128, implementation),
+            ccm: Ccm::with_implementation(&k128, implementation),
             xts: Xts::with_implementation(
                 &Key::from(KEY_XTS_DATA),
                 &Key::from(KEY_XTS_TWEAK),
@@ -1711,7 +1714,7 @@ where
                 vec![0u8; SIZES[SIZES.len() - 1] + 8],
                 vec![0u8; SIZES[SIZES.len() - 1] + 8],
             ],
-            tags: [[0u8; 16]; 5],
+            tags: [[0u8; 16]; 6],
         })
     }
 
@@ -1733,6 +1736,7 @@ where
             gcm256,
             siv,
             xpn,
+            ccm,
             xts,
             kw,
             kwp,
@@ -1740,11 +1744,12 @@ where
             tags,
         } = self;
         // Split so that each row that writes a tag borrows its own.
-        let (gmac_tag, tags) = tags.split_first_mut().expect("five tags");
-        let (gcm_tag, tags) = tags.split_first_mut().expect("four tags");
-        let (gcm256_tag, tags) = tags.split_first_mut().expect("three tags");
-        let (siv_tag, tags) = tags.split_first_mut().expect("two tags");
-        let (xpn_tag, _) = tags.split_first_mut().expect("one tag");
+        let (gmac_tag, tags) = tags.split_first_mut().expect("six tags");
+        let (gcm_tag, tags) = tags.split_first_mut().expect("five tags");
+        let (gcm256_tag, tags) = tags.split_first_mut().expect("four tags");
+        let (siv_tag, tags) = tags.split_first_mut().expect("three tags");
+        let (xpn_tag, tags) = tags.split_first_mut().expect("two tags");
+        let (ccm_tag, _) = tags.split_first_mut().expect("one tag");
         let (kw_out, wrapped) = wrapped.split_first_mut().expect("two buffers");
         let (kwp_out, _) = wrapped.split_first_mut().expect("one buffer");
         let mut tasks: Vec<Task<'_>> = Vec::new();
@@ -1870,6 +1875,14 @@ where
                 "aes-128-xpn-enc",
                 Box::new(|d: &mut [u8]| {
                     let _ = xpn.encrypt(&SALT, &NONCE, &[], d, xpn_tag);
+                }),
+            ));
+        }
+        if let Some(ccm) = ccm {
+            tasks.push((
+                "aes-128-ccm-enc",
+                Box::new(|d: &mut [u8]| {
+                    let _ = ccm.encrypt(&NONCE, &[], d, ccm_tag);
                 }),
             ));
         }

@@ -123,7 +123,7 @@ The API documentation is on [docs.rs](https://docs.rs/scytale), and
 test vectors, against the NIST Automated Cryptographic Validation
 Program (ACVP) vectors, and against Project Wycheproof, whose cases
 are chosen to break implementations rather than to exercise them.
-The corpus is 109 files holding 74,525 cases, and every case this
+The corpus is 110 files holding 82,835 cases, and every case this
 build can run is run; the Monte Carlo groups chain a thousand cipher
 calls per case, with the key re-derived at each step. Every
 implementation is put through the whole vector set for its primitive,
@@ -168,7 +168,7 @@ the machinery behind it:
 
 | Module | Job | Algorithms |
 | --- | --- | --- |
-| `aead` | authenticated encryption | GCM, GCM-SIV, XPN, ChaCha20-Poly1305 |
+| `aead` | authenticated encryption | GCM, GCM-SIV, XPN, CCM, ChaCha20-Poly1305 |
 | `cipher` | encryption | AES, ChaCha20, and the modes built on them |
 | `hash` | digests | SHA-2, SHA-3, SHAKE; SHA-1 for what still names it |
 | `mac` | message authentication | HMAC, Poly1305 |
@@ -198,10 +198,11 @@ dictates otherwise, start here.
 | GCM | the default; GMAC is GCM with no plaintext |
 | GCM-SIV | survives a repeated nonce (RFC 8452) |
 | XPN | GCM under a MACsec extended packet number |
+| CCM | counter mode with CBC-MAC (SP 800-38C); Bluetooth, 802.15.4, CCMP |
 | ChaCha20-Poly1305 (RFC 8439) | GCM's equal; faster without AES hardware |
 
-The first three are modes of operation of a block cipher and are
-generic over it; the fourth is a stream cipher and a MAC designed
+The first four are modes of operation of a block cipher and are
+generic over it; the fifth is a stream cipher and a MAC designed
 together, with no block cipher underneath. They share a module because
 what a caller wants is authenticated encryption, not a particular way
 of building it, and they share a trait for the same reason.
@@ -478,7 +479,7 @@ gcm.encrypt(&nonce, associated_data, &mut buffer, &mut tag)?;
 gcm.decrypt(&nonce, associated_data, &mut buffer, &tag)?;
 ```
 
-GCM, GCM-SIV and ChaCha20-Poly1305 share an `Aead` trait, so code that
+GCM, GCM-SIV, CCM and ChaCha20-Poly1305 share an `Aead` trait, so code that
 does not care which one it was handed -- a protocol that negotiated it,
 a format that records it -- can hold any of them behind one type. XPN
 stays out of it: its nonce is two separate halves, a secret salt and a

@@ -66,7 +66,7 @@ excluded.
 | HMAC, HKDF, PBKDF2 | over the hashes | as the hash; `Mac::verify` compares with `constant_time::equal` |
 | CTR, CBC, CFB, OFB, XTS | over the cipher | as the cipher; CBC has no padding, so no padding oracle |
 | KW, KWP | over the cipher | the integrity check value is compared with `constant_time::equal` |
-| GCM, GCM-SIV, XPN, ChaCha20-Poly1305 | over the above | tag compared whole with `constant_time::equal`; plaintext never released on failure |
+| GCM, GCM-SIV, XPN, CCM, ChaCha20-Poly1305 | over the above | tag compared whole with `constant_time::equal`; plaintext never released on failure |
 | CTR_DRBG | AES-256 | as AES; the state is a `Key` |
 | `constant_time::equal` | `constant_time.rs` | reads every byte of both operands; the accumulator goes through `black_box` so the compiler cannot reintroduce an early exit; a length mismatch returns early, since lengths are not secret |
 
@@ -294,9 +294,9 @@ lengths only.
 
 ## What scytale does not protect against
 
-- **Nonce reuse.** GCM, XPN, ChaCha20-Poly1305 and CTR lose
-  confidentiality and (for the AEADs) the authentication key when a
-  nonce repeats under one key. The library counts nonces for you
+- **Nonce reuse.** GCM, XPN, CCM, ChaCha20-Poly1305 and CTR lose
+  confidentiality when a nonce repeats under one key, and all but
+  CCM give up the authentication key with it. The library counts nonces for you
   when asked (`cipher::Nonces`) but cannot stop a caller supplying
   its own. GCM-SIV survives a repeated nonce at the cost of
   revealing that two messages were equal.

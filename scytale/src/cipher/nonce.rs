@@ -93,7 +93,7 @@ const COUNTER: usize = 8;
 ///
 /// `B` is the nonce, so its width is a type: `Nonces<[u8; 12]>` is
 /// the ninety-six bit nonce [`Gcm`](crate::aead::Gcm),
-/// [`GcmSiv`](crate::aead::GcmSiv) and
+/// [`GcmSiv`](crate::aead::GcmSiv), [`Ccm`](crate::aead::Ccm) and
 /// [`ChaCha20`](super::chacha20) all take. Read the warnings above
 /// before using one across restarts.
 #[derive(Clone, Debug)]

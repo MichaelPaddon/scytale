@@ -21,12 +21,12 @@ use std::{eprintln, format, println, string::String, vec, vec::Vec};
 mod support;
 
 use support::acvp::{
-    aes_cbc as cbc, aes_cfb1 as cfb1, aes_cfb8 as cfb8, aes_cfb128 as cfb128,
-    aes_ctr as ctr, aes_ecb as ecb, aes_ff1 as ff1, aes_ff3_1 as ff3_1,
-    aes_gcm as gcm, aes_gcm_siv as gcm_siv, aes_gmac as gmac, aes_kw as kw,
-    aes_kwp as kwp, aes_ofb as ofb, aes_xpn as xpn, aes_xts as xts,
-    ctr_drbg as drbg, hmac as hmac_vectors, pbkdf as pbkdf_vectors,
-    sha as sha_vectors, shake as shake_vectors,
+    aes_cbc as cbc, aes_ccm as ccm, aes_cfb1 as cfb1, aes_cfb8 as cfb8,
+    aes_cfb128 as cfb128, aes_ctr as ctr, aes_ecb as ecb, aes_ff1 as ff1,
+    aes_ff3_1 as ff3_1, aes_gcm as gcm, aes_gcm_siv as gcm_siv,
+    aes_gmac as gmac, aes_kw as kw, aes_kwp as kwp, aes_ofb as ofb,
+    aes_xpn as xpn, aes_xts as xts, ctr_drbg as drbg, hmac as hmac_vectors,
+    pbkdf as pbkdf_vectors, sha as sha_vectors, shake as shake_vectors,
 };
 
 /// Defines the suites for an implementation that is always
@@ -330,6 +330,12 @@ mod aes_ctr {
 /// mode. This suite has no Monte Carlo test.
 mod aes_gcm {
     modes!(gcm, aft_only);
+}
+
+/// AES in counter with CBC-MAC mode (SP 800-38C). This suite has no
+/// Monte Carlo test.
+mod aes_ccm {
+    modes!(ccm, aft_only);
 }
 
 /// AES-GCM-SIV (RFC 8452), which survives a repeated nonce.
@@ -1220,7 +1226,7 @@ mod inventory {
                 Key = crate::Key<[u8; 16]>,
             >,
     {
-        use crate::aead::{gcm, gcm_siv};
+        use crate::aead::{ccm, gcm, gcm_siv};
         use crate::cipher::mode::{cbc, ctr, xts};
         use crate::implementation::Implementation;
 
@@ -1242,6 +1248,9 @@ mod inventory {
         });
         one("AES-XTS", xts::CHOICES, &|i| {
             xts::Xts::<C>::with_implementation(&key, &tweak, i).is_some()
+        });
+        one("AES-CCM", ccm::CHOICES, &|i| {
+            ccm::Ccm::<C>::with_implementation(&key, i).is_some()
         });
         one("AES-GCM", gcm::CHOICES, &|i| {
             gcm::Gcm::<C>::with_implementation(&key, i).is_some()

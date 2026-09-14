@@ -5,6 +5,7 @@
 use std::{eprintln, format, println, string::String, vec, vec::Vec};
 
 pub mod aes_cbc;
+pub mod aes_ccm;
 pub mod aes_cfb1;
 pub mod aes_cfb128;
 pub mod aes_cfb8;

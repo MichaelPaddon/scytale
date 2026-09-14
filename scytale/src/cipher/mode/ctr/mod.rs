@@ -252,6 +252,13 @@ where
         self.stream(counter).update(data)
     }
 
+    /// The cipher under the mode's key, for a construction that needs
+    /// single blocks beside the keystream, such as CCM's CBC-MAC,
+    /// without scheduling the key a second time.
+    pub(crate) fn cipher(&self) -> &C {
+        &self.cipher
+    }
+
     /// Starts a message that arrives in pieces.
     pub fn stream(&self, counter: &C::Block) -> Stream<'_, C> {
         Stream {
