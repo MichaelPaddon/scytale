@@ -10,9 +10,14 @@
 //! the same signature, and no randomness is consumed, so a weak
 //! generator cannot leak the key the way it can with ECDSA.
 //!
-//! This is the plain Ed25519 of RFC 8032 section 5.1: no context
-//! string, no pre-hashing. Ed25519ctx and Ed25519ph can be added if
-//! a protocol requires them.
+//! All three variants of RFC 8032 section 5.1 are here. Plain
+//! Ed25519, [`sign`] and [`verify`], is the one to reach for.
+//! Ed25519ctx, [`sign_ctx`], adds a context string that separates a
+//! key's signatures across uses, for a protocol that assigns one.
+//! Ed25519ph, [`sign_ph`], signs a SHA-512 digest the caller has
+//! already made, so a message too large to hold can be hashed as it
+//! arrives, and takes a context too. The three never accept each
+//! other's signatures.
 //!
 //! Keys are 32 bytes each way. [`PrivateKey`] and [`PublicKey`] are
 //! the pair to reach for: the secret is held in a [`Key`], so it is
@@ -93,15 +98,134 @@ pub fn sign(
     secret: &[u8; KEY_SIZE],
     message: &[u8],
 ) -> Result<[u8; SIGNATURE_SIZE], Error> {
-    sign_with(secret, &public_key(secret)?, message)
+    sign_with(secret, &public_key(secret)?, &[], message)
 }
 
-/// Signs `message` with `secret`, whose public key `public` must be.
-/// A [`PrivateKey`] has derived it already, and deriving it again
-/// would cost as much as the signature's own multiplication.
+/// Checks that `signature` signs `message` under `public`.
+///
+/// [`Error::InvalidPublicKey`] when the key does not name a point on
+/// the curve; [`Error::InvalidSignature`] for everything else, which
+/// deliberately says no more than that.
+pub fn verify(
+    public: &[u8; PUBLIC_KEY_SIZE],
+    message: &[u8],
+    signature: &[u8; SIGNATURE_SIZE],
+) -> Result<(), Error> {
+    verify_with(public, &[], message, signature)
+}
+
+/// The longest context string Ed25519ctx and Ed25519ph take.
+pub const CONTEXT_MAX: usize = 255;
+
+/// The length of the SHA-512 digest Ed25519ph signs.
+pub const PREHASH_SIZE: usize = 64;
+
+/// Signs `message` under `context` with `secret`, by Ed25519ctx.
+///
+/// The context is 1 to [`CONTEXT_MAX`] bytes; anything else is
+/// [`Error::InvalidLength`]. RFC 8032 says it should not be empty,
+/// and a use with no context to give is plain [`sign`]'s.
+pub fn sign_ctx(
+    secret: &[u8; KEY_SIZE],
+    context: &[u8],
+    message: &[u8],
+) -> Result<[u8; SIGNATURE_SIZE], Error> {
+    let head = dom2(CTX, context)?;
+    sign_with(secret, &public_key(secret)?, &[&head, context], message)
+}
+
+/// Checks that `signature` signs `message` under `context` and
+/// `public`, by Ed25519ctx. The context is refused as [`sign_ctx`]
+/// refuses it, and the errors are otherwise [`verify`]'s.
+pub fn verify_ctx(
+    public: &[u8; PUBLIC_KEY_SIZE],
+    context: &[u8],
+    message: &[u8],
+    signature: &[u8; SIGNATURE_SIZE],
+) -> Result<(), Error> {
+    let head = dom2(CTX, context)?;
+    verify_with(public, &[&head, context], message, signature)
+}
+
+/// Signs the SHA-512 digest `prehash` under `context` with `secret`,
+/// by Ed25519ph.
+///
+/// The digest is what the caller has hashed the message to, in as
+/// many pieces as it arrived in, which is the reason to choose this
+/// variant. The context is up to [`CONTEXT_MAX`] bytes and may be
+/// empty; a longer one is [`Error::InvalidLength`].
+///
+/// ```
+/// use scytale::hash::Hash;
+/// use scytale::hash::sha2::Sha512;
+/// use scytale::sig::ed25519;
+///
+/// # fn main() -> Result<(), scytale::Error> {
+/// let secret = [0x42u8; 32];
+/// let mut hasher = Sha512::try_new()?;
+/// hasher.update(b"a message that ");
+/// hasher.update(b"arrives in parts");
+/// let prehash = hasher.finalize();
+/// let signature = ed25519::sign_ph(&secret, b"", &prehash)?;
+/// let public = ed25519::public_key(&secret)?;
+/// ed25519::verify_ph(&public, b"", &prehash, &signature)?;
+/// # Ok(())
+/// # }
+/// ```
+pub fn sign_ph(
+    secret: &[u8; KEY_SIZE],
+    context: &[u8],
+    prehash: &[u8; PREHASH_SIZE],
+) -> Result<[u8; SIGNATURE_SIZE], Error> {
+    let head = dom2(PH, context)?;
+    sign_with(secret, &public_key(secret)?, &[&head, context], prehash)
+}
+
+/// Checks that `signature` signs the SHA-512 digest `prehash` under
+/// `context` and `public`, by Ed25519ph. The context is refused as
+/// [`sign_ph`] refuses it, and the errors are otherwise [`verify`]'s.
+pub fn verify_ph(
+    public: &[u8; PUBLIC_KEY_SIZE],
+    context: &[u8],
+    prehash: &[u8; PREHASH_SIZE],
+    signature: &[u8; SIGNATURE_SIZE],
+) -> Result<(), Error> {
+    let head = dom2(PH, context)?;
+    verify_with(public, &[&head, context], prehash, signature)
+}
+
+/// The phflag of Ed25519ctx.
+const CTX: u8 = 0;
+
+/// The phflag of Ed25519ph.
+const PH: u8 = 1;
+
+/// The fixed part of RFC 8032's `dom2(phflag, context)`: the name,
+/// the flag and the context's length. The context follows it into
+/// both hashes, which is what keeps a signature under one variant or
+/// context from verifying under another. Ed25519ctx takes a context
+/// of at least a byte, Ed25519ph any up to [`CONTEXT_MAX`].
+fn dom2(flag: u8, context: &[u8]) -> Result<[u8; 34], Error> {
+    let shortest = if flag == CTX { 1 } else { 0 };
+    if context.len() < shortest || context.len() > CONTEXT_MAX {
+        return Err(Error::InvalidLength(context.len()));
+    }
+    let mut head = [0u8; 34];
+    head[..32].copy_from_slice(b"SigEd25519 no Ed25519 collisions");
+    head[32] = flag;
+    head[33] = context.len() as u8;
+    Ok(head)
+}
+
+/// Signs `message` with `secret`, whose public key `public` must be,
+/// with `dom` hashed ahead of both hashes: nothing for Ed25519, and
+/// `dom2` and the context for the other two. A [`PrivateKey`] has
+/// derived the public key already, and deriving it again would cost
+/// as much as the signature's own multiplication.
 fn sign_with(
     secret: &[u8; KEY_SIZE],
     public: &[u8; PUBLIC_KEY_SIZE],
+    dom: &[&[u8]],
     message: &[u8],
 ) -> Result<[u8; SIGNATURE_SIZE], Error> {
     let mut h = Sha512::digest(secret)?;
@@ -110,6 +234,9 @@ fn sign_with(
     // The nonce: a hash of the secret prefix and the message, so it
     // is unique per message without consuming randomness.
     let mut hasher = Sha512::try_new()?;
+    for part in dom {
+        hasher.update(part);
+    }
     hasher.update(&h[32..]);
     hasher.update(message);
     let mut wide = hasher.finalize();
@@ -117,11 +244,7 @@ fn sign_with(
     let big_r = Point::mul_base(&r).compress();
 
     // The challenge binds R, the public key and the message.
-    let mut hasher = Sha512::try_new()?;
-    hasher.update(&big_r);
-    hasher.update(public);
-    hasher.update(message);
-    let k = Scalar::from_bytes_wide(&hasher.finalize());
+    let k = challenge(dom, &big_r, public, message)?;
 
     let s = k.mulmod(&a).addmod(&r);
     let mut signature = [0u8; SIGNATURE_SIZE];
@@ -135,13 +258,11 @@ fn sign_with(
     Ok(signature)
 }
 
-/// Checks that `signature` signs `message` under `public`.
-///
-/// [`Error::InvalidPublicKey`] when the key does not name a point on
-/// the curve; [`Error::InvalidSignature`] for everything else, which
-/// deliberately says no more than that.
-pub fn verify(
+/// Verification under any of the three variants, `dom` as
+/// [`sign_with`] takes it.
+fn verify_with(
     public: &[u8; PUBLIC_KEY_SIZE],
+    dom: &[&[u8]],
     message: &[u8],
     signature: &[u8; SIGNATURE_SIZE],
 ) -> Result<(), Error> {
@@ -156,20 +277,34 @@ pub fn verify(
     }
     let s = Scalar::from_bytes_reduced(&s_bytes);
 
-    let mut hasher = Sha512::try_new()?;
-    hasher.update(&signature[..32]);
-    hasher.update(public);
-    hasher.update(message);
-    let k = Scalar::from_bytes_wide(&hasher.finalize());
+    let mut big_r = [0u8; 32];
+    big_r.copy_from_slice(&signature[..32]);
+    let k = challenge(dom, &big_r, public, message)?;
 
     // sB = R + kA, checked as R = sB - kA so R need never be
     // decompressed: its bytes are compared directly.
-    let big_r = a.neg().mul_add_base_vartime(&k, &s).compress();
-    if big_r == signature[..32] {
+    if a.neg().mul_add_base_vartime(&k, &s).compress() == big_r {
         Ok(())
     } else {
         Err(Error::InvalidSignature)
     }
+}
+
+/// `k = H(dom || R || A || M)`, reduced into the group.
+fn challenge(
+    dom: &[&[u8]],
+    big_r: &[u8; 32],
+    public: &[u8; PUBLIC_KEY_SIZE],
+    message: &[u8],
+) -> Result<Scalar, Error> {
+    let mut hasher = Sha512::try_new()?;
+    for part in dom {
+        hasher.update(part);
+    }
+    hasher.update(big_r);
+    hasher.update(public);
+    hasher.update(message);
+    Ok(Scalar::from_bytes_wide(&hasher.finalize()))
 }
 
 /// The length of a secret key's DER encoding, a PKCS#8
@@ -342,7 +477,31 @@ impl PrivateKey {
 
     /// Signs `message`.
     pub fn sign(&self, message: &[u8]) -> Result<[u8; SIGNATURE_SIZE], Error> {
-        sign_with(self.secret.array(), &self.public.bytes, message)
+        sign_with(self.secret.array(), &self.public.bytes, &[], message)
+    }
+
+    /// Signs `message` under `context`, by Ed25519ctx, as
+    /// [`sign_ctx`] does.
+    pub fn sign_ctx(
+        &self,
+        context: &[u8],
+        message: &[u8],
+    ) -> Result<[u8; SIGNATURE_SIZE], Error> {
+        let head = dom2(CTX, context)?;
+        let dom: [&[u8]; 2] = [&head, context];
+        sign_with(self.secret.array(), &self.public.bytes, &dom, message)
+    }
+
+    /// Signs the SHA-512 digest `prehash` under `context`, by
+    /// Ed25519ph, as [`sign_ph`] does.
+    pub fn sign_ph(
+        &self,
+        context: &[u8],
+        prehash: &[u8; PREHASH_SIZE],
+    ) -> Result<[u8; SIGNATURE_SIZE], Error> {
+        let head = dom2(PH, context)?;
+        let dom: [&[u8]; 2] = [&head, context];
+        sign_with(self.secret.array(), &self.public.bytes, &dom, prehash)
     }
 
     /// A key from its DER `PrivateKeyInfo`, of either version; a
@@ -410,6 +569,29 @@ impl PublicKey {
         signature: &[u8; SIGNATURE_SIZE],
     ) -> Result<(), Error> {
         verify(&self.bytes, message, signature)
+    }
+
+    /// Checks that `signature` signs `message` under `context` and
+    /// this key, by Ed25519ctx, as [`verify_ctx`] does.
+    pub fn verify_ctx(
+        &self,
+        context: &[u8],
+        message: &[u8],
+        signature: &[u8; SIGNATURE_SIZE],
+    ) -> Result<(), Error> {
+        verify_ctx(&self.bytes, context, message, signature)
+    }
+
+    /// Checks that `signature` signs the SHA-512 digest `prehash`
+    /// under `context` and this key, by Ed25519ph, as [`verify_ph`]
+    /// does.
+    pub fn verify_ph(
+        &self,
+        context: &[u8],
+        prehash: &[u8; PREHASH_SIZE],
+        signature: &[u8; SIGNATURE_SIZE],
+    ) -> Result<(), Error> {
+        verify_ph(&self.bytes, context, prehash, signature)
     }
 
     /// A key from its DER `SubjectPublicKeyInfo`.
@@ -1247,6 +1429,197 @@ mod tests {
             assert_eq!(signature, expected_sig);
             assert_eq!(verify(&expected_public, message, &signature), Ok(()),);
         }
+    }
+
+    /// The RFC 8032 section 7.2 Ed25519ctx vectors: secret key,
+    /// public key, message, context, signature.
+    const CTX_VECTORS: &[(&str, &str, &str, &str, &str)] = &[
+        (
+            "0305334e381af78f141cb666f6199f57\
+             bc3495335a256a95bd2a55bf546663f6",
+            "dfc9425e4f968f7f0c29f0259cf5f9ae\
+             d6851c2bb4ad8bfb860cfee0ab248292",
+            "f726936d19c800494e3fdaff20b276a8",
+            "666f6f",
+            "55a4cc2f70a54e04288c5f4cd1e45a7b\
+             b520b36292911876cada7323198dd87a\
+             8b36950b95130022907a7fb7c4e9b2d5\
+             f6cca685a587b4b21f4b888e4e7edb0d",
+        ),
+        (
+            "0305334e381af78f141cb666f6199f57\
+             bc3495335a256a95bd2a55bf546663f6",
+            "dfc9425e4f968f7f0c29f0259cf5f9ae\
+             d6851c2bb4ad8bfb860cfee0ab248292",
+            "f726936d19c800494e3fdaff20b276a8",
+            "626172",
+            "fc60d5872fc46b3aa69f8b5b4351d580\
+             8f92bcc044606db097abab6dbcb1aee3\
+             216c48e8b3b66431b5b186d1d28f8ee1\
+             5a5ca2df6668346291c2043d4eb3e90d",
+        ),
+        (
+            "0305334e381af78f141cb666f6199f57\
+             bc3495335a256a95bd2a55bf546663f6",
+            "dfc9425e4f968f7f0c29f0259cf5f9ae\
+             d6851c2bb4ad8bfb860cfee0ab248292",
+            "508e9e6882b979fea900f62adceaca35",
+            "666f6f",
+            "8b70c1cc8310e1de20ac53ce28ae6e72\
+             07f33c3295e03bb5c0732a1d20dc6490\
+             8922a8b052cf99b7c4fe107a5abb5b2c\
+             4085ae75890d02df26269d8945f84b0b",
+        ),
+        (
+            "ab9c2853ce297ddab85c993b3ae14bca\
+             d39b2c682beabc27d6d4eb20711d6560",
+            "0f1d1274943b91415889152e893d80e9\
+             3275a1fc0b65fd71b4b0dda10ad7d772",
+            "f726936d19c800494e3fdaff20b276a8",
+            "666f6f",
+            "21655b5f1aa965996b3f97b3c849eafb\
+             a922a0a62992f73b3d1b73106a84ad85\
+             e9b86a7b6005ea868337ff2d20a7f5fb\
+             d4cd10b0be49a68da2b2e0dc0ad8960f",
+        ),
+    ];
+
+    #[test]
+    fn rfc8032_ctx_vectors() {
+        let mut message_buf = [0u8; 16];
+        let mut context_buf = [0u8; 3];
+        for (sk, pk, msg, ctx, sig) in CTX_VECTORS {
+            let secret = unhex32(sk);
+            let public = unhex32(pk);
+            let message = unhex(msg, &mut message_buf);
+            let context = unhex(ctx, &mut context_buf);
+            let expected = unhex64(sig);
+            assert_eq!(public_key(&secret), Ok(public));
+            assert_eq!(sign_ctx(&secret, context, message), Ok(expected));
+            assert_eq!(
+                verify_ctx(&public, context, message, &expected),
+                Ok(())
+            );
+        }
+    }
+
+    /// The RFC 8032 section 7.3 Ed25519ph vector, whose message is
+    /// "abc" and whose context is empty.
+    #[test]
+    fn rfc8032_ph_vector() {
+        let secret = unhex32(
+            "833fe62409237b9d62ec77587520911e\
+             9a759cec1d19755b7da901b96dca3d42",
+        );
+        let public = unhex32(
+            "ec172b93ad5e563bf4932c70e1245034\
+             c35467ef2efd4d64ebf819683467e2bf",
+        );
+        let expected = unhex64(
+            "98a70222f0b8121aa9d30f813d683f80\
+             9e462b469c7ff87639499bb94e6dae41\
+             31f85042463c2a355a2003d062adf5aa\
+             a10b8c61e636062aaad11c2a26083406",
+        );
+        let prehash = Sha512::digest(b"abc").unwrap();
+        assert_eq!(public_key(&secret), Ok(public));
+        assert_eq!(sign_ph(&secret, b"", &prehash), Ok(expected));
+        assert_eq!(verify_ph(&public, b"", &prehash, &expected), Ok(()));
+    }
+
+    /// Ed25519ctx takes 1 to 255 bytes of context and Ed25519ph 0 to
+    /// 255, signing and verifying alike; the refusal is the length.
+    #[test]
+    fn context_lengths() {
+        let secret = [0x5au8; KEY_SIZE];
+        let public = public_key(&secret).unwrap();
+        let prehash = [0x17u8; PREHASH_SIZE];
+        let long = [0x33u8; CONTEXT_MAX + 1];
+        let signature = [0u8; SIGNATURE_SIZE];
+
+        assert_eq!(sign_ctx(&secret, b"", b"m"), Err(Error::InvalidLength(0)));
+        assert_eq!(
+            verify_ctx(&public, b"", b"m", &signature),
+            Err(Error::InvalidLength(0))
+        );
+        assert_eq!(
+            sign_ctx(&secret, &long, b"m"),
+            Err(Error::InvalidLength(256))
+        );
+        assert_eq!(
+            sign_ph(&secret, &long, &prehash),
+            Err(Error::InvalidLength(256))
+        );
+        assert_eq!(
+            verify_ph(&public, &long, &prehash, &signature),
+            Err(Error::InvalidLength(256))
+        );
+
+        for context in [&long[..1], &long[..CONTEXT_MAX]] {
+            let signature = sign_ctx(&secret, context, b"m").unwrap();
+            assert_eq!(verify_ctx(&public, context, b"m", &signature), Ok(()));
+        }
+        for context in [&long[..0], &long[..CONTEXT_MAX]] {
+            let signature = sign_ph(&secret, context, &prehash).unwrap();
+            assert_eq!(
+                verify_ph(&public, context, &prehash, &signature),
+                Ok(())
+            );
+        }
+    }
+
+    /// No variant accepts another's signature over the same bytes,
+    /// and no context accepts another's: the domain prefix is in both
+    /// hashes, so each is a different signature.
+    #[test]
+    fn variants_and_contexts_are_separate() {
+        let secret = [0x61u8; KEY_SIZE];
+        let public = public_key(&secret).unwrap();
+        let bytes = [0x2cu8; PREHASH_SIZE];
+
+        let plain = sign(&secret, &bytes).unwrap();
+        let ctx = sign_ctx(&secret, b"foo", &bytes).unwrap();
+        let ph_empty = sign_ph(&secret, b"", &bytes).unwrap();
+        let ph_foo = sign_ph(&secret, b"foo", &bytes).unwrap();
+
+        let bad = Err(Error::InvalidSignature);
+        assert_eq!(verify_ctx(&public, b"foo", &bytes, &plain), bad);
+        assert_eq!(verify_ph(&public, b"", &bytes, &plain), bad);
+        assert_eq!(verify(&public, &bytes, &ctx), bad);
+        assert_eq!(verify_ctx(&public, b"bar", &bytes, &ctx), bad);
+        assert_eq!(verify_ph(&public, b"foo", &bytes, &ctx), bad);
+        assert_eq!(verify(&public, &bytes, &ph_empty), bad);
+        assert_eq!(verify_ph(&public, b"foo", &bytes, &ph_empty), bad);
+        assert_eq!(verify_ctx(&public, b"foo", &bytes, &ph_foo), bad);
+
+        // Ed25519ph signs the digest it is given, not a hash of it.
+        let hashed = Sha512::digest(&bytes).unwrap();
+        assert_eq!(verify_ph(&public, b"", &hashed, &ph_empty), bad);
+    }
+
+    /// The key types' variants are the free functions with the public
+    /// key already derived.
+    #[test]
+    fn key_types_match_the_variant_functions() {
+        let seed = [0x4eu8; KEY_SIZE];
+        let key = PrivateKey::try_new(&Key::from(seed)).unwrap();
+        let prehash = [0x09u8; PREHASH_SIZE];
+
+        let ctx = key.sign_ctx(b"use", b"message").unwrap();
+        assert_eq!(sign_ctx(&seed, b"use", b"message"), Ok(ctx));
+        assert_eq!(
+            key.public_key().verify_ctx(b"use", b"message", &ctx),
+            Ok(())
+        );
+        assert_eq!(key.sign_ctx(b"", b"message"), Err(Error::InvalidLength(0)));
+
+        let ph = key.sign_ph(b"use", &prehash).unwrap();
+        assert_eq!(sign_ph(&seed, b"use", &prehash), Ok(ph));
+        assert_eq!(key.public_key().verify_ph(b"use", &prehash, &ph), Ok(()));
+        assert_eq!(
+            key.public_key().verify_ph(b"other", &prehash, &ph),
+            Err(Error::InvalidSignature)
+        );
     }
 
     #[test]
