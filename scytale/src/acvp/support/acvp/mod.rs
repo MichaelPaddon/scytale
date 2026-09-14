@@ -21,6 +21,7 @@ pub mod aes_kwp;
 pub mod aes_ofb;
 pub mod aes_xpn;
 pub mod aes_xts;
+pub mod cmac_aes;
 pub mod ctr_drbg;
 pub mod ecdsa;
 pub mod eddsa;

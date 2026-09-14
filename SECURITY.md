@@ -65,6 +65,7 @@ excluded.
 | SHA-1, SHA-2, SHA-3, SHAKE | all backends | no data-dependent control flow; hashing a secret leaks only its length |
 | HMAC, HKDF, PBKDF2 | over the hashes | as the hash; `Mac::verify` compares with `constant_time::equal` |
 | CTR, CBC, CFB, OFB, XTS | over the cipher | as the cipher; CBC has no padding, so no padding oracle |
+| CMAC | over the cipher | as the cipher; subkey doubling masks rather than branches; `Mac::verify` compares with `constant_time::equal` |
 | KW, KWP | over the cipher | the integrity check value is compared with `constant_time::equal` |
 | GCM, GCM-SIV, XPN, CCM, ChaCha20-Poly1305 | over the above | tag compared whole with `constant_time::equal`; plaintext never released on failure |
 | CTR_DRBG | AES-256 | as AES; the state is a `Key` |

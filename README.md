@@ -123,7 +123,7 @@ The API documentation is on [docs.rs](https://docs.rs/scytale), and
 test vectors, against the NIST Automated Cryptographic Validation
 Program (ACVP) vectors, and against Project Wycheproof, whose cases
 are chosen to break implementations rather than to exercise them.
-The corpus is 110 files holding 82,835 cases, and every case this
+The corpus is 111 files holding 83,591 cases, and every case this
 build can run is run; the Monte Carlo groups chain a thousand cipher
 calls per case, with the key re-derived at each step. Every
 implementation is put through the whole vector set for its primitive,
@@ -171,7 +171,7 @@ the machinery behind it:
 | `aead` | authenticated encryption | GCM, GCM-SIV, XPN, CCM, ChaCha20-Poly1305 |
 | `cipher` | encryption | AES, ChaCha20, and the modes built on them |
 | `hash` | digests | SHA-2, SHA-3, SHAKE; SHA-1 for what still names it |
-| `mac` | message authentication | HMAC, Poly1305 |
+| `mac` | message authentication | HMAC, CMAC, Poly1305 |
 | `kdf` | key derivation | HKDF, PBKDF2 |
 | `kem` | key encapsulation | ML-KEM-512, -768 and -1024 |
 | `kex` | key agreement | X25519, ECDH over P-256 and P-384 |
@@ -268,6 +268,7 @@ define them.
 | Construction | Notes |
 | --- | --- |
 | HMAC (FIPS 198-1) | over any hash; constant-time verify |
+| CMAC (SP 800-38B) | over any block cipher; constant-time verify |
 | Poly1305 (RFC 8439) | one-time key; for the AEAD |
 
 ### Key derivation

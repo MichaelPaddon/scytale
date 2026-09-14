@@ -25,8 +25,9 @@ use support::acvp::{
     aes_cfb128 as cfb128, aes_ctr as ctr, aes_ecb as ecb, aes_ff1 as ff1,
     aes_ff3_1 as ff3_1, aes_gcm as gcm, aes_gcm_siv as gcm_siv,
     aes_gmac as gmac, aes_kw as kw, aes_kwp as kwp, aes_ofb as ofb,
-    aes_xpn as xpn, aes_xts as xts, ctr_drbg as drbg, hmac as hmac_vectors,
-    pbkdf as pbkdf_vectors, sha as sha_vectors, shake as shake_vectors,
+    aes_xpn as xpn, aes_xts as xts, cmac_aes as cmac, ctr_drbg as drbg,
+    hmac as hmac_vectors, pbkdf as pbkdf_vectors, sha as sha_vectors,
+    shake as shake_vectors,
 };
 
 /// Defines the suites for an implementation that is always
@@ -388,6 +389,12 @@ mod aes_kw {
 /// from one byte up. This suite has no Monte Carlo test.
 mod aes_kwp {
     modes!(kwp, aft_only);
+}
+
+/// CMAC over AES (SP 800-38B), the MAC built from the cipher. This
+/// suite has no Monte Carlo test.
+mod cmac_aes {
+    modes!(cmac, aft_only);
 }
 
 /// The CTR_DRBG random number generator (SP 800-90A). Not generic

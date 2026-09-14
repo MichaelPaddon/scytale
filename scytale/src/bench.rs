@@ -90,6 +90,7 @@ use crate::hash::{sha2, sha3};
 use crate::kdf::{hkdf, pbkdf2};
 use crate::kex::{ecdh, x25519};
 use crate::mac::Mac;
+use crate::mac::cmac::Cmac;
 use crate::mac::hmac::Hmac;
 use crate::mac::poly1305::Poly1305;
 use crate::pke::rsa as oaep;
@@ -1590,7 +1591,7 @@ fn fpe_ops(options: &Options) -> bool {
 /// they name so that a filter can be applied before any key is
 /// expanded, which is what lets an unsupported implementation be
 /// skipped silently.
-const ALGORITHMS: [&str; 22] = [
+const ALGORITHMS: [&str; 23] = [
     "aes-128-ecb-enc",
     "aes-128-ecb-dec",
     "aes-256-ecb-enc",
@@ -1613,6 +1614,7 @@ const ALGORITHMS: [&str; 22] = [
     "aes-128-xts-dec",
     "aes-128-kw-wrap",
     "aes-128-kwp-wrap",
+    "aes-128-cmac",
 ];
 
 /// Everything an implementation's rows are built from, held together
@@ -1638,6 +1640,7 @@ struct Keys<
     xts: Option<Xts<A>>,
     kw: Kw<A>,
     kwp: Kwp<A>,
+    cmac: Cmac<A>,
     /// Room for a wrapped key, one buffer for each of the two rows
     /// that writes one: the largest input and the eight bytes of
     /// check value that go on the end of it.
@@ -1710,6 +1713,7 @@ where
             ),
             kw: Kw::new(&k128),
             kwp: Kwp::new(&k128),
+            cmac: Cmac::new(&k128),
             wrapped: [
                 vec![0u8; SIZES[SIZES.len() - 1] + 8],
                 vec![0u8; SIZES[SIZES.len() - 1] + 8],
@@ -1740,6 +1744,7 @@ where
             xts,
             kw,
             kwp,
+            cmac,
             wrapped,
             tags,
         } = self;
@@ -1912,6 +1917,13 @@ where
             "aes-128-kwp-wrap",
             Box::new(|d: &mut [u8]| {
                 let _ = kwp.wrap(d, &mut kwp_out[..d.len() + 8]);
+            }),
+        ));
+        tasks.push((
+            "aes-128-cmac",
+            Box::new(|d: &mut [u8]| {
+                cmac.update(d);
+                black_box(cmac.finalize());
             }),
         ));
         tasks
