@@ -77,6 +77,10 @@ const ROTATIONS: [u32; LANES] = [
 ];
 
 /// Applies Keccak-f\[1600\] to `a`.
+///
+/// Inlined always, so that the x86-64 build for BMI compiles it
+/// afresh with those instructions allowed.
+#[inline(always)]
 pub(crate) fn keccak_f1600(a: &mut [u64; LANES]) {
     for &rc in &ROUND_CONSTANTS {
         // Theta: each lane takes the parity of two columns.
@@ -125,6 +129,10 @@ impl Permutation for Keccak {
     }
 
     fn permute(self, state: &mut [u64; LANES]) {
+        #[cfg(target_arch = "x86_64")]
+        if super::x86_64::permute(state) {
+            return;
+        }
         keccak_f1600(state)
     }
 }

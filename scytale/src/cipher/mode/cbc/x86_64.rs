@@ -115,6 +115,37 @@ impl<C: BlockCipher> Engine<C> {
         }
     }
 
+    /// Folds `data`, a whole number of blocks, into a CBC-MAC chain:
+    /// encryption that keeps only the last block, so nothing is
+    /// written back. Returns whether it ran, which it does wherever
+    /// the engine was built for this cipher.
+    pub(crate) fn mac(
+        &self,
+        cipher: &C,
+        chain: &mut [u8; BLOCK],
+        data: &[u8],
+    ) -> bool {
+        debug_assert_eq!(data.len() % BLOCK, 0);
+        let Some(schedule) = (self.keys)(cipher, false) else {
+            return false;
+        };
+        if data.len() >= BLOCK {
+            // SAFETY: the instructions were confirmed when the mode
+            // was built, the schedule holds `rounds + 1` round keys,
+            // and `data` is a whole number of blocks, at least one.
+            unsafe {
+                mac_chain(
+                    schedule.keys(),
+                    schedule.rounds(),
+                    chain.as_mut_ptr(),
+                    data.as_ptr(),
+                    data.len() / BLOCK,
+                );
+            }
+        }
+        true
+    }
+
     /// Decrypts `data`, a whole number of blocks, chaining from
     /// `chain` and leaving the last block of ciphertext there.
     pub(crate) fn decrypt(
@@ -212,6 +243,76 @@ fn ask_vaes() -> bool {
     xcr0 & 0b110 == 0b110
 }
 
+// A chain waits on every round of the block before it, so its
+// latency is the whole cost. AESENCLAST ends by XORing in its round
+// key, and the next thing that happens to the chain is two more
+// XORs, the next block and the first round key; all three are folded
+// into one key made off the chain's path, so between blocks the chain
+// waits for the rounds and nothing else.
+
+/// Folds a run of blocks into a CBC-MAC chain, keeping the chain in
+/// its register throughout and storing only the last.
+///
+/// # Safety
+/// Requires AES-NI and AVX; `rk` must point at `rounds + 1` round
+/// keys, `chain` at a block, and `data` at `blocks` blocks, with
+/// `blocks >= 1`.
+unsafe fn mac_chain(
+    rk: *const u32,
+    rounds: usize,
+    chain: *mut u8,
+    data: *const u8,
+    blocks: usize,
+) {
+    unsafe {
+        core::arch::asm!(
+            "vmovdqu xmm2, [{rk}]",
+            "vpxor xmm4, xmm2, [{last}]",
+            "vmovdqu xmm0, [{chain}]",
+            "vpxor xmm0, xmm0, xmm2",
+            "vpxor xmm0, xmm0, [{data}]",
+            "dec {blocks}",
+            "jz 4f",
+            "3:",
+            "add {data}, 16",
+            "lea {k}, [{rk} + 16]",
+            "mov {n}, {nr}",
+            "2:",
+            "vaesenc xmm0, xmm0, [{k}]",
+            "add {k}, 16",
+            "dec {n}",
+            "jnz 2b",
+            "vpxor xmm3, xmm4, [{data}]",
+            "vaesenclast xmm0, xmm0, xmm3",
+            "dec {blocks}",
+            "jnz 3b",
+            "4:",
+            "lea {k}, [{rk} + 16]",
+            "mov {n}, {nr}",
+            "5:",
+            "vaesenc xmm0, xmm0, [{k}]",
+            "add {k}, 16",
+            "dec {n}",
+            "jnz 5b",
+            "vaesenclast xmm0, xmm0, [{last}]",
+            "vmovdqu [{chain}], xmm0",
+            rk = in(reg) rk,
+            last = in(reg) rk.add(4 * rounds),
+            nr = in(reg) rounds - 1,
+            chain = in(reg) chain,
+            data = inout(reg) data => _,
+            blocks = inout(reg) blocks => _,
+            k = out(reg) _,
+            n = out(reg) _,
+            out("xmm0") _,
+            out("xmm2") _,
+            out("xmm3") _,
+            out("xmm4") _,
+            options(nostack),
+        );
+    }
+}
+
 /// Encrypts a whole message, one block at a time, since each waits on
 /// the one before it.
 ///
@@ -228,10 +329,14 @@ unsafe fn encrypt_chain(
 ) {
     unsafe {
         core::arch::asm!(
+            "vmovdqu xmm2, [{rk}]",
+            "vmovdqu xmm4, [{last}]",
             "vmovdqu xmm0, [{chain}]",
-            "3:",
+            "vpxor xmm0, xmm0, xmm2",
             "vpxor xmm0, xmm0, [{data}]",
-            "vpxor xmm0, xmm0, [{rk}]",
+            "dec {blocks}",
+            "jz 4f",
+            "3:",
             "lea {k}, [{rk} + 16]",
             "mov {n}, {nr}",
             "2:",
@@ -239,13 +344,31 @@ unsafe fn encrypt_chain(
             "add {k}, 16",
             "dec {n}",
             "jnz 2b",
-            "vaesenclast xmm0, xmm0, [{k}]",
-            "vmovdqu [{data}], xmm0",
+            // The next block with the first round key, and that with
+            // the last round key on top, which is what the last
+            // round takes. The ciphertext of this block is what
+            // comes out less the first of those, and is stored aside.
+            "vpxor xmm1, xmm2, [{data} + 16]",
+            "vpxor xmm3, xmm1, xmm4",
+            "vaesenclast xmm0, xmm0, xmm3",
+            "vpxor xmm5, xmm0, xmm1",
+            "vmovdqu [{data}], xmm5",
             "add {data}, 16",
             "dec {blocks}",
             "jnz 3b",
+            "4:",
+            "lea {k}, [{rk} + 16]",
+            "mov {n}, {nr}",
+            "5:",
+            "vaesenc xmm0, xmm0, [{k}]",
+            "add {k}, 16",
+            "dec {n}",
+            "jnz 5b",
+            "vaesenclast xmm0, xmm0, xmm4",
+            "vmovdqu [{data}], xmm0",
             "vmovdqu [{chain}], xmm0",
             rk = in(reg) rk,
+            last = in(reg) rk.add(4 * rounds),
             nr = in(reg) rounds - 1,
             chain = in(reg) chain,
             data = inout(reg) data => _,
@@ -253,6 +376,11 @@ unsafe fn encrypt_chain(
             k = out(reg) _,
             n = out(reg) _,
             out("xmm0") _,
+            out("xmm1") _,
+            out("xmm2") _,
+            out("xmm3") _,
+            out("xmm4") _,
+            out("xmm5") _,
             options(nostack),
         );
     }

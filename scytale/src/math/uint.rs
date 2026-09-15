@@ -120,7 +120,9 @@ impl<const LIMBS: usize> Uint<LIMBS> {
         }
     }
 
-    /// `2 * self mod n`, for a value already below `n`.
+    /// `2 * self mod n`, for a value already below `n`. Only the tests
+    /// double at run time; the contexts do it when the crate is built.
+    #[cfg(test)]
     pub(crate) fn double_mod(&self, n: &Self) -> Self {
         self.add_mod(self, n)
     }

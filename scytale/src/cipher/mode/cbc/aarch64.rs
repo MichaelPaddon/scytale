@@ -100,6 +100,37 @@ impl<C: BlockCipher> Engine<C> {
         }
     }
 
+    /// Folds `data`, a whole number of blocks, into a CBC-MAC chain:
+    /// encryption that keeps only the last block, so nothing is
+    /// written back. Returns whether it ran, which it does wherever
+    /// the engine was built for this cipher.
+    pub(crate) fn mac(
+        &self,
+        cipher: &C,
+        chain: &mut [u8; BLOCK],
+        data: &[u8],
+    ) -> bool {
+        debug_assert_eq!(data.len() % BLOCK, 0);
+        let Some(schedule) = (self.keys)(cipher, false) else {
+            return false;
+        };
+        if data.len() >= BLOCK {
+            // SAFETY: the instructions were confirmed when the mode
+            // was built, the schedule holds `rounds + 1` round keys,
+            // and `data` is a whole number of blocks, at least one.
+            unsafe {
+                mac_chain(
+                    schedule.keys(),
+                    schedule.rounds(),
+                    chain.as_mut_ptr(),
+                    data.as_ptr(),
+                    data.len() / BLOCK,
+                );
+            }
+        }
+        true
+    }
+
     /// Decrypts `data`, a whole number of blocks, chaining from
     /// `chain` and leaving the last block of ciphertext there.
     pub(crate) fn decrypt(
@@ -143,6 +174,54 @@ impl<C: BlockCipher> Engine<C> {
                 );
             }
         }
+    }
+}
+
+/// Folds a run of blocks into a CBC-MAC chain, keeping the chain in
+/// its register throughout and storing only the last.
+///
+/// # Safety
+/// Requires the AES instructions; `rk` must point at `rounds + 1`
+/// round keys, `chain` at a block, and `data` at `blocks` blocks,
+/// with `blocks >= 1`.
+#[target_feature(enable = "aes")]
+unsafe fn mac_chain(
+    rk: *const u32,
+    rounds: usize,
+    chain: *mut u8,
+    data: *const u8,
+    blocks: usize,
+) {
+    unsafe {
+        core::arch::asm!(
+            "ld1 {{v0.16b}}, [{chain}]",
+            "3:",
+            "ld1 {{v1.16b}}, [{data}], #16",
+            "eor v0.16b, v0.16b, v1.16b",
+            "mov {k}, {rk}",
+            "mov {n}, {nr}",
+            "2:",
+            "ld1 {{v2.16b}}, [{k}], #16",
+            "aese v0.16b, v2.16b",
+            "aesmc v0.16b, v0.16b",
+            "subs {n}, {n}, #1",
+            "b.ne 2b",
+            "ld1 {{v2.16b, v3.16b}}, [{k}]",
+            "aese v0.16b, v2.16b",
+            "eor v0.16b, v0.16b, v3.16b",
+            "subs {blocks}, {blocks}, #1",
+            "b.ne 3b",
+            "st1 {{v0.16b}}, [{chain}]",
+            rk = in(reg) rk,
+            nr = in(reg) rounds - 1,
+            chain = in(reg) chain,
+            data = inout(reg) data => _,
+            blocks = inout(reg) blocks => _,
+            k = out(reg) _,
+            n = out(reg) _,
+            out("v0") _, out("v1") _, out("v2") _, out("v3") _,
+            options(nostack),
+        );
     }
 }
 

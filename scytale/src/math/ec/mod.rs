@@ -57,6 +57,10 @@ pub(crate) struct Curve<const L: usize> {
     gy: Uint<L>,
     /// The comb table of multiples of `G`, described in [`base`].
     base: &'static [[[u64; L]; 2]],
+    /// Montgomery contexts for `p` and `n`, made when the crate is
+    /// built rather than for every operation.
+    field: Montgomery<L>,
+    order: Montgomery<L>,
     pub(crate) oid: &'static [u8],
 }
 
@@ -96,17 +100,23 @@ pub(crate) const fn width<const L: usize>() -> usize {
     8 * L
 }
 
+/// The P-256 field prime.
+const P256_P: Uint<4> = from_hex(
+    "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff",
+);
+
+/// The P-256 group order.
+const P256_N: Uint<4> = from_hex(
+    "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
+);
+
 /// P-256, secp256r1, prime256v1: FIPS 186-5 and SEC 2.
 pub(crate) const P256: Curve<4> = Curve {
-    p: from_hex(
-        "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff",
-    ),
+    p: P256_P,
     b: from_hex(
         "5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b",
     ),
-    n: from_hex(
-        "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
-    ),
+    n: P256_N,
     gx: from_hex(
         "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296",
     ),
@@ -114,24 +124,32 @@ pub(crate) const P256: Curve<4> = Curve {
         "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
     ),
     base: &base::P256_BASE,
+    field: Montgomery::known(P256_P),
+    order: Montgomery::known(P256_N),
     // 1.2.840.10045.3.1.7
     oid: &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07],
 };
 
+/// The P-384 field prime.
+const P384_P: Uint<6> = from_hex(
+    "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe\
+     ffffffff0000000000000000ffffffff",
+);
+
+/// The P-384 group order.
+const P384_N: Uint<6> = from_hex(
+    "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf\
+     581a0db248b0a77aecec196accc52973",
+);
+
 /// P-384, secp384r1.
 pub(crate) const P384: Curve<6> = Curve {
-    p: from_hex(
-        "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe\
-         ffffffff0000000000000000ffffffff",
-    ),
+    p: P384_P,
     b: from_hex(
         "b3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875a\
          c656398d8a2ed19d2a85c8edd3ec2aef",
     ),
-    n: from_hex(
-        "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf\
-         581a0db248b0a77aecec196accc52973",
-    ),
+    n: P384_N,
     gx: from_hex(
         "aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a38\
          5502f25dbf55296c3a545e3872760ab7",
@@ -141,6 +159,8 @@ pub(crate) const P384: Curve<6> = Curve {
          0a60b1ce1d7e819d7a431d7c90ea0e5f",
     ),
     base: &base::P384_BASE,
+    field: Montgomery::known(P384_P),
+    order: Montgomery::known(P384_N),
     // 1.3.132.0.34
     oid: &[0x2b, 0x81, 0x04, 0x00, 0x22],
 };
@@ -169,32 +189,22 @@ impl<const L: usize> Point<L> {
 
 /// Arithmetic ready for one curve: both moduli in Montgomery form,
 /// and the constants the formulas need already in the field's
-/// domain. Built afresh for each operation; the setup is a few
-/// hundred limb additions.
+/// domain. Built for each operation, from contexts the curve
+/// constants already hold: two Montgomery products and nothing else.
 pub(crate) struct Engine<'a, const L: usize> {
     curve: &'a Curve<L>,
-    field: Montgomery<L>,
-    order: Montgomery<L>,
+    field: &'a Montgomery<L>,
+    order: &'a Montgomery<L>,
     /// `b`, in the domain.
     b: Uint<L>,
     /// One, in the domain: `R mod p`.
     one: Uint<L>,
 }
 
-/// A Montgomery context for a curve modulus.
-fn context<const L: usize>(n: &Uint<L>) -> Montgomery<L> {
-    match Montgomery::new(*n) {
-        Some(m) => m,
-        // Both moduli of both curves are odd primes, so this is a
-        // constant of the crate, not a condition.
-        None => unreachable!("curve moduli are odd"),
-    }
-}
-
 impl<'a, const L: usize> Engine<'a, L> {
     pub(crate) fn new(curve: &'a Curve<L>) -> Self {
-        let field = context(&curve.p);
-        let order = context(&curve.n);
+        let field = &curve.field;
+        let order = &curve.order;
         let one = field.to_mont(&Uint::one());
         let b = field.to_mont(&curve.b);
         Engine {

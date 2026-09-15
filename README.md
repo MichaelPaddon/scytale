@@ -407,12 +407,13 @@ is dropped.
 | riscv64 | vector GHASH (Zvkg) | GHASH |
 | riscv64 | vector carry-less multiply (Zvbc) | GHASH |
 | riscv64 | scalar carry-less multiply (Zbc, Zbkc) | GHASH |
-| x86-64 | SHA-NI | SHA-256 |
+| x86-64 | SHA-NI | SHA-256, SHA-1 |
 | aarch64 | ARMv8 SHA2 extension | SHA-256 |
 | aarch64 | ARMv8 SHA512 extension | SHA-512 |
 | riscv64 | vector cryptography (Zvknha, Zvknhb) | SHA-256, SHA-512 |
 | riscv64 | scalar cryptography (Zknh) | SHA-256, SHA-512 |
 | aarch64 | ARMv8 SHA3 extension | SHA-3, SHAKE, cSHAKE, KMAC |
+| x86-64 | BMI1 and BMI2 | SHA-3, SHAKE, cSHAKE, KMAC |
 | x86-64 | AVX2 | ChaCha20 |
 | aarch64 | NEON | ChaCha20 |
 | riscv64 | vector extension with Zvkb | ChaCha20 |
@@ -433,8 +434,11 @@ multiply instruction it costs more than the cipher does. SHA-224 and
 SHA-384 and the SHA-512/t pair use the SHA-256 and SHA-512 code, so
 whatever accelerates those accelerates them. x86-64 has no SHA-512
 instruction in common use, so SHA-512 is portable there. Every SHA-3,
-SHAKE and cSHAKE function, and KMAC, is the one Keccak permutation, which only AArch64
-has instructions for; elsewhere it is portable. ChaCha20 needs no
+SHAKE and cSHAKE function, and KMAC, is the one Keccak permutation,
+which only AArch64 has instructions for. On x86-64 the portable
+permutation is compiled a second time for BMI1 and BMI2, whose
+`andn` and `rorx` are chi and rho in fewer instructions; elsewhere it
+is portable. ChaCha20 needs no
 special instructions, only a vector unit: several blocks are computed
 at once, eight with AVX2, four with NEON, and as many as a register
 holds on RISC-V. Poly1305 is portable everywhere.

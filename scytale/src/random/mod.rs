@@ -205,6 +205,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::cipher::OneBlock;
 use crate::cipher::aes::{Aes256, BLOCK_SIZE};
+use crate::cipher::mode::Ctr;
 use crate::{Error, Key, Random};
 
 /// AES-256: the key length the generator uses, in bytes.
@@ -447,17 +448,32 @@ impl<S: Entropy> CtrDrbg<S> {
             self.update(extra)?;
         }
         let extra = extra.unwrap_or(&[0u8; SEED]);
-        let aes = Aes256::new(&self.key);
-        for chunk in out.chunks_mut(BLOCK_SIZE) {
+        // The output is the counter mode keystream from V + 1, so the
+        // whole blocks go to the mode's bulk engine rather than a
+        // block at a time. The counter it runs on is a local copy,
+        // wiped here, and the last partial block is made by hand so
+        // that the keystream past the end is wiped too.
+        let ctr = Ctr::<Aes256>::new(&self.key);
+        let (whole, tail) =
+            out.split_at_mut(out.len() / BLOCK_SIZE * BLOCK_SIZE);
+        if !whole.is_empty() {
+            whole.fill(0);
+            let mut start = self.v;
+            increment(&mut start);
+            ctr.apply_blocks(&mut start, whole);
+            start.zeroize();
+            advance(&mut self.v, (whole.len() / BLOCK_SIZE) as u64);
+        }
+        if !tail.is_empty() {
             increment(&mut self.v);
             let mut block = self.v;
-            aes.encrypt_one(&mut block);
-            chunk.copy_from_slice(&block[..chunk.len()]);
+            ctr.cipher().encrypt_one(&mut block);
+            tail.copy_from_slice(&block[..tail.len()]);
             block.zeroize();
         }
         // Moves the generator past what was just handed out, so that
         // nothing already given away can be worked forward again.
-        self.update(extra)?;
+        self.update_under(ctr.cipher(), extra);
         self.counter += 1;
         Ok(())
     }
@@ -539,6 +555,13 @@ impl<S: Entropy> CtrDrbg<S> {
     /// in as it goes.
     fn update(&mut self, provided: &[u8; SEED]) -> Result<(), Error> {
         let aes = Aes256::new(&self.key);
+        self.update_under(&aes, provided);
+        Ok(())
+    }
+
+    /// The update under a cipher already keyed with the current key,
+    /// so that a request does not schedule the same key twice.
+    fn update_under(&mut self, aes: &Aes256, provided: &[u8; SEED]) {
         let mut temp = [0u8; SEED];
         for (chunk, extra) in
             temp.chunks_mut(BLOCK_SIZE).zip(provided.chunks(BLOCK_SIZE))
@@ -554,7 +577,6 @@ impl<S: Entropy> CtrDrbg<S> {
         self.key.as_mut().copy_from_slice(&temp[..KEY]);
         self.v.copy_from_slice(&temp[KEY..]);
         temp.zeroize();
-        Ok(())
     }
 }
 
@@ -641,13 +663,14 @@ impl<S: Entropy> fmt::Debug for CtrDrbg<S> {
 
 /// Adds one to a counter block, as a single big-endian number.
 fn increment(v: &mut [u8; BLOCK_SIZE]) {
-    for byte in v.iter_mut().rev() {
-        let (sum, carried) = byte.overflowing_add(1);
-        *byte = sum;
-        if !carried {
-            break;
-        }
-    }
+    advance(v, 1);
+}
+
+/// Adds `n` to a counter block, as a single big-endian number.
+fn advance(v: &mut [u8; BLOCK_SIZE], n: u64) {
+    *v = u128::from_be_bytes(*v)
+        .wrapping_add(u128::from(n))
+        .to_be_bytes();
 }
 
 /// The SP 800-90A block cipher derivation function: condenses
@@ -771,6 +794,7 @@ impl<'a> Chain<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::vec;
 
     /// A seed of the least acceptable length, filled with something
     /// that is not all one byte.
@@ -1134,6 +1158,72 @@ mod tests {
         increment(&mut v);
         assert_eq!(v[BLOCK_SIZE - 2], 1);
         assert_eq!(v[BLOCK_SIZE - 1], 0);
+    }
+
+    /// The output is AES-256 of V + 1, V + 2, ... a block at a time,
+    /// whichever path makes it: the bulk engine for whole blocks, one
+    /// block by hand for a partial last one. Checked against that
+    /// definition at lengths either side of block boundaries, and
+    /// with V placed just below a carry out of its low 32 bits, where
+    /// the engine's run has to stop and carry into the rest.
+    #[test]
+    fn output_is_the_counter_keystream() {
+        let lengths = [1, 15, 16, 17, 47, 48, 64, 100, 1024, 4099];
+        let starts = [[0u8; BLOCK_SIZE], {
+            let mut v = [0x5au8; BLOCK_SIZE];
+            v[BLOCK_SIZE - 4..].copy_from_slice(&[0xff, 0xff, 0xff, 0xfd]);
+            v
+        }];
+        for start in starts {
+            for &len in &lengths {
+                let mut rng = CtrDrbg::from_seed(&seed()).expect("seed");
+                rng.v = start;
+                let aes = Aes256::new(&rng.key);
+                let mut expected = vec![0u8; len];
+                let mut v = start;
+                for chunk in expected.chunks_mut(BLOCK_SIZE) {
+                    increment(&mut v);
+                    let mut block = v;
+                    aes.encrypt_one(&mut block);
+                    chunk.copy_from_slice(&block[..chunk.len()]);
+                }
+                let mut out = vec![0xeeu8; len];
+                rng.fill(&mut out).expect("fill");
+                assert_eq!(out, expected, "{len} bytes from {start:02x?}");
+            }
+        }
+    }
+
+    /// A request that ends inside a block spends that whole block, so
+    /// a shorter request leaves the generator exactly where one
+    /// rounded up to the block would.
+    #[test]
+    fn a_partial_block_spends_the_block() {
+        let mut short = CtrDrbg::from_seed(&seed()).expect("seed");
+        let mut long = CtrDrbg::from_seed(&seed()).expect("seed");
+        let mut a = [0u8; 37];
+        let mut b = [0u8; 48];
+        short.fill(&mut a).expect("fill");
+        long.fill(&mut b).expect("fill");
+        assert_eq!(a[..], b[..37]);
+        let mut a = [0u8; 64];
+        let mut b = [0u8; 64];
+        short.fill(&mut a).expect("fill");
+        long.fill(&mut b).expect("fill");
+        assert_eq!(a, b);
+    }
+
+    /// Adding a block count carries across the whole block, as the
+    /// counter does.
+    #[test]
+    fn the_counter_advances_by_many() {
+        let mut v = [0u8; BLOCK_SIZE];
+        v[BLOCK_SIZE - 8..].copy_from_slice(&[0xff; 8]);
+        advance(&mut v, 2);
+        let mut expected = [0u8; BLOCK_SIZE];
+        expected[BLOCK_SIZE - 9] = 1;
+        expected[BLOCK_SIZE - 1] = 1;
+        assert_eq!(v, expected);
     }
 
     /// The trait has to be usable with a source of one's own, since

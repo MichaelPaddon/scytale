@@ -31,14 +31,16 @@
 //!
 //! The chain is serial: each block waits for the one before it, so
 //! the cipher runs one block at a time however many the processor
-//! could take at once. The rounds are still the processor's own
-//! instructions where it has them.
+//! could take at once. Runs of whole blocks go to the loop CBC
+//! encryption has written out for the processor, which keeps the
+//! chain in a register and pays for no call per block.
 
 use core::fmt;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::Mac;
+use crate::cipher::mode::cbc::MacEngine;
 use crate::cipher::mode::xor;
 use crate::cipher::{BlockCipher, OneBlock};
 use crate::{Error, KeyType};
@@ -58,6 +60,8 @@ const R: u8 = 0x87;
 #[derive(Clone)]
 pub struct Cmac<C: BlockCipher<Block = [u8; BLOCK]>> {
     cipher: C,
+    /// The chaining loop for runs of whole blocks.
+    engine: MacEngine<C>,
     /// Masks a last block that is whole.
     k1: [u8; BLOCK],
     /// Masks a last block that had to be padded.
@@ -74,6 +78,20 @@ pub struct Cmac<C: BlockCipher<Block = [u8; BLOCK]>> {
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Cmac<C> {
     /// Starts a MAC under `key`.
     pub fn new(key: &C::Key) -> Self {
+        Self::with_engine(key, MacEngine::new())
+    }
+
+    /// The MAC over the chaining loop `implementation` names, or
+    /// `None` where this processor or cipher has no such thing.
+    #[cfg(test)]
+    pub(crate) fn with_implementation(
+        key: &C::Key,
+        implementation: crate::implementation::Implementation,
+    ) -> Option<Self> {
+        Some(Self::with_engine(key, MacEngine::with(implementation)?))
+    }
+
+    fn with_engine(key: &C::Key, engine: MacEngine<C>) -> Self {
         let cipher = C::new(key);
         let mut l = [0u8; BLOCK];
         cipher.encrypt_one(&mut l);
@@ -82,6 +100,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Cmac<C> {
         l.zeroize();
         Cmac {
             cipher,
+            engine,
             k1,
             k2,
             chain: [0u8; BLOCK],
@@ -163,11 +182,9 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Mac for Cmac<C> {
             0 => BLOCK,
             partial => partial,
         };
-        let (blocks, _) = data[..data.len() - keep].as_chunks::<BLOCK>();
-        for block in blocks {
-            self.fold(block);
-        }
-        self.block[..keep].copy_from_slice(&data[data.len() - keep..]);
+        let (blocks, last) = data.split_at(data.len() - keep);
+        self.engine.fold(&self.cipher, &mut self.chain, blocks);
+        self.block[..keep].copy_from_slice(last);
         self.used = keep;
     }
 
@@ -327,6 +344,54 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Every chaining loop this processor has gives the tag the
+    /// portable one does, at every key width, at lengths from nothing
+    /// to many blocks, in one piece and in two.
+    #[test]
+    fn the_engines_agree() {
+        use crate::cipher::mode::cbc::CHOICES;
+        use crate::implementation::Implementation;
+        let data: std::vec::Vec<u8> =
+            (0..1000u32).map(|i| (i * 7 + 3) as u8).collect();
+        fn each<C: BlockCipher<Block = [u8; BLOCK]>>(
+            key: &C::Key,
+            data: &[u8],
+        ) {
+            let mut engines = 0;
+            for &implementation in CHOICES {
+                let Some(mut mac) =
+                    Cmac::<C>::with_implementation(key, implementation)
+                else {
+                    continue;
+                };
+                engines += 1;
+                for len in [0, 1, 16, 17, 32, 48, 64, 200, 1000] {
+                    let mut reference = Cmac::<C>::with_implementation(
+                        key,
+                        Implementation::Portable,
+                    )
+                    .expect("portable");
+                    reference.update(&data[..len]);
+                    let expected = reference.finalize();
+                    mac.update(&data[..len]);
+                    assert_eq!(mac.finalize(), expected, "{len}");
+                    let half = len / 2;
+                    mac.update(&data[..half]);
+                    mac.update(&data[half..len]);
+                    assert_eq!(
+                        mac.finalize(),
+                        expected,
+                        "{len} in two, {implementation:?}"
+                    );
+                }
+            }
+            assert!(engines >= 1);
+        }
+        each::<Aes128>(&Key::from([3u8; 16]), &data);
+        each::<Aes192>(&Key::from([4u8; 24]), &data);
+        each::<Aes256>(&Key::from([5u8; 32]), &data);
     }
 
     /// A wrong tag and a short one are both refused.

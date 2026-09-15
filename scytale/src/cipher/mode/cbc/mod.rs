@@ -123,6 +123,50 @@ impl<C: BlockCipher> Engine<C> {
     }
 }
 
+/// The chaining engine on its own, for a MAC built on CBC: CMAC, and
+/// CCM's authentication half. It holds no key, so a construction
+/// that already has the cipher keyed for something else pays for no
+/// second schedule.
+pub(crate) struct MacEngine<C: BlockCipher>(Engine<C>);
+
+/// By hand for the same reason as the engine itself.
+impl<C: BlockCipher> Clone for MacEngine<C> {
+    fn clone(&self) -> Self {
+        MacEngine(self.0.clone())
+    }
+}
+
+impl<C: BlockCipher<Block = [u8; 16]>> MacEngine<C> {
+    /// The best engine for this cipher on this processor.
+    pub(crate) fn new() -> Self {
+        MacEngine(Engine::new())
+    }
+
+    /// The engine `implementation` names, or `None` where this
+    /// processor or this cipher has no such thing.
+    #[cfg(test)]
+    pub(crate) fn with(implementation: Implementation) -> Option<Self> {
+        Engine::with(implementation).map(MacEngine)
+    }
+
+    /// Folds `data`, which must be whole blocks, into `chain`: each
+    /// block is XORed in and the result encrypted under `cipher`.
+    pub(crate) fn fold(&self, cipher: &C, chain: &mut [u8; 16], data: &[u8]) {
+        debug_assert_eq!(data.len() % 16, 0);
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        if let Engine::Native(engine) = &self.0
+            && engine.mac(cipher, chain, data)
+        {
+            return;
+        }
+        let (blocks, _) = data.as_chunks::<16>();
+        for block in blocks {
+            xor(chain, block);
+            cipher.encrypt_one(chain);
+        }
+    }
+}
+
 /// The key is the cipher's own, so generic code can draw one
 /// without naming the cipher.
 impl<C: BlockCipher> KeyType for Cbc<C> {

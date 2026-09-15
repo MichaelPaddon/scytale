@@ -56,15 +56,18 @@
 //! state one permutation per rate of bytes. AArch64 processors with
 //! the SHA3 extension have instructions for the permutation's steps,
 //! and are two to three times the portable speed. Nothing else has
-//! such instructions; x86-64 and RISC-V run the portable code, which
-//! on a 64-bit processor is a little slower than SHA-256 with no
-//! hardware and much slower than SHA-256 with it.
+//! such instructions. x86-64 runs the portable permutation compiled
+//! a second time for BMI1 and BMI2, about a fifth faster, and RISC-V
+//! the portable code as it is; either is a little slower than SHA-256
+//! with no hardware and much slower than SHA-256 with it.
 
 #[cfg(target_arch = "aarch64")]
 pub(crate) mod aarch64;
 pub(crate) mod cshake;
 pub(crate) mod engine;
 pub(crate) mod portable;
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
 
 use core::fmt;
 

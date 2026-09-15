@@ -132,24 +132,31 @@ impl Fe {
         let wide = |x: u64, y: u64| u128::from(x) * u128::from(y);
         // Schoolbook product. A limb carried past 2^255 is worth 19
         // times its face value, which folds the high half back in.
+        // The 19 goes onto the limbs first, in 64 bits: a limb below
+        // 2^54 times 19 is below 2^59, and multiplying the wide sums
+        // by it afterwards would cost a 128-bit product each.
+        let b19 = [b[1] * 19, b[2] * 19, b[3] * 19, b[4] * 19];
         let t = [
             wide(a[0], b[0])
-                + 19 * (wide(a[1], b[4])
-                    + wide(a[2], b[3])
-                    + wide(a[3], b[2])
-                    + wide(a[4], b[1])),
+                + wide(a[1], b19[3])
+                + wide(a[2], b19[2])
+                + wide(a[3], b19[1])
+                + wide(a[4], b19[0]),
             wide(a[0], b[1])
                 + wide(a[1], b[0])
-                + 19 * (wide(a[2], b[4]) + wide(a[3], b[3]) + wide(a[4], b[2])),
+                + wide(a[2], b19[3])
+                + wide(a[3], b19[2])
+                + wide(a[4], b19[1]),
             wide(a[0], b[2])
                 + wide(a[1], b[1])
                 + wide(a[2], b[0])
-                + 19 * (wide(a[3], b[4]) + wide(a[4], b[3])),
+                + wide(a[3], b19[3])
+                + wide(a[4], b19[2]),
             wide(a[0], b[3])
                 + wide(a[1], b[2])
                 + wide(a[2], b[1])
                 + wide(a[3], b[0])
-                + 19 * wide(a[4], b[4]),
+                + wide(a[4], b19[3]),
             wide(a[0], b[4])
                 + wide(a[1], b[3])
                 + wide(a[2], b[2])
@@ -171,7 +178,26 @@ impl Fe {
     }
 
     pub(crate) fn square(&self) -> Fe {
-        self.mul(self)
+        let a = self.0;
+        let wide = |x: u64, y: u64| u128::from(x) * u128::from(y);
+        // The product with itself has every cross term twice, so
+        // fifteen products do the work of twenty-five. Doubled and
+        // multiplied by 19 in 64 bits first, as in `mul`: 38 times a
+        // limb below 2^54 is below 2^60.
+        let d0 = 2 * a[0];
+        let d1 = 2 * a[1];
+        let d2 = 38 * a[2];
+        let a3_19 = 19 * a[3];
+        let a4_19 = 19 * a[4];
+        let d4 = 2 * a4_19;
+        let t = [
+            wide(a[0], a[0]) + wide(d4, a[1]) + wide(d2, a[3]),
+            wide(d0, a[1]) + wide(d4, a[2]) + wide(a[3], a3_19),
+            wide(d0, a[2]) + wide(a[1], a[1]) + wide(d4, a[3]),
+            wide(d0, a[3]) + wide(d1, a[2]) + wide(a[4], a4_19),
+            wide(d0, a[4]) + wide(d1, a[3]) + wide(a[2], a[2]),
+        ];
+        Fe::reduce(t)
     }
 
     /// One carry pass over wide limbs, folding the top carry back
@@ -289,6 +315,20 @@ mod tests {
         }
         wrapped[31] = 0x7f;
         assert_eq!(Fe::from_bytes(&wrapped).to_bytes(), Fe::ONE.to_bytes());
+    }
+
+    /// The squaring agrees with the product of an element with
+    /// itself, on reduced elements and on limbs grown to the bound the
+    /// type allows.
+    #[test]
+    fn square_is_mul_by_self() {
+        let mut x = Fe::from_bytes(&[0x5a; 32]);
+        for _ in 0..50 {
+            assert_eq!(x.square().to_bytes(), x.mul(&x).to_bytes());
+            x = x.mul(&Fe::from_bytes(&[0xc3; 32])).add(&Fe::ONE);
+        }
+        let grown = Fe([(1 << 54) - 1; 5]);
+        assert_eq!(grown.square().to_bytes(), grown.mul(&grown).to_bytes());
     }
 
     #[test]

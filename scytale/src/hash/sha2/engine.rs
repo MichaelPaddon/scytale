@@ -115,6 +115,11 @@ macro_rules! engine {
             /// Bytes of a block not yet complete.
             block: [u8; $block],
             used: usize,
+            /// How far into `block` anything of a message may have
+            /// been written since it was last wiped, so that a reset
+            /// wipes that much and no more: wiping is a store per
+            /// byte, and whole blocks never touch the buffer.
+            dirty: usize,
             /// Whole bytes taken so far. Wraps rather than fails at
             /// the length the padding cannot express, which no real
             /// message reaches.
@@ -146,6 +151,7 @@ macro_rules! engine {
                     state,
                     block: [0; $block],
                     used: 0,
+                    dirty: 0,
                     bytes: 0,
                     compress,
                     _marker: PhantomData,
@@ -162,8 +168,10 @@ macro_rules! engine {
             /// then folds the last block or two in.
             fn pad(&mut self, trailer: u8, extra: $length) {
                 let length_field = 2 * core::mem::size_of::<$word>();
+                // The trailer can carry the last bits of the message.
                 self.block[self.used] = trailer;
                 self.used += 1;
+                self.dirty = self.dirty.max(self.used);
                 if self.used > $block - length_field {
                     self.block[self.used..].fill(0);
                     let block = self.block;
@@ -176,6 +184,9 @@ macro_rules! engine {
                     .copy_from_slice(&bits.to_be_bytes());
                 let block = self.block;
                 self.compress(&[block]);
+                // The length is not message, but it says something
+                // about one, and these few stores are cheap.
+                self.block[$block - length_field..].zeroize();
             }
 
             /// The digest: the state as big-endian bytes, cut to the
@@ -202,6 +213,7 @@ macro_rules! engine {
                     state: self.state,
                     block: self.block,
                     used: self.used,
+                    dirty: self.dirty,
                     bytes: self.bytes,
                     compress: self.compress,
                     _marker: PhantomData,
@@ -226,8 +238,9 @@ macro_rules! engine {
 
             fn reset(&mut self) {
                 self.state = V::IV;
-                self.block.zeroize();
+                self.block[..self.dirty].zeroize();
                 self.used = 0;
+                self.dirty = 0;
                 self.bytes = 0;
             }
 
@@ -239,6 +252,7 @@ macro_rules! engine {
                     self.block[self.used..self.used + take]
                         .copy_from_slice(&data[..take]);
                     self.used += take;
+                    self.dirty = self.dirty.max(self.used);
                     data = &data[take..];
                     if self.used < $block {
                         return;
@@ -251,6 +265,7 @@ macro_rules! engine {
                 self.compress(blocks);
                 self.block[..rest.len()].copy_from_slice(rest);
                 self.used = rest.len();
+                self.dirty = self.dirty.max(self.used);
             }
 
             fn finalize(&mut self) -> Self::Output {
@@ -280,8 +295,11 @@ macro_rules! engine {
             /// of it.
             fn drop(&mut self) {
                 self.state.zeroize();
-                self.block.zeroize();
+                // Past `dirty` the buffer holds nothing of a message: it was
+                // wiped, or never written.
+                self.block[..self.dirty].zeroize();
                 self.used.zeroize();
+                self.dirty.zeroize();
                 self.bytes.zeroize();
             }
         }
@@ -321,6 +339,41 @@ mod tests {
         assert_eq!(trailer(0xff, 7), Ok(0xff));
         assert_eq!(trailer(0x00, 3), Ok(0x10));
         assert_eq!(trailer(0xa5, 4), Ok(0xa8));
+    }
+
+    /// Nothing of a message is left in the buffer after a reset or a
+    /// finalize, however the message arrived, at both widths.
+    #[test]
+    fn nothing_is_left_behind() {
+        use crate::hash::sha2::portable::Compress;
+        use crate::hash::sha2::variant::{Sha256, Sha512};
+        let data: [u8; 300] = core::array::from_fn(|i| (i as u8) | 1);
+        for len in [1usize, 5, 55, 56, 64, 111, 112, 127, 128, 129, 300] {
+            let mut narrow = Engine32::<Compress, Sha256>::with(Compress);
+            let mut wide = Engine64::<Compress, Sha512>::with(Compress);
+            for chunk in data[..len].chunks(37) {
+                narrow.update(chunk);
+                wide.update(chunk);
+            }
+            narrow.finalize();
+            wide.finalize();
+            assert_eq!(narrow.block, [0u8; 64], "finalize after {len}");
+            assert_eq!(wide.block, [0u8; 128], "finalize after {len}");
+            for chunk in data[..len].chunks(7) {
+                narrow.update(chunk);
+                wide.update(chunk);
+            }
+            narrow.reset();
+            wide.reset();
+            assert_eq!(narrow.block, [0u8; 64], "reset after {len}");
+            assert_eq!(wide.block, [0u8; 128], "reset after {len}");
+            narrow.update(&data[..len]);
+            wide.update(&data[..len]);
+            narrow.finalize_bits(0xff, 3).expect("bits");
+            wide.finalize_bits(0xff, 3).expect("bits");
+            assert_eq!(narrow.block, [0u8; 64], "bits after {len}");
+            assert_eq!(wide.block, [0u8; 128], "bits after {len}");
+        }
     }
 
     #[test]

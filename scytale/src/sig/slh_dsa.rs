@@ -213,6 +213,14 @@ impl Adrs {
 // functions. Each writes `n` bytes, or `m` for the message digest.
 
 trait Family {
+    /// The public seed made ready for `PRF`, `F`, `H` and `T_l`: what
+    /// the family can do with it once for a key rather than again for
+    /// every call, which is thousands of calls for one signature.
+    type Seeded;
+
+    /// Prepares `pk_seed` for the parameter set `p`.
+    fn seed(p: &Params, pk_seed: &[u8]) -> Result<Self::Seeded, Error>;
+
     /// `H_msg`.
     fn h_msg(
         p: &Params,
@@ -226,7 +234,7 @@ trait Family {
     /// `PRF`.
     fn prf(
         p: &Params,
-        pk_seed: &[u8],
+        seeded: &Self::Seeded,
         sk_seed: &[u8],
         adrs: &Adrs,
         out: &mut [u8],
@@ -244,7 +252,7 @@ trait Family {
     /// `F`, over one node.
     fn f(
         p: &Params,
-        pk_seed: &[u8],
+        seeded: &Self::Seeded,
         adrs: &Adrs,
         m1: &[u8],
         out: &mut [u8],
@@ -254,7 +262,7 @@ trait Family {
     /// function at different lengths.
     fn t(
         p: &Params,
-        pk_seed: &[u8],
+        seeded: &Self::Seeded,
         adrs: &Adrs,
         parts: &[&[u8]],
         out: &mut [u8],
@@ -273,7 +281,22 @@ fn shake(parts: &[&[u8]], out: &mut [u8]) -> Result<(), Error> {
     Ok(())
 }
 
+/// The public seed as SHAKE takes it: as it is, since it shares its
+/// block with everything after it and there is nothing to save.
+struct ShakeSeed {
+    seed: Node,
+    n: usize,
+}
+
 impl Family for Shake {
+    type Seeded = ShakeSeed;
+
+    fn seed(p: &Params, pk_seed: &[u8]) -> Result<ShakeSeed, Error> {
+        let mut seed = Node::default();
+        seed[..p.n].copy_from_slice(pk_seed);
+        Ok(ShakeSeed { seed, n: p.n })
+    }
+
     fn h_msg(
         _: &Params,
         r: &[u8],
@@ -295,11 +318,12 @@ impl Family for Shake {
 
     fn prf(
         _: &Params,
-        pk_seed: &[u8],
+        seeded: &ShakeSeed,
         sk_seed: &[u8],
         adrs: &Adrs,
         out: &mut [u8],
     ) -> Result<(), Error> {
+        let pk_seed = &seeded.seed[..seeded.n];
         shake(&[pk_seed, &adrs.0, sk_seed], out)
     }
 
@@ -322,23 +346,23 @@ impl Family for Shake {
 
     fn f(
         _: &Params,
-        pk_seed: &[u8],
+        seeded: &ShakeSeed,
         adrs: &Adrs,
         m1: &[u8],
         out: &mut [u8],
     ) -> Result<(), Error> {
-        shake(&[pk_seed, &adrs.0, m1], out)
+        shake(&[&seeded.seed[..seeded.n], &adrs.0, m1], out)
     }
 
     fn t(
         _: &Params,
-        pk_seed: &[u8],
+        seeded: &ShakeSeed,
         adrs: &Adrs,
         parts: &[&[u8]],
         out: &mut [u8],
     ) -> Result<(), Error> {
         let mut xof = Shake256::try_new()?;
-        xof.update(pk_seed);
+        xof.update(&seeded.seed[..seeded.n]);
         xof.update(&adrs.0);
         for part in parts {
             xof.update(part);
@@ -354,17 +378,24 @@ impl Family for Shake {
 /// can be shared, and the address compressed to 22 bytes.
 struct Sha2;
 
-/// `Trunc_n` of a hash over the parts, the seed padded to `block`.
-fn sha2_tweaked<H: Hash>(
-    block: usize,
-    pk_seed: &[u8],
+/// A hash that has taken the public seed padded to its block, so the
+/// seed's compression is done once for a key.
+fn sha2_seeded<H: Hash>(block: usize, pk_seed: &[u8]) -> Result<H, Error> {
+    let mut hash = H::try_new()?;
+    hash.update(pk_seed);
+    hash.update(&[0u8; 128][..block - pk_seed.len()]);
+    Ok(hash)
+}
+
+/// `Trunc_n` of a hash over the parts, from `seeded`, which has taken
+/// the padded seed already.
+fn sha2_tweaked<H: Hash + Clone>(
+    seeded: &H,
     adrs: &Adrs,
     parts: &[&[u8]],
     out: &mut [u8],
 ) -> Result<(), Error> {
-    let mut hash = H::try_new()?;
-    hash.update(pk_seed);
-    hash.update(&[0u8; 128][..block - pk_seed.len()]);
+    let mut hash = seeded.clone();
     hash.update(&adrs.compressed());
     for part in parts {
         hash.update(part);
@@ -426,7 +457,29 @@ fn sha2_prf_msg<H: Hash + Clone + BlockType>(
     Ok(())
 }
 
+/// The public seed as the SHA2 family takes it: a SHA-256 that has
+/// compressed its block, and at the wider sets a SHA-512 that has
+/// compressed its own.
+struct Sha2Seed {
+    narrow: Sha256,
+    wide: Option<Sha512>,
+}
+
 impl Family for Sha2 {
+    type Seeded = Sha2Seed;
+
+    fn seed(p: &Params, pk_seed: &[u8]) -> Result<Sha2Seed, Error> {
+        let wide = if p.n == 16 {
+            None
+        } else {
+            Some(sha2_seeded::<Sha512>(128, pk_seed)?)
+        };
+        Ok(Sha2Seed {
+            narrow: sha2_seeded::<Sha256>(64, pk_seed)?,
+            wide,
+        })
+    }
+
     fn h_msg(
         p: &Params,
         r: &[u8],
@@ -444,12 +497,12 @@ impl Family for Sha2 {
 
     fn prf(
         _: &Params,
-        pk_seed: &[u8],
+        seeded: &Sha2Seed,
         sk_seed: &[u8],
         adrs: &Adrs,
         out: &mut [u8],
     ) -> Result<(), Error> {
-        sha2_tweaked::<Sha256>(64, pk_seed, adrs, &[sk_seed], out)
+        sha2_tweaked(&seeded.narrow, adrs, &[sk_seed], out)
     }
 
     fn prf_msg(
@@ -468,25 +521,25 @@ impl Family for Sha2 {
 
     fn f(
         _: &Params,
-        pk_seed: &[u8],
+        seeded: &Sha2Seed,
         adrs: &Adrs,
         m1: &[u8],
         out: &mut [u8],
     ) -> Result<(), Error> {
-        sha2_tweaked::<Sha256>(64, pk_seed, adrs, &[m1], out)
+        sha2_tweaked(&seeded.narrow, adrs, &[m1], out)
     }
 
     fn t(
-        p: &Params,
-        pk_seed: &[u8],
+        _: &Params,
+        seeded: &Sha2Seed,
         adrs: &Adrs,
         parts: &[&[u8]],
         out: &mut [u8],
     ) -> Result<(), Error> {
-        if p.n == 16 {
-            sha2_tweaked::<Sha256>(64, pk_seed, adrs, parts, out)
-        } else {
-            sha2_tweaked::<Sha512>(128, pk_seed, adrs, parts, out)
+        // The wider hash exists exactly at the sets that call for it.
+        match &seeded.wide {
+            Some(wide) => sha2_tweaked(wide, adrs, parts, out),
+            None => sha2_tweaked(&seeded.narrow, adrs, parts, out),
         }
     }
 }
@@ -516,8 +569,7 @@ fn base_2b(x: &[u8], b: usize, out: &mut [u32]) {
 /// The public seed and the parameters, which every step needs.
 struct Ctx<'a, F: Family> {
     p: &'a Params,
-    pk_seed: &'a [u8],
-    family: core::marker::PhantomData<F>,
+    seeded: F::Seeded,
 }
 
 impl<F: Family> Ctx<'_, F> {
@@ -540,7 +592,7 @@ impl<F: Family> Ctx<'_, F> {
         for j in start..start + steps {
             adrs.set_hash(j);
             let mut next = Node::default();
-            F::f(self.p, self.pk_seed, adrs, &tmp[..n], &mut next[..n])?;
+            F::f(self.p, &self.seeded, adrs, &tmp[..n], &mut next[..n])?;
             tmp = next;
         }
         out.copy_from_slice(&tmp[..n]);
@@ -559,7 +611,7 @@ impl<F: Family> Ctx<'_, F> {
         sk_adrs.set_type(WOTS_PRF);
         sk_adrs.set_key_pair(adrs.key_pair());
         sk_adrs.set_chain(i);
-        F::prf(self.p, self.pk_seed, sk_seed, &sk_adrs, out)
+        F::prf(self.p, &self.seeded, sk_seed, &sk_adrs, out)
     }
 
     /// The message's WOTS+ digits with their checksum, `len` of them.
@@ -610,7 +662,7 @@ impl<F: Family> Ctx<'_, F> {
         for (part, node) in parts.iter_mut().zip(nodes) {
             *part = &node[..n];
         }
-        F::t(self.p, self.pk_seed, adrs, &parts[..nodes.len()], out)
+        F::t(self.p, &self.seeded, adrs, &parts[..nodes.len()], out)
     }
 
     /// `wots_sign`, `len` nodes into `sig`.
@@ -691,7 +743,7 @@ impl<F: Family> Ctx<'_, F> {
         adrs.set_type(TREE);
         adrs.set_chain(z);
         adrs.set_hash(i);
-        F::t(self.p, self.pk_seed, adrs, &[&left[..n], &right[..n]], out)
+        F::t(self.p, &self.seeded, adrs, &[&left[..n], &right[..n]], out)
     }
 
     /// `xmss_sign`: the WOTS+ signature and the authentication path,
@@ -741,7 +793,7 @@ impl<F: Family> Ctx<'_, F> {
                 adrs.set_hash(adrs.hash() / 2);
                 F::t(
                     self.p,
-                    self.pk_seed,
+                    &self.seeded,
                     adrs,
                     &[&node[..n], auth],
                     &mut next[..n],
@@ -750,7 +802,7 @@ impl<F: Family> Ctx<'_, F> {
                 adrs.set_hash((adrs.hash() - 1) / 2);
                 F::t(
                     self.p,
-                    self.pk_seed,
+                    &self.seeded,
                     adrs,
                     &[auth, &node[..n]],
                     &mut next[..n],
@@ -847,7 +899,7 @@ impl<F: Family> Ctx<'_, F> {
         sk_adrs.set_type(FORS_PRF);
         sk_adrs.set_key_pair(adrs.key_pair());
         sk_adrs.set_hash(idx);
-        F::prf(self.p, self.pk_seed, sk_seed, &sk_adrs, out)
+        F::prf(self.p, &self.seeded, sk_seed, &sk_adrs, out)
     }
 
     /// `fors_node`.
@@ -865,7 +917,7 @@ impl<F: Family> Ctx<'_, F> {
             self.fors_secret(sk_seed, adrs, i, &mut sk[..n])?;
             adrs.set_chain(0);
             adrs.set_hash(i);
-            let result = F::f(self.p, self.pk_seed, adrs, &sk[..n], out);
+            let result = F::f(self.p, &self.seeded, adrs, &sk[..n], out);
             sk.zeroize();
             return result;
         }
@@ -875,7 +927,7 @@ impl<F: Family> Ctx<'_, F> {
         self.fors_node(sk_seed, 2 * i + 1, z - 1, adrs, &mut right[..n])?;
         adrs.set_chain(z);
         adrs.set_hash(i);
-        F::t(self.p, self.pk_seed, adrs, &[&left[..n], &right[..n]], out)
+        F::t(self.p, &self.seeded, adrs, &[&left[..n], &right[..n]], out)
     }
 
     /// `fors_sign`: for each of the `k` trees, the leaf secret and
@@ -923,7 +975,7 @@ impl<F: Family> Ctx<'_, F> {
             adrs.set_chain(0);
             adrs.set_hash((i << p.a) as u32 + indices[i]);
             let mut node = Node::default();
-            F::f(p, self.pk_seed, adrs, &tree[..n], &mut node[..n])?;
+            F::f(p, &self.seeded, adrs, &tree[..n], &mut node[..n])?;
             for j in 0..p.a {
                 let auth = &tree[n * (1 + j)..n * (2 + j)];
                 adrs.set_chain(j as u32 + 1);
@@ -932,7 +984,7 @@ impl<F: Family> Ctx<'_, F> {
                     adrs.set_hash(adrs.hash() / 2);
                     F::t(
                         p,
-                        self.pk_seed,
+                        &self.seeded,
                         adrs,
                         &[&node[..n], auth],
                         &mut next[..n],
@@ -941,7 +993,7 @@ impl<F: Family> Ctx<'_, F> {
                     adrs.set_hash((adrs.hash() - 1) / 2);
                     F::t(
                         p,
-                        self.pk_seed,
+                        &self.seeded,
                         adrs,
                         &[auth, &node[..n]],
                         &mut next[..n],
@@ -973,8 +1025,7 @@ fn key_gen<F: Family>(
     let (secret, root) = sk.split_at_mut(3 * n);
     let ctx = Ctx::<F> {
         p,
-        pk_seed: &secret[2 * n..],
-        family: core::marker::PhantomData,
+        seeded: F::seed(p, &secret[2 * n..])?,
     };
     let mut adrs = Adrs::ZERO;
     adrs.set_layer(p.d as u32 - 1);
@@ -1016,8 +1067,7 @@ fn sign<F: Family>(
         (&sk[..n], &sk[n..2 * n], &sk[2 * n..3 * n], &sk[3 * n..]);
     let ctx = Ctx::<F> {
         p,
-        pk_seed,
-        family: core::marker::PhantomData,
+        seeded: F::seed(p, pk_seed)?,
     };
     let (r, rest) = sig.split_at_mut(n);
     F::prf_msg(p, sk_prf, opt_rand, message, r)?;
@@ -1049,8 +1099,7 @@ fn verify<F: Family>(
     let (pk_seed, pk_root) = pk.split_at(n);
     let ctx = Ctx::<F> {
         p,
-        pk_seed,
-        family: core::marker::PhantomData,
+        seeded: F::seed(p, pk_seed)?,
     };
     let r = &sig[..n];
     let mut digest = [0u8; 49];

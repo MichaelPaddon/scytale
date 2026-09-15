@@ -259,6 +259,15 @@ where
         &self.cipher
     }
 
+    /// Applies the keystream to `data`, which must be whole blocks,
+    /// starting from `counter` and leaving it at the block after the
+    /// last. For a caller whose counter is secret, such as the random
+    /// generator: the counter stays in memory the caller owns and
+    /// wipes, where a [`Stream`] would keep a copy of its own.
+    pub(crate) fn apply_blocks(&self, counter: &mut C::Block, data: &mut [u8]) {
+        run_blocks(&self.cipher, &self.engine, counter, data);
+    }
+
     /// Starts a message that arrives in pieces.
     pub fn stream(&self, counter: &C::Block) -> Stream<'_, C> {
         Stream {
@@ -317,6 +326,34 @@ fn carry_out_of_low32<B: ByteArray>(counter: &mut B) {
     }
 }
 
+/// Applies the keystream to whole blocks, handed to the cipher in one
+/// run so that it can keep the counters in registers, and leaves
+/// `counter` at the block after the last. The engine counts in the
+/// last four bytes only, so a run stops where they would carry into
+/// the rest of the block; that is once every 2^32 blocks, or 64
+/// gigabytes.
+fn run_blocks<C: BlockCipher>(
+    cipher: &C,
+    engine: &Engine<C>,
+    counter: &mut C::Block,
+    data: &mut [u8],
+) where
+    C::Block: ByteArray,
+{
+    let size = size_of::<C::Block>();
+    debug_assert!(data.len().is_multiple_of(size));
+    let mut done = 0;
+    while done < data.len() {
+        let room = (u32::MAX - low32(counter.as_ref())) as usize + 1;
+        let take = (data.len() - done).min(room.saturating_mul(size));
+        engine.blocks(cipher, counter, &mut data[done..done + take]);
+        if take == room.saturating_mul(size) {
+            carry_out_of_low32(counter);
+        }
+        done += take;
+    }
+}
+
 /// Applies the keystream to one message, a piece at a time.
 ///
 /// Pieces may be any length, and a piece may end part way through a
@@ -357,21 +394,12 @@ where
         // into the rest of the block; that is once every 2^32
         // blocks, or 64 gigabytes.
         let (whole, tail) = <C::Block as ByteArray>::split_mut(data);
-        let mut done = 0;
-        while done < whole.len() {
-            let room = (u32::MAX - low32(self.counter.as_ref())) as usize + 1;
-            let take = (whole.len() - done).min(room);
-            let run = &mut whole[done..done + take];
-            self.engine.blocks(
-                self.cipher,
-                &mut self.counter,
-                <C::Block as ByteArray>::flatten_mut(run),
-            );
-            if take == room {
-                carry_out_of_low32(&mut self.counter);
-            }
-            done += take;
-        }
+        run_blocks(
+            self.cipher,
+            &self.engine,
+            &mut self.counter,
+            <C::Block as ByteArray>::flatten_mut(whole),
+        );
 
         // A final piece of a block, whose remainder is kept.
         if !tail.is_empty() {

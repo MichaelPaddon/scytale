@@ -19,8 +19,9 @@
 //! is the right choice for anything new; this module exists so the
 //! old form can be read.
 //!
-//! One implementation, portable, with no hardware path: the speed of
-//! a hash nothing should adopt is not worth pursuing.
+//! On x86-64 with SHA-NI the compression runs on those instructions;
+//! everywhere else it is portable. Legacy formats still verify with
+//! SHA-1 at volume, and the instructions are there to be used.
 //!
 //! ```
 //! use scytale::hash::sha1::Sha1;
@@ -32,6 +33,9 @@
 //! # Ok(())
 //! # }
 //! ```
+
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
 
 use core::fmt;
 
@@ -46,6 +50,11 @@ pub struct Sha1 {
     /// Bytes of a block not yet complete.
     block: [u8; 64],
     used: usize,
+    /// How far into `block` message bytes may have been written since
+    /// it was last wiped, so that a reset wipes that much and no more:
+    /// wiping is a store per byte, and a hash of whole blocks never
+    /// writes message into the buffer at all.
+    dirty: usize,
     /// Whole bytes taken so far; wraps at the length the padding
     /// cannot express, which no real message reaches.
     bytes: u64,
@@ -54,10 +63,20 @@ pub struct Sha1 {
 const IV: [u32; 5] =
     [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0];
 
+/// The compression function over whole blocks, on the processor's
+/// instructions where it has them.
+fn compress(state: &mut [u32; 5], blocks: &[[u8; 64]]) {
+    #[cfg(target_arch = "x86_64")]
+    if x86_64::compress(state, blocks) {
+        return;
+    }
+    portable(state, blocks);
+}
+
 /// The compression function, FIPS 180-4 section 6.1.2, over whole
 /// blocks. The message schedule is kept as a rolling window of
 /// sixteen words rather than eighty.
-fn compress(state: &mut [u32; 5], blocks: &[[u8; 64]]) {
+fn portable(state: &mut [u32; 5], blocks: &[[u8; 64]]) {
     for block in blocks {
         let mut w = [0u32; 16];
         for (word, chunk) in w.iter_mut().zip(block.chunks_exact(4)) {
@@ -111,6 +130,7 @@ impl Sha1 {
             state: IV,
             block: [0; 64],
             used: 0,
+            dirty: 0,
             bytes: 0,
         }
     }
@@ -119,8 +139,10 @@ impl Sha1 {
     /// message, plus `extra` bits beyond whole bytes, and folds the
     /// last block or two in.
     fn pad(&mut self, trailer: u8, extra: u64) {
+        // The trailer can carry the last bits of the message.
         self.block[self.used] = trailer;
         self.used += 1;
+        self.dirty = self.dirty.max(self.used);
         if self.used > 56 {
             self.block[self.used..].fill(0);
             let block = self.block;
@@ -132,6 +154,9 @@ impl Sha1 {
         self.block[56..].copy_from_slice(&bits.to_be_bytes());
         let block = self.block;
         compress(&mut self.state, &[block]);
+        // The length is not message, but it says something about one,
+        // and eight stores are cheap.
+        self.block[56..].zeroize();
     }
 
     fn output(&self) -> [u8; 20] {
@@ -155,6 +180,7 @@ impl Clone for Sha1 {
             state: self.state,
             block: self.block,
             used: self.used,
+            dirty: self.dirty,
             bytes: self.bytes,
         }
     }
@@ -177,8 +203,9 @@ impl Hash for Sha1 {
 
     fn reset(&mut self) {
         self.state = IV;
-        self.block.zeroize();
+        self.block[..self.dirty].zeroize();
         self.used = 0;
+        self.dirty = 0;
         self.bytes = 0;
     }
 
@@ -189,6 +216,7 @@ impl Hash for Sha1 {
             self.block[self.used..self.used + take]
                 .copy_from_slice(&data[..take]);
             self.used += take;
+            self.dirty = self.dirty.max(self.used);
             data = &data[take..];
             if self.used < 64 {
                 return;
@@ -201,6 +229,7 @@ impl Hash for Sha1 {
         compress(&mut self.state, blocks);
         self.block[..rest.len()].copy_from_slice(rest);
         self.used = rest.len();
+        self.dirty = self.dirty.max(self.used);
     }
 
     fn finalize(&mut self) -> Self::Output {
@@ -235,8 +264,11 @@ impl Drop for Sha1 {
     /// The buffer holds message, and the state is a function of it.
     fn drop(&mut self) {
         self.state.zeroize();
-        self.block.zeroize();
+        // Past `dirty` the buffer holds nothing of a message: it was
+        // wiped, or never written.
+        self.block[..self.dirty].zeroize();
         self.used.zeroize();
+        self.dirty.zeroize();
         self.bytes.zeroize();
     }
 }
@@ -305,6 +337,56 @@ mod tests {
                 }
                 assert_eq!(hash.finalize(), whole, "len {len} piece {piece}");
             }
+        }
+    }
+
+    /// The instructions give the state the portable compression does,
+    /// block by block and over runs of blocks, from states other
+    /// than the initial one.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn sha_ni_matches_portable() {
+        let mut blocks = [[0u8; 64]; 9];
+        for (i, block) in blocks.iter_mut().enumerate() {
+            for (j, byte) in block.iter_mut().enumerate() {
+                *byte = (i * 31 + j * 7 + 5) as u8;
+            }
+        }
+        let mut expected = IV;
+        let mut actual = IV;
+        for n in 1..=blocks.len() {
+            portable(&mut expected, &blocks[..n]);
+            if !x86_64::compress(&mut actual, &blocks[..n]) {
+                return;
+            }
+            assert_eq!(actual, expected, "{n} blocks");
+        }
+        assert!(x86_64::compress(&mut actual, &[]));
+        assert_eq!(actual, expected, "no blocks");
+    }
+
+    /// Nothing of a message is left in the buffer after a reset or a
+    /// finalize, however the message arrived: in pieces that stop
+    /// part way through a block, whole blocks that pass the buffer
+    /// by, or bits.
+    #[test]
+    fn nothing_is_left_behind() {
+        let data: [u8; 200] = core::array::from_fn(|i| (i as u8) | 1);
+        for len in [1usize, 5, 55, 56, 63, 64, 65, 130, 200] {
+            let mut hash = Sha1::new();
+            for chunk in data[..len].chunks(37) {
+                hash.update(chunk);
+            }
+            hash.finalize();
+            assert_eq!(hash.block, [0u8; 64], "finalize after {len}");
+            for chunk in data[..len].chunks(7) {
+                hash.update(chunk);
+            }
+            hash.reset();
+            assert_eq!(hash.block, [0u8; 64], "reset after {len}");
+            hash.update(&data[..len]);
+            hash.finalize_bits(0xff, 3).expect("bits");
+            assert_eq!(hash.block, [0u8; 64], "bits after {len}");
         }
     }
 

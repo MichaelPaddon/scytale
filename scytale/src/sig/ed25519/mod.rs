@@ -619,6 +619,33 @@ impl PublicKey {
     }
 }
 
+/// The u-coordinate of `k` times X25519's base point, with `k`
+/// already clamped: the comb over the Ed25519 base table, then the
+/// birational map `u = (1 + y) / (1 - y)` from the Edwards curve,
+/// whose base point is the same point. A fixed-base comb and one
+/// inversion cost much less than a ladder step for every bit, and
+/// both are free of branches and lookups on the secret.
+///
+/// Reducing `k` modulo the group order changes nothing, since the
+/// base point has that order; and a clamped `k` is a nonzero multiple
+/// of nothing smaller, so the point is never the identity and `1 - y`
+/// is never zero.
+pub(crate) fn montgomery_base(k: &[u8; 32]) -> [u8; 32] {
+    let mut scalar = Scalar::from_bytes_reduced(k);
+    let mut point = Point::mul_base(&scalar);
+    let u = point
+        .z
+        .add(&point.y)
+        .mul(&point.z.sub(&point.y).invert())
+        .to_bytes();
+    scalar.0.zeroize();
+    point.x.zeroize();
+    point.y.zeroize();
+    point.z.zeroize();
+    point.t.zeroize();
+    u
+}
+
 /// The secret scalar: the low half of the expanded secret, clamped
 /// as RFC 8032 section 5.1.5 requires, reduced into the group.
 ///

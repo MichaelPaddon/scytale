@@ -76,7 +76,7 @@ excluded.
 
 | Scheme | Secret-handling path | How |
 | --- | --- | --- |
-| X25519 | `kex/x25519.rs`, `math/fe25519.rs` | Montgomery ladder, swap by mask; 51-bit limb field arithmetic with no tables |
+| X25519 | `kex/x25519.rs`, `math/fe25519.rs` | Montgomery ladder, swap by mask; 51-bit limb field arithmetic with no tables; a public key is the Ed25519 base comb, table scanned whole, mapped to the Montgomery form by one inversion |
 | Ed25519 signing | `sig/ed25519.rs` | fixed ladder of doublings and additions, result by mask; same field |
 | Ed25519 verification | same routines | public data only, but no variable-time shortcut is taken either |
 | ECDH P-256, P-384 | `math/ec/`, `math/montgomery.rs` | complete projective formulas (Renes-Costello-Batina), so no special cases for doubling or the identity; scalar in fixed 4-bit windows; every table read scans the whole table; inversion and square roots by exponentiation |
@@ -86,10 +86,10 @@ excluded.
 | RSA CRT | `math/rsa.rs` | two `modexp` calls and Garner's recombination, all masked; every CRT signature is verified with the public exponent before release, so a fault in one half cannot leak a prime (Boneh-DeMillo-Lipton) |
 | RSA-OAEP decryption | `pke/rsa.rs` | unpadding reads every byte and gives one verdict, so nothing distinguishes a bad first byte from a bad hash (Manger) |
 | RSA import | `math/rsa.rs::fill_crt` | the primes are compared and multiplied with masked limb arithmetic; the branches taken are on the outcome (accept or reject), on the bit lengths, which the encoding reveals anyway, and on nothing else |
-| ML-KEM | `kem/ml_kem.rs` | coefficient arithmetic branch-free below the modulus, Barrett-style multiply-and-shift reductions, no division; decapsulation compares the ciphertext against the re-encryption with `constant_time::equal` and selects the shared secret by mask (implicit rejection) |
+| ML-KEM | `kem/ml_kem.rs` | coefficient arithmetic branch-free below the modulus, signed 16-bit Montgomery and Barrett multiply-and-shift reductions, no division; decapsulation compares the ciphertext against the re-encryption with `constant_time::equal` and selects the shared secret by mask (implicit rejection) |
 | ML-DSA signing | `sig/ml_dsa.rs` | rounding, hints and decomposition written as masks; within a rejection round no branch or index depends on a secret |
 | SLH-DSA | `sig/slh_dsa.rs` | a fixed schedule of hash calls; the only values steering control flow are the message digest's indices, which are recomputable from the signature and so public |
-| Montgomery setup | `Modulus::prepare`, `Montgomery::new` | the low-limb inverse by Newton iteration, `R^2` by fixed doubling with masked subtraction; no division on a secret modulus |
+| Montgomery setup | `Modulus::prepare`, `Montgomery::known` | the low-limb inverse by Newton iteration, `R^2` by fixed doubling with masked subtraction; no division on a secret modulus; the curve moduli are public and their contexts are made when the crate is built |
 
 ## Deliberately variable-time implementations
 

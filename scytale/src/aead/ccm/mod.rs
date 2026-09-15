@@ -28,8 +28,12 @@
 //! # Speed
 //!
 //! A CBC-MAC chains, so the tag is one block cipher call after
-//! another, however fast the processor is; the keystream runs in bulk
-//! as [`Ctr`] does. [`Gcm`](super::Gcm) is the faster of the two
+//! another, however fast the processor is. On x86-64 with the AES
+//! instructions the MAC and the keystream run as one loop, a
+//! keystream block beside each MAC block, so the processor overlaps
+//! them; elsewhere runs of whole blocks go to the chaining loop CBC
+//! encryption has written out, and the keystream runs in bulk as
+//! [`Ctr`] does. [`Gcm`](super::Gcm) is the faster of the two
 //! wherever there is a choice.
 //!
 //! # Using it safely
@@ -64,9 +68,13 @@
 //!
 //! [`Ctr`]: crate::cipher::mode::Ctr
 
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
+
 use core::fmt;
 
 use super::Aead;
+use crate::cipher::mode::cbc::MacEngine;
 use crate::cipher::mode::{Ctr, xor};
 use crate::cipher::{BlockCipher, OneBlock};
 use crate::constant_time;
@@ -91,8 +99,8 @@ const TAG: usize = BLOCK;
 
 /// Every implementation, best first.
 ///
-/// The keystream is the only part with more than one, so these are
-/// counter mode's.
+/// These are counter mode's; the MAC takes the chaining loop of the
+/// same name where CBC has one, and the portable chain where not.
 #[cfg(test)]
 pub(crate) const CHOICES: &[Implementation] = crate::cipher::mode::ctr::CHOICES;
 
@@ -101,6 +109,11 @@ pub(crate) const CHOICES: &[Implementation] = crate::cipher::mode::ctr::CHOICES;
 pub struct Ccm<C: BlockCipher<Block = [u8; BLOCK]>> {
     /// The keystream, and the cipher the MAC borrows from it.
     ctr: Ctr<C>,
+    /// The MAC's chaining loop, which needs no key of its own.
+    chain: MacEngine<C>,
+    /// Both halves as one loop, where the processor has one written.
+    #[cfg(target_arch = "x86_64")]
+    native: Option<x86_64::Engine<C>>,
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> fmt::Debug for Ccm<C> {
@@ -151,15 +164,20 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Aead for Ccm<C> {
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Ccm<C> {
     /// Takes the key the cipher runs under.
     pub fn new(key: &C::Key) -> Self {
-        Ccm { ctr: Ctr::new(key) }
+        Ccm {
+            ctr: Ctr::new(key),
+            chain: MacEngine::new(),
+            #[cfg(target_arch = "x86_64")]
+            native: best_native(),
+        }
     }
 
     /// The mode over the implementation `implementation` names, or
     /// `None` where this processor or this cipher has no such thing.
     ///
     /// For the tests, the vector suites and the benchmark. The
-    /// implementation is counter mode's, since that is the only part
-    /// with a choice to make.
+    /// implementation is counter mode's; the MAC runs the chaining
+    /// loop of that name, or the portable one where CBC has none.
     #[cfg(test)]
     pub(crate) fn with_implementation(
         key: &C::Key,
@@ -167,6 +185,10 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ccm<C> {
     ) -> Option<Self> {
         Some(Ccm {
             ctr: Ctr::with_implementation(key, implementation)?,
+            chain: MacEngine::with(implementation)
+                .or_else(|| MacEngine::with(Implementation::Portable))?,
+            #[cfg(target_arch = "x86_64")]
+            native: x86_64::Engine::of(implementation),
         })
     }
 
@@ -183,8 +205,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ccm<C> {
         tag: &mut [u8],
     ) -> Result<(), Error> {
         check(nonce, data.len(), tag.len())?;
-        let mac = self.mac(nonce, aad, data, tag.len());
-        let s0 = self.apply(nonce, data)?;
+        let (mac, s0) = self.crypt(nonce, aad, data, tag.len(), true)?;
         for (t, (m, s)) in tag.iter_mut().zip(mac.iter().zip(&s0)) {
             *t = m ^ s;
         }
@@ -205,9 +226,9 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ccm<C> {
     ) -> Result<(), Error> {
         check(nonce, data.len(), tag.len())?;
         // The MAC covers the plaintext, so the message is decrypted
-        // first and the tag checked over the result.
-        let s0 = self.apply(nonce, data)?;
-        let mut expected = self.mac(nonce, aad, data, tag.len());
+        // as the tag is taken and checked over the result.
+        let (mut expected, s0) =
+            self.crypt(nonce, aad, data, tag.len(), false)?;
         xor(&mut expected, &s0);
         if constant_time::equal(&expected[..tag.len()], tag) {
             Ok(())
@@ -217,13 +238,18 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ccm<C> {
         }
     }
 
-    /// Runs the keystream over `data` from counter one, and returns
-    /// counter zero encrypted, which masks the tag.
-    fn apply(
+    /// Runs the keystream over `data` from counter one and the MAC
+    /// over its plaintext, which is `data` before the keystream when
+    /// `encrypt` and after it otherwise. Returns the MAC, unmasked,
+    /// and counter zero encrypted, which masks it.
+    fn crypt(
         &self,
         nonce: &[u8],
+        aad: &[u8],
         data: &mut [u8],
-    ) -> Result<[u8; BLOCK], Error> {
+        tag_len: usize,
+        encrypt: bool,
+    ) -> Result<([u8; BLOCK], [u8; BLOCK]), Error> {
         let mut counter = [0u8; BLOCK];
         counter[0] = (14 - nonce.len()) as u8;
         counter[1..=nonce.len()].copy_from_slice(nonce);
@@ -232,19 +258,61 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ccm<C> {
         // `check` has bounded the message to the counter field, so
         // counting across the whole block never reaches the nonce.
         counter[BLOCK - 1] = 1;
-        self.ctr.encrypt(&counter, data)?;
-        Ok(s0)
+
+        let mut mac = self.header(nonce, aad, data.len(), tag_len);
+        let (whole, tail) = data.split_at_mut(data.len() / BLOCK * BLOCK);
+        if !self.interleaved(&mut mac.chain, &mut counter, whole, encrypt) {
+            if encrypt {
+                mac.update(whole);
+                self.ctr.apply_blocks(&mut counter, whole);
+            } else {
+                self.ctr.apply_blocks(&mut counter, whole);
+                mac.update(whole);
+            }
+        }
+        if encrypt {
+            mac.update(tail);
+            self.ctr.encrypt(&counter, tail)?;
+        } else {
+            self.ctr.encrypt(&counter, tail)?;
+            mac.update(tail);
+        }
+        mac.pad();
+        Ok((mac.chain, s0))
     }
 
-    /// The CBC-MAC over the lengths, the nonce, `aad` and the
-    /// plaintext, unmasked.
-    fn mac(
+    /// Both halves over whole blocks in one loop, where there is one;
+    /// returns whether it ran.
+    fn interleaved(
+        &self,
+        chain: &mut [u8; BLOCK],
+        counter: &mut [u8; BLOCK],
+        whole: &mut [u8],
+        encrypt: bool,
+    ) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        if let Some(native) = &self.native {
+            return native.run(
+                self.ctr.cipher(),
+                chain,
+                counter,
+                whole,
+                encrypt,
+            );
+        }
+        let _ = (chain, counter, whole, encrypt);
+        false
+    }
+
+    /// The CBC-MAC over the lengths, the nonce and `aad`, ready for
+    /// the plaintext.
+    fn header(
         &self,
         nonce: &[u8],
         aad: &[u8],
-        plaintext: &[u8],
+        length: usize,
         tag_len: usize,
-    ) -> [u8; BLOCK] {
+    ) -> Mac<'_, C> {
         let q = 15 - nonce.len();
         let mut b0 = [0u8; BLOCK];
         let adata = if aad.is_empty() { 0 } else { 0x40 };
@@ -252,10 +320,10 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ccm<C> {
         b0[1..=nonce.len()].copy_from_slice(nonce);
         // The length is at most q bytes wide, which `check` enforced;
         // the leading bytes of a u64 that do not fit are zero.
-        let length = (plaintext.len() as u64).to_be_bytes();
+        let length = (length as u64).to_be_bytes();
         b0[BLOCK - q..].copy_from_slice(&length[8 - q.min(8)..]);
 
-        let mut mac = Mac::new(self.ctr.cipher());
+        let mut mac = Mac::new(self.ctr.cipher(), &self.chain);
         mac.update(&b0);
         if !aad.is_empty() {
             let (prefix, n) = aad_length(aad.len() as u64);
@@ -263,10 +331,16 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ccm<C> {
             mac.update(aad);
             mac.pad();
         }
-        mac.update(plaintext);
-        mac.pad();
-        mac.chain
+        mac
     }
+}
+
+/// The interleaved loop this processor has, best first.
+#[cfg(target_arch = "x86_64")]
+fn best_native<C: BlockCipher>() -> Option<x86_64::Engine<C>> {
+    crate::cipher::mode::ctr::CHOICES
+        .iter()
+        .find_map(|&implementation| x86_64::Engine::of(implementation))
 }
 
 /// Refuses nonce and tag lengths the standard does not define, and a
@@ -311,15 +385,17 @@ fn aad_length(len: u64) -> ([u8; 10], usize) {
 /// block's worth has arrived.
 struct Mac<'a, C: BlockCipher<Block = [u8; BLOCK]>> {
     cipher: &'a C,
+    engine: &'a MacEngine<C>,
     chain: [u8; BLOCK],
     /// Bytes of the current block already XORed in.
     used: usize,
 }
 
 impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Mac<'a, C> {
-    fn new(cipher: &'a C) -> Self {
+    fn new(cipher: &'a C, engine: &'a MacEngine<C>) -> Self {
         Mac {
             cipher,
+            engine,
             chain: [0u8; BLOCK],
             used: 0,
         }
@@ -337,11 +413,8 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Mac<'a, C> {
             self.cipher.encrypt_one(&mut self.chain);
             self.used = 0;
         }
-        let (blocks, rest) = data.as_chunks::<BLOCK>();
-        for block in blocks {
-            xor(&mut self.chain, block);
-            self.cipher.encrypt_one(&mut self.chain);
-        }
+        let (blocks, rest) = data.split_at(data.len() / BLOCK * BLOCK);
+        self.engine.fold(self.cipher, &mut self.chain, blocks);
         xor(&mut self.chain, rest);
         self.used = rest.len();
     }

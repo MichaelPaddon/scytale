@@ -59,7 +59,9 @@ use crate::{Key, Random};
 /// The length of a secret key, a public key, and the shared secret.
 pub const KEY_SIZE: usize = 32;
 
-/// The u-coordinate of the base point: 9.
+/// The u-coordinate of the base point: 9. The public key is taken on
+/// the Edwards curve instead, and the tests check the two agree.
+#[cfg(test)]
 const BASE_POINT: [u8; KEY_SIZE] = {
     let mut u = [0u8; KEY_SIZE];
     u[0] = 9;
@@ -73,7 +75,23 @@ const BASE_POINT: [u8; KEY_SIZE] = {
 /// here, so unclamped and clamped forms of a secret name the same
 /// public key.
 pub fn public_key(secret: &[u8; KEY_SIZE]) -> [u8; KEY_SIZE] {
-    x25519(secret, &BASE_POINT)
+    // The same multiple as `x25519(secret, &BASE_POINT)`, taken on the
+    // Edwards form of the curve, where the base point has a table.
+    let mut k = clamp(secret);
+    let public = crate::sig::ed25519::montgomery_base(&k);
+    k.zeroize();
+    public
+}
+
+/// The scalar as RFC 7748 decodes it. Clamping clears the cofactor
+/// bits, so the multiple lands in the prime-order subgroup, and fixes
+/// the top bit, so every scalar takes the same ladder length.
+fn clamp(secret: &[u8; KEY_SIZE]) -> [u8; KEY_SIZE] {
+    let mut k = *secret;
+    k[0] &= 248;
+    k[31] &= 127;
+    k[31] |= 64;
+    k
 }
 
 /// The secret shared between `secret` and a peer's `public` key.
@@ -105,13 +123,7 @@ pub fn shared_secret(
 /// the base point and to a peer's key; reach for this form only when
 /// a protocol asks for it by name.
 pub fn x25519(k: &[u8; KEY_SIZE], u: &[u8; KEY_SIZE]) -> [u8; KEY_SIZE] {
-    // Clamping clears the cofactor bits, so the multiple lands in
-    // the prime-order subgroup, and fixes the top bit, so every
-    // scalar takes the same ladder length.
-    let mut k = *k;
-    k[0] &= 248;
-    k[31] &= 127;
-    k[31] |= 64;
+    let mut k = clamp(k);
 
     let x1 = Fe::from_bytes(u);
     let mut x2 = Fe::ONE;
@@ -426,6 +438,23 @@ mod tests {
             *byte = u8::from_str_radix(s, 16).unwrap();
         }
         bytes
+    }
+
+    /// The public key from the Edwards table is the ladder's, for
+    /// secrets whose clamped bits vary and for ones that reduce past
+    /// the group order.
+    #[test]
+    fn public_key_matches_the_ladder() {
+        let mut secrets = [[0u8; KEY_SIZE]; 6];
+        secrets[1] = [0xff; KEY_SIZE];
+        for (i, secret) in secrets.iter_mut().enumerate().skip(2) {
+            for (j, byte) in secret.iter_mut().enumerate() {
+                *byte = (i * 37 + j * 11) as u8;
+            }
+        }
+        for secret in &secrets {
+            assert_eq!(public_key(secret), x25519(secret, &BASE_POINT));
+        }
     }
 
     /// RFC 7748 section 5.2, both one-shot vectors.

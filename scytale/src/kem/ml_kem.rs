@@ -168,6 +168,89 @@ const GAMMAS: [u16; 128] = {
     table
 };
 
+// The transforms and the products run in signed 16-bit Montgomery
+// arithmetic, with reductions left until the words would overflow:
+// every step is then a 16-bit multiply and its high half, which the
+// compiler lays across vector registers, where the 64-bit Barrett
+// multiply below cannot be. Results are brought back to [0, q) on the
+// way out, so the rest of the code sees only canonical coefficients.
+
+/// `q^-1 mod 2^16`, as a signed word.
+const QINV: i16 = -3327;
+
+/// `x 2^16 mod q`, centred on zero, which keeps Montgomery products
+/// of it small.
+const fn to_montgomery(x: u16) -> i16 {
+    let r = (x as u32 * 65536 % Q) as i32;
+    (if r > (Q as i32) / 2 { r - Q as i32 } else { r }) as i16
+}
+
+/// The transform's roots, in Montgomery form.
+const ZETAS_MONT: [i16; 128] = {
+    let mut table = [0i16; 128];
+    let mut i = 0;
+    while i < 128 {
+        table[i] = to_montgomery(ZETAS[i]);
+        i += 1;
+    }
+    table
+};
+
+/// The pairwise products' roots, in Montgomery form.
+const GAMMAS_MONT: [i16; 128] = {
+    let mut table = [0i16; 128];
+    let mut i = 0;
+    while i < 128 {
+        table[i] = to_montgomery(GAMMAS[i]);
+        i += 1;
+    }
+    table
+};
+
+/// `2^32 mod q`: a Montgomery product with it multiplies by `2^16`,
+/// undoing the division one product leaves behind.
+const R2: i16 = ((1u64 << 32) % Q as u64) as i16;
+
+/// `128^-1 2^16 mod q`: a Montgomery product with it divides by 128.
+const INV128_MONT: i16 = to_montgomery(3303);
+
+/// The high half of a signed 16-bit product.
+#[inline(always)]
+fn mulhi(a: i16, b: i16) -> i16 {
+    ((i32::from(a) * i32::from(b)) >> 16) as i16
+}
+
+/// `a b 2^-16 mod q`, in `(-q, q)` for `|a b| < q 2^15`.
+///
+/// Written in 16-bit halves: `a b - t q` is divisible by `2^16`
+/// because `t` is chosen so its low half is `a b`'s, so the quotient
+/// is the difference of the two high halves and no borrow crosses
+/// between them. Those are the low and high multiplies vector
+/// registers do sixteen bits at a time.
+#[inline(always)]
+fn fqmul(a: i16, b: i16) -> i16 {
+    let t = a.wrapping_mul(b).wrapping_mul(QINV);
+    mulhi(a, b) - mulhi(t, Q as i16)
+}
+
+/// `a mod q`, centred: in `[-(q-1)/2, (q-1)/2]` for any word.
+///
+/// The quotient is `(a V + 2^25) >> 26`, taken as the high half of
+/// `a V` and then the remaining ten bits, which is the same number and
+/// stays in sixteen bits throughout.
+#[inline(always)]
+fn barrett(a: i16) -> i16 {
+    const V: i16 = (((1 << 26) + Q / 2) / Q) as i16;
+    let t = (mulhi(a, V) + (1 << 9)) >> 10;
+    a.wrapping_sub(t.wrapping_mul(Q as i16))
+}
+
+/// `a` in `(-q, q)` moved to `[0, q)`, by a masked addition.
+#[inline(always)]
+fn canonical(a: i16) -> u16 {
+    (a + ((a >> 15) & Q as i16)) as u16
+}
+
 /// `a mod q` for `a` below `2q`, by one masked subtraction.
 fn csub(a: u32) -> u16 {
     let r = a as i32 - Q as i32;
@@ -190,6 +273,9 @@ fn sub(a: u16, b: u16) -> u16 {
     csub(u32::from(a) + Q - u32::from(b))
 }
 
+/// The product by Barrett reduction, which the tests check the
+/// Montgomery arithmetic against.
+#[cfg(test)]
 fn mul(a: u16, b: u16) -> u16 {
     reduce(u32::from(a) * u32::from(b))
 }
@@ -203,49 +289,64 @@ impl Poly {
     const ZERO: Poly = Poly([0; N]);
 
     /// The transform, algorithm 9.
+    ///
+    /// Each layer adds at most `q` to a coefficient's magnitude, so
+    /// from `[0, q)` seven layers stay below `8q`, inside a word; one
+    /// reduction at the end is enough.
     fn ntt(&mut self) {
-        let f = &mut self.0;
-        let mut i = 1;
+        let mut f = self.0.map(|c| c as i16);
+        let mut k = 1;
         let mut len = 128;
         while len >= 2 {
-            for start in (0..N).step_by(2 * len) {
-                let zeta = ZETAS[i];
-                i += 1;
-                for j in start..start + len {
-                    let t = mul(zeta, f[j + len]);
-                    f[j + len] = sub(f[j], t);
-                    f[j] = add(f[j], t);
+            for block in f.chunks_exact_mut(2 * len) {
+                let zeta = ZETAS_MONT[k];
+                k += 1;
+                let (low, high) = block.split_at_mut(len);
+                for (a, b) in low.iter_mut().zip(high.iter_mut()) {
+                    let t = fqmul(zeta, *b);
+                    *b = *a - t;
+                    *a += t;
                 }
             }
             len /= 2;
         }
+        for (c, &x) in self.0.iter_mut().zip(&f) {
+            *c = canonical(barrett(x));
+        }
     }
 
     /// The inverse transform, algorithm 10.
+    ///
+    /// The sums are reduced as they are made, which keeps them in a
+    /// word; the differences go straight into a Montgomery product.
     fn inverse_ntt(&mut self) {
-        let f = &mut self.0;
-        let mut i = 127;
+        let mut f = self.0.map(|c| c as i16);
+        let mut k = 127;
         let mut len = 2;
         while len <= 128 {
-            for start in (0..N).step_by(2 * len) {
-                let zeta = ZETAS[i];
-                i -= 1;
-                for j in start..start + len {
-                    let t = f[j];
-                    f[j] = add(t, f[j + len]);
-                    f[j + len] = mul(zeta, sub(f[j + len], t));
+            for block in f.chunks_exact_mut(2 * len) {
+                let zeta = ZETAS_MONT[k];
+                k -= 1;
+                let (low, high) = block.split_at_mut(len);
+                for (a, b) in low.iter_mut().zip(high.iter_mut()) {
+                    let t = *a;
+                    *a = barrett(t + *b);
+                    *b = fqmul(zeta, *b - t);
                 }
             }
             len *= 2;
         }
         // Divided by 128, which the butterflies left multiplied in.
-        for c in f.iter_mut() {
-            *c = mul(*c, 3303);
+        for (c, &x) in self.0.iter_mut().zip(&f) {
+            *c = canonical(fqmul(x, INV128_MONT));
         }
     }
 
     /// The product in the transform domain, algorithm 11: pairs of
     /// coefficients multiplied modulo `x^2 - gamma`.
+    ///
+    /// Each Montgomery product divides by `2^16`, the same once in
+    /// every term, and one more product by `2^32 mod q` puts it back.
     fn mul_ntt(&self, other: &Poly) -> Poly {
         let mut out = Poly::ZERO;
         let pairs = out
@@ -253,11 +354,13 @@ impl Poly {
             .chunks_exact_mut(2)
             .zip(self.0.chunks_exact(2))
             .zip(other.0.chunks_exact(2));
-        for (((c, a), b), gamma) in pairs.zip(GAMMAS) {
-            let (a0, a1) = (a[0], a[1]);
-            let (b0, b1) = (b[0], b[1]);
-            c[0] = add(mul(a0, b0), mul(mul(a1, b1), gamma));
-            c[1] = add(mul(a0, b1), mul(a1, b0));
+        for (((c, a), b), gamma) in pairs.zip(GAMMAS_MONT) {
+            let (a0, a1) = (a[0] as i16, a[1] as i16);
+            let (b0, b1) = (b[0] as i16, b[1] as i16);
+            let c0 = fqmul(fqmul(a1, b1), gamma) + fqmul(a0, b0);
+            let c1 = fqmul(a0, b1) + fqmul(a1, b0);
+            c[0] = canonical(fqmul(c0, R2));
+            c[1] = canonical(fqmul(c1, R2));
         }
         out
     }
@@ -369,18 +472,43 @@ impl Poly {
 
     /// `SamplePolyCBD_eta`, algorithm 8, over `64 eta` bytes of PRF
     /// output: each coefficient a difference of two `eta`-bit sums.
+    ///
+    /// The bits are summed a word at a time rather than one by one:
+    /// adjacent bits added pairwise (or in threes) under a mask give
+    /// every coefficient's two sums side by side in one word, which
+    /// shifts then take apart. The bits are the standard's, least
+    /// significant first within each byte.
     fn sample_cbd(eta: usize, bytes: &[u8]) -> Poly {
         debug_assert_eq!(bytes.len(), 64 * eta);
-        let bit = |n: usize| u16::from((bytes[n / 8] >> (n % 8)) & 1);
         let mut out = Poly::ZERO;
-        for (i, c) in out.0.iter_mut().enumerate() {
-            let mut x = 0u16;
-            let mut y = 0u16;
-            for j in 0..eta {
-                x += bit(2 * i * eta + j);
-                y += bit(2 * i * eta + eta + j);
+        if eta == 2 {
+            // Four bytes, eight coefficients of two two-bit sums.
+            let words = bytes.chunks_exact(4);
+            for (coefficients, word) in out.0.chunks_exact_mut(8).zip(words) {
+                let t =
+                    u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+                let d = (t & 0x5555_5555) + ((t >> 1) & 0x5555_5555);
+                for (j, c) in coefficients.iter_mut().enumerate() {
+                    let x = ((d >> (4 * j)) & 3) as u16;
+                    let y = ((d >> (4 * j + 2)) & 3) as u16;
+                    *c = sub(x, y);
+                }
             }
-            *c = sub(x, y);
+        } else {
+            debug_assert_eq!(eta, 3);
+            // Three bytes, four coefficients of two three-bit sums.
+            let words = bytes.chunks_exact(3);
+            for (coefficients, word) in out.0.chunks_exact_mut(4).zip(words) {
+                let t = u32::from_le_bytes([word[0], word[1], word[2], 0]);
+                let d = (t & 0x0024_9249)
+                    + ((t >> 1) & 0x0024_9249)
+                    + ((t >> 2) & 0x0024_9249);
+                for (j, c) in coefficients.iter_mut().enumerate() {
+                    let x = ((d >> (6 * j)) & 7) as u16;
+                    let y = ((d >> (6 * j + 3)) & 7) as u16;
+                    *c = sub(x, y);
+                }
+            }
         }
         out
     }
@@ -436,14 +564,46 @@ fn j(z: &[u8], c: &[u8]) -> Result<[u8; SECRET], Error> {
     Ok(out)
 }
 
+/// An encapsulation key taken apart for use: `t` decoded, the matrix
+/// `A` sampled from `rho`, and `H(ek)`. None of it changes for the
+/// life of the key, and remaking it was most of what an encapsulation
+/// cost: nine or sixteen SHAKE-128 streams for `A`, and a SHA3-256
+/// over the whole key. A key keeps it from the moment it is made.
+#[derive(Clone)]
+struct Expanded<const K: usize> {
+    t: [Poly; K],
+    /// `A[i][j]`, row first.
+    a: [[Poly; K]; K],
+    hash: [u8; 32],
+}
+
+/// Takes apart an encapsulation key already checked well formed.
+fn expand<const K: usize>(ek: &[u8]) -> Result<Expanded<K>, Error> {
+    debug_assert_eq!(ek.len(), public_len(K));
+    let mut rho = [0u8; 32];
+    rho.copy_from_slice(&ek[384 * K..]);
+    let mut a = [[Poly::ZERO; K]; K];
+    for (i, row) in a.iter_mut().enumerate() {
+        for (j, entry) in row.iter_mut().enumerate() {
+            *entry = Poly::sample_ntt(&rho, i as u8, j as u8)?;
+        }
+    }
+    let mut t = [Poly::ZERO; K];
+    for (i, t_i) in t.iter_mut().enumerate() {
+        *t_i = Poly::decode(12, &ek[384 * i..384 * (i + 1)]);
+    }
+    Ok(Expanded { t, a, hash: h(ek)? })
+}
+
 /// `K-PKE.KeyGen` and the wrapping of algorithm 16: the encapsulation
 /// key into `ek` and the expanded decapsulation key into `dk`, from
-/// the seed `d || z`.
+/// the seed `d || z`. Returns the encapsulation key taken apart,
+/// which the generation has already done most of.
 fn key_gen<const K: usize>(
     seed: &[u8; SEED],
     ek: &mut [u8],
     dk: &mut [u8],
-) -> Result<(), Error> {
+) -> Result<Expanded<K>, Error> {
     debug_assert_eq!(ek.len(), public_len(K));
     debug_assert_eq!(dk.len(), private_len(K));
     let (d, z) = seed.split_at(32);
@@ -462,41 +622,41 @@ fn key_gen<const K: usize>(
     }
     sigma.zeroize();
 
-    // t = A s + e, one row of A at a time, never stored whole.
-    for i in 0..K {
-        let mut t = e[i];
-        for (j, s_j) in s.iter().enumerate() {
-            let a = Poly::sample_ntt(&rho, i as u8, j as u8)?;
-            t.add_assign(&a.mul_ntt(s_j));
+    // t = A s + e.
+    let mut a = [[Poly::ZERO; K]; K];
+    let mut t = e;
+    for (i, (row, t_i)) in a.iter_mut().zip(t.iter_mut()).enumerate() {
+        for (j, (entry, s_j)) in row.iter_mut().zip(&s).enumerate() {
+            *entry = Poly::sample_ntt(&rho, i as u8, j as u8)?;
+            t_i.add_assign(&entry.mul_ntt(s_j));
         }
-        t.encode(12, &mut ek[384 * i..384 * (i + 1)]);
+        t_i.encode(12, &mut ek[384 * i..384 * (i + 1)]);
     }
     ek[384 * K..].copy_from_slice(&rho);
 
     for (i, s_i) in s.iter().enumerate() {
         s_i.encode(12, &mut dk[384 * i..384 * (i + 1)]);
     }
+    let hash = h(ek)?;
     let rest = &mut dk[384 * K..];
     rest[..public_len(K)].copy_from_slice(ek);
-    rest[public_len(K)..public_len(K) + 32].copy_from_slice(&h(ek)?);
+    rest[public_len(K)..public_len(K) + 32].copy_from_slice(&hash);
     rest[public_len(K) + 32..].copy_from_slice(z);
     s.zeroize();
     e.zeroize();
-    Ok(())
+    Ok(Expanded { t, a, hash })
 }
 
-/// `K-PKE.Encrypt`, algorithm 14: the message `m` under `ek` with
-/// randomness `r`, into `c`.
+/// `K-PKE.Encrypt`, algorithm 14: the message `m` under `ek`, taken
+/// apart, with randomness `r`, into `c`.
 fn encrypt<const K: usize>(
-    ek: &[u8],
+    ek: &Expanded<K>,
     m: &[u8; 32],
     r: &[u8; 32],
     c: &mut [u8],
 ) -> Result<(), Error> {
     let p = params::<K>();
     debug_assert_eq!(c.len(), ciphertext_len(K, p));
-    let mut rho = [0u8; 32];
-    rho.copy_from_slice(&ek[384 * K..]);
 
     let mut y = [Poly::ZERO; K];
     for (i, y_i) in y.iter_mut().enumerate() {
@@ -504,12 +664,11 @@ fn encrypt<const K: usize>(
         y_i.ntt();
     }
     // u = A^T y + e1: the transpose, so A's row index is the inner
-    // one; sampled as it is needed.
+    // one.
     for i in 0..K {
         let mut u = Poly::ZERO;
-        for (j, y_j) in y.iter().enumerate() {
-            let a = Poly::sample_ntt(&rho, j as u8, i as u8)?;
-            u.add_assign(&a.mul_ntt(y_j));
+        for (row, y_j) in ek.a.iter().zip(&y) {
+            u.add_assign(&row[i].mul_ntt(y_j));
         }
         u.inverse_ntt();
         let e1 = Poly::sample_noise(p.eta2, r, (K + i) as u8)?;
@@ -519,9 +678,8 @@ fn encrypt<const K: usize>(
     }
     // v = t . y + e2 + Decompress_1(m).
     let mut v = Poly::ZERO;
-    for (i, y_i) in y.iter().enumerate() {
-        let t = Poly::decode(12, &ek[384 * i..384 * (i + 1)]);
-        v.add_assign(&t.mul_ntt(y_i));
+    for (t_i, y_i) in ek.t.iter().zip(&y) {
+        v.add_assign(&t_i.mul_ntt(y_i));
     }
     v.inverse_ntt();
     let e2 = Poly::sample_noise(p.eta2, r, (2 * K) as u8)?;
@@ -557,11 +715,11 @@ fn decrypt<const K: usize>(dk: &[u8], c: &[u8]) -> [u8; 32] {
 /// `ML-KEM.Encaps_internal`, algorithm 17: the ciphertext into `c`
 /// and the shared secret returned, from the message `m`.
 fn encapsulate<const K: usize>(
-    ek: &[u8],
+    ek: &Expanded<K>,
     m: &[u8; 32],
     c: &mut [u8],
 ) -> Result<[u8; SECRET], Error> {
-    let (key, mut r) = g(&[m, &h(ek)?])?;
+    let (key, mut r) = g(&[m, &ek.hash])?;
     encrypt::<K>(ek, m, &r, c)?;
     r.zeroize();
     Ok(key)
@@ -571,9 +729,9 @@ fn encapsulate<const K: usize>(
 /// rejection chosen by a mask.
 fn decapsulate<const K: usize>(
     dk: &[u8],
+    ek: &Expanded<K>,
     c: &[u8],
 ) -> Result<[u8; SECRET], Error> {
-    let ek = &dk[384 * K..384 * K + public_len(K)];
     let hash = &dk[384 * K + public_len(K)..384 * K + public_len(K) + 32];
     let z = &dk[384 * K + public_len(K) + 32..];
     let mut m = decrypt::<K>(dk, c);
@@ -694,6 +852,7 @@ macro_rules! parameter_set {
         #[derive(Clone)]
         pub struct PublicKey {
             bytes: [u8; PUBLIC_KEY_SIZE],
+            expanded: ml_kem::Expanded<$k>,
         }
 
         impl Drop for PrivateKey {
@@ -707,6 +866,7 @@ macro_rules! parameter_set {
             fn from_expanded(
                 seed: Option<[u8; SEED_SIZE]>,
                 expanded: [u8; KEY_SIZE],
+                public: ml_kem::Expanded<$k>,
             ) -> Self {
                 let mut bytes = [0u8; PUBLIC_KEY_SIZE];
                 bytes.copy_from_slice(
@@ -715,7 +875,10 @@ macro_rules! parameter_set {
                 PrivateKey {
                     seed,
                     expanded,
-                    public: PublicKey { bytes },
+                    public: PublicKey {
+                        bytes,
+                        expanded: public,
+                    },
                 }
             }
 
@@ -735,8 +898,9 @@ macro_rules! parameter_set {
             ) -> Result<Self, Error> {
                 let mut expanded = [0u8; KEY_SIZE];
                 let mut ek = [0u8; PUBLIC_KEY_SIZE];
-                ml_kem::key_gen::<$k>(seed, &mut ek, &mut expanded)?;
-                Ok(Self::from_expanded(Some(*seed), expanded))
+                let public =
+                    ml_kem::key_gen::<$k>(seed, &mut ek, &mut expanded)?;
+                Ok(Self::from_expanded(Some(*seed), expanded, public))
             }
 
             /// A key from its expanded form, checked as FIPS 203
@@ -750,7 +914,8 @@ macro_rules! parameter_set {
                 {
                     return Err(Error::InvalidPrivateKey);
                 }
-                Ok(Self::from_expanded(None, *expanded))
+                let public = ml_kem::expand::<$k>(ek)?;
+                Ok(Self::from_expanded(None, *expanded, public))
             }
 
             /// The seed, when the key was made from one, and
@@ -785,8 +950,12 @@ macro_rules! parameter_set {
             ) -> [u8; SHARED_SECRET_SIZE] {
                 // The hashes cannot fail once the key exists: the same
                 // ones ran to make it.
-                ml_kem::decapsulate::<$k>(&self.expanded, ciphertext)
-                    .unwrap_or([0u8; SHARED_SECRET_SIZE])
+                ml_kem::decapsulate::<$k>(
+                    &self.expanded,
+                    &self.public.expanded,
+                    ciphertext,
+                )
+                .unwrap_or([0u8; SHARED_SECRET_SIZE])
             }
 
             /// A key from its DER PKCS#8 `PrivateKeyInfo`, the form
@@ -875,7 +1044,10 @@ macro_rules! parameter_set {
                 if !ml_kem::public_key_is_valid::<$k>(bytes) {
                     return Err(Error::InvalidPublicKey);
                 }
-                Ok(PublicKey { bytes: *bytes })
+                Ok(PublicKey {
+                    bytes: *bytes,
+                    expanded: ml_kem::expand::<$k>(bytes)?,
+                })
             }
 
             /// The key's bytes, FIPS 203's encapsulation key.
@@ -896,7 +1068,8 @@ macro_rules! parameter_set {
                 let mut m = [0u8; 32];
                 rng.fill(&mut m)?;
                 let mut c = [0u8; CIPHERTEXT_SIZE];
-                let secret = ml_kem::encapsulate::<$k>(&self.bytes, &m, &mut c);
+                let secret =
+                    ml_kem::encapsulate::<$k>(&self.expanded, &m, &mut c);
                 m.zeroize();
                 Ok((c, secret?))
             }
@@ -959,6 +1132,24 @@ pub mod ml_kem_1024 {
 mod tests {
     use super::*;
     use crate::der;
+
+    /// The word-at-a-time sampler agrees with algorithm 8 read bit
+    /// by bit, at both widths.
+    #[test]
+    fn cbd_matches_the_definition() {
+        for eta in [2usize, 3] {
+            let bytes: std::vec::Vec<u8> = (0..64 * eta)
+                .map(|i| (i as u8).wrapping_mul(97).wrapping_add(31))
+                .collect();
+            let bit = |n: usize| u16::from((bytes[n / 8] >> (n % 8)) & 1);
+            let got = Poly::sample_cbd(eta, &bytes);
+            for i in 0..N {
+                let x: u16 = (0..eta).map(|j| bit(2 * i * eta + j)).sum();
+                let y: u16 = (0..eta).map(|j| bit(2 * i * eta + eta + j)).sum();
+                assert_eq!(got.0[i], sub(x, y), "eta {eta} coefficient {i}");
+            }
+        }
+    }
 
     /// The transform inverts, and the transform-domain product is
     /// the schoolbook product modulo x^256 + 1.

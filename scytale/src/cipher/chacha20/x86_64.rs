@@ -1,13 +1,24 @@
 //! ChaCha20 with AVX2 on x86-64.
 //!
-//! Four blocks at a time: each block's state is four rows of four
-//! words, one row to a 128-bit half of a `ymm` register, so a
-//! register holds the same row of two blocks and every instruction
-//! does two blocks' worth. Two such sets run interleaved, which gives
-//! the processor independent work to overlap. A column round is one
-//! quarter round on the four rows; the diagonal round is the same
-//! after rotating three rows within each half, which `vpshufd` does
-//! per half exactly as needed.
+//! Eight blocks at a time where there are eight: each `ymm` register
+//! holds one word of the state for all eight blocks, so a column
+//! round and a diagonal round are the same instructions on a
+//! different choice of registers and nothing is moved between them.
+//! That uses every register, and the rotations by 12 and 7 want a
+//! scratch one, so the last word is set aside in memory while they
+//! run. Eight words of one block are then gathered side by side and
+//! stored.
+//!
+//! What is left, fewer than eight blocks, goes four at a time: each
+//! block's state is four rows of four words, one row to a 128-bit half
+//! of a register, so a register holds the same row of two blocks. Two
+//! such sets run interleaved, which gives the processor independent
+//! work to overlap. A column round is one quarter round on the four
+//! rows; the diagonal round is the same after rotating three rows
+//! within each half, which `vpshufd` does per half exactly as needed.
+//! The eight-block loop measured about a third faster than this one
+//! on long messages, which is the shuffles and the extraction it does
+//! without.
 //!
 //! Rotates by 16 and 8 are byte shuffles; 12 and 7 are a shift each
 //! way and an or. No memory access depends on the key.
@@ -15,6 +26,8 @@
 #![allow(unsafe_code)]
 
 use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
+
+use zeroize::Zeroize;
 
 use super::{BLOCK_SIZE, Backend, Cipher, Sealed};
 use crate::align::At32;
@@ -71,8 +84,11 @@ impl Backend for Avx2 {
     }
 }
 
-/// Blocks one pass of the assembly handles.
+/// Blocks one pass of the narrower loop handles.
 const GROUP: usize = 4;
+
+/// Blocks one pass of the wider loop handles.
+const WIDE: usize = 8;
 
 /// Rotate each word left by 16, as a byte shuffle.
 static ROTATE16: At32<[u8; 32]> = At32([
@@ -110,6 +126,19 @@ unsafe fn xor(key: &[u32; 8], nonce: &[u32; 3], counter: u32, data: &mut [u8]) {
     unsafe {
         debug_assert_eq!(data.len() % BLOCK_SIZE, 0);
         let mut counter = counter;
+        let mut wide = data.chunks_exact_mut(BLOCK_SIZE * WIDE);
+        if wide.len() > 0 {
+            let mut words = Words::new(key, nonce);
+            let mut spill = At32([0u8; 32]);
+            for group in &mut wide {
+                words.count_from(counter);
+                group8(&words, &mut spill, group.as_mut_ptr());
+                counter = counter.wrapping_add(WIDE as u32);
+            }
+            spill.0.zeroize();
+            words.0.0.zeroize();
+        }
+        let data = wide.into_remainder();
         let mut chunks = data.chunks_exact_mut(BLOCK_SIZE * GROUP);
         for group in &mut chunks {
             let state = rows(key, nonce, counter);
@@ -127,6 +156,207 @@ unsafe fn xor(key: &[u32; 8], nonce: &[u32; 3], counter: u32, data: &mut [u8]) {
                 *d ^= k;
             }
         }
+    }
+}
+
+/// The state of eight blocks laid out word by word: sixteen rows of
+/// eight words, each row one register's worth, the same word of every
+/// block side by side.
+struct Words(At32<[[u32; 8]; 16]>);
+
+impl Words {
+    /// Everything but the counters, which [`count_from`] fills.
+    ///
+    /// [`count_from`]: Words::count_from
+    fn new(key: &[u32; 8], nonce: &[u32; 3]) -> Self {
+        let rows = rows(key, nonce, 0);
+        Words(At32(rows.map(|word| [word; 8])))
+    }
+
+    /// Block `i` of the eight counts from `counter + i`.
+    fn count_from(&mut self, counter: u32) {
+        for (i, lane) in self.0.0[12].iter_mut().enumerate() {
+            *lane = counter.wrapping_add(i as u32);
+        }
+    }
+}
+
+/// One step of a half round across the four quarter rounds listed,
+/// each as its words' registers: `a += b; d ^= a; d <<<= r` with a
+/// byte shuffle, or `c += d; b ^= c; b <<<= r` by shifts, with ymm15
+/// set aside in memory to serve as the scratch register.
+#[rustfmt::skip]
+macro_rules! step {
+    (shuffle $mask:literal;
+     $( ($a:literal, $b:literal, $c:literal, $d:literal) ),*) => {
+        concat!(
+            $( "vpaddd ", $a, ", ", $a, ", ", $b, "\n", )*
+            $( "vpxor ", $d, ", ", $d, ", ", $a, "\n", )*
+            $( "vpshufb ", $d, ", ", $d, ", [{", $mask, "}]\n", )*
+        )
+    };
+    (shift $left:literal, $right:literal;
+     $( ($a:literal, $b:literal, $c:literal, $d:literal) ),*) => {
+        concat!(
+            $( "vpaddd ", $c, ", ", $c, ", ", $d, "\n", )*
+            $( "vpxor ", $b, ", ", $b, ", ", $c, "\n", )*
+            "vmovdqa [{spill}], ymm15\n",
+            $( concat!(
+                "vpsrld ymm15, ", $b, ", ", $right, "\n",
+                "vpslld ", $b, ", ", $b, ", ", $left, "\n",
+                "vpor ", $b, ", ", $b, ", ymm15\n",
+            ), )*
+            "vmovdqa ymm15, [{spill}]\n",
+        )
+    };
+}
+
+/// A half round, column or diagonal, on the quarter rounds listed.
+#[rustfmt::skip]
+macro_rules! half {
+    ($( $q:tt ),*) => {
+        concat!(
+            step!(shuffle "rot16"; $( $q ),*),
+            step!(shift "12", "20"; $( $q ),*),
+            step!(shuffle "rot8"; $( $q ),*),
+            step!(shift "7", "25"; $( $q ),*),
+        )
+    };
+}
+
+/// Pairs words `$w0..$w3` of every block into two words of each,
+/// block by block: afterwards each register holds its four words for
+/// two blocks, the low half one block and the high half the block
+/// four on. `$t` is scratch. Leaves blocks 0 and 4 in `$w0`, 1 and 5
+/// in `$w3`, 2 and 6 in `$w1`, 3 and 7 in `$w2`.
+#[rustfmt::skip]
+macro_rules! gather {
+    ($w0:literal, $w1:literal, $w2:literal, $w3:literal, $t:literal) => {
+        concat!(
+            "vpunpckhdq ", $t, ", ", $w0, ", ", $w1, "\n",
+            "vpunpckldq ", $w0, ", ", $w0, ", ", $w1, "\n",
+            "vpunpckhdq ", $w1, ", ", $w2, ", ", $w3, "\n",
+            "vpunpckldq ", $w2, ", ", $w2, ", ", $w3, "\n",
+            "vpunpckhqdq ", $w3, ", ", $w0, ", ", $w2, "\n",
+            "vpunpcklqdq ", $w0, ", ", $w0, ", ", $w2, "\n",
+            "vpunpckhqdq ", $w2, ", ", $t, ", ", $w1, "\n",
+            "vpunpcklqdq ", $w1, ", ", $t, ", ", $w1, "\n",
+        )
+    };
+}
+
+/// Xors two blocks' halves of words, `$x` holding words 0 to 3 (or 8
+/// to 11) and `$y` the next four, into the bytes at `$low` and
+/// `$high`, the offsets of the block in the low halves and of the one
+/// in the high halves. `$t` is scratch; `$x` is overwritten.
+#[rustfmt::skip]
+macro_rules! emit {
+    ($x:literal, $y:literal, $t:literal, $low:literal, $high:literal) => {
+        concat!(
+            "vperm2i128 ", $t, ", ", $x, ", ", $y, ", 0x20\n",
+            "vpxor ", $t, ", ", $t, ", [{data} + ", $low, "]\n",
+            "vmovdqu [{data} + ", $low, "], ", $t, "\n",
+            "vperm2i128 ", $x, ", ", $x, ", ", $y, ", 0x31\n",
+            "vpxor ", $x, ", ", $x, ", [{data} + ", $high, "]\n",
+            "vmovdqu [{data} + ", $high, "], ", $x, "\n",
+        )
+    };
+}
+
+/// Eight blocks from `words`, xored into the 512 bytes at `data`.
+///
+/// Register `ymm<i>` holds word `i` of all eight blocks, so a column
+/// round and a diagonal round are the same instructions on different
+/// registers, with nothing to rearrange between them. The rotations by
+/// 12 and 7 need a scratch register and there are none left, so ymm15,
+/// word 15, is set aside in `spill` for the length of each.
+///
+/// # Safety
+/// Requires AVX2; `data` must point at 512 writable bytes.
+unsafe fn group8(words: &Words, spill: &mut At32<[u8; 32]>, data: *mut u8) {
+    unsafe {
+        core::arch::asm!(
+            "vmovdqa ymm0, [{words}]",
+            "vmovdqa ymm1, [{words} + 32]",
+            "vmovdqa ymm2, [{words} + 64]",
+            "vmovdqa ymm3, [{words} + 96]",
+            "vmovdqa ymm4, [{words} + 128]",
+            "vmovdqa ymm5, [{words} + 160]",
+            "vmovdqa ymm6, [{words} + 192]",
+            "vmovdqa ymm7, [{words} + 224]",
+            "vmovdqa ymm8, [{words} + 256]",
+            "vmovdqa ymm9, [{words} + 288]",
+            "vmovdqa ymm10, [{words} + 320]",
+            "vmovdqa ymm11, [{words} + 352]",
+            "vmovdqa ymm12, [{words} + 384]",
+            "vmovdqa ymm13, [{words} + 416]",
+            "vmovdqa ymm14, [{words} + 448]",
+            "vmovdqa ymm15, [{words} + 480]",
+            "mov {n}, 10",
+            "2:",
+            half!(
+                ("ymm0", "ymm4", "ymm8", "ymm12"),
+                ("ymm1", "ymm5", "ymm9", "ymm13"),
+                ("ymm2", "ymm6", "ymm10", "ymm14"),
+                ("ymm3", "ymm7", "ymm11", "ymm15")
+            ),
+            half!(
+                ("ymm0", "ymm5", "ymm10", "ymm15"),
+                ("ymm1", "ymm6", "ymm11", "ymm12"),
+                ("ymm2", "ymm7", "ymm8", "ymm13"),
+                ("ymm3", "ymm4", "ymm9", "ymm14")
+            ),
+            "dec {n}",
+            "jnz 2b",
+            // The input back in, word by word.
+            "vpaddd ymm0, ymm0, [{words}]",
+            "vpaddd ymm1, ymm1, [{words} + 32]",
+            "vpaddd ymm2, ymm2, [{words} + 64]",
+            "vpaddd ymm3, ymm3, [{words} + 96]",
+            "vpaddd ymm4, ymm4, [{words} + 128]",
+            "vpaddd ymm5, ymm5, [{words} + 160]",
+            "vpaddd ymm6, ymm6, [{words} + 192]",
+            "vpaddd ymm7, ymm7, [{words} + 224]",
+            "vpaddd ymm8, ymm8, [{words} + 256]",
+            "vpaddd ymm9, ymm9, [{words} + 288]",
+            "vpaddd ymm10, ymm10, [{words} + 320]",
+            "vpaddd ymm11, ymm11, [{words} + 352]",
+            "vpaddd ymm12, ymm12, [{words} + 384]",
+            "vpaddd ymm13, ymm13, [{words} + 416]",
+            "vpaddd ymm14, ymm14, [{words} + 448]",
+            "vpaddd ymm15, ymm15, [{words} + 480]",
+            // Words 0 to 11 into blocks, with word 15 set aside so its
+            // register is the scratch, and the first half of every
+            // block out.
+            "vmovdqa [{spill}], ymm15",
+            gather!("ymm0", "ymm1", "ymm2", "ymm3", "ymm15"),
+            gather!("ymm4", "ymm5", "ymm6", "ymm7", "ymm15"),
+            emit!("ymm0", "ymm4", "ymm15", 0, 256),
+            emit!("ymm3", "ymm7", "ymm15", 64, 320),
+            emit!("ymm1", "ymm5", "ymm15", 128, 384),
+            emit!("ymm2", "ymm6", "ymm15", 192, 448),
+            gather!("ymm8", "ymm9", "ymm10", "ymm11", "ymm15"),
+            // Then words 12 to 15, with a spent register as scratch,
+            // and the second half of every block out.
+            "vmovdqa ymm15, [{spill}]",
+            gather!("ymm12", "ymm13", "ymm14", "ymm15", "ymm0"),
+            emit!("ymm8", "ymm12", "ymm0", 32, 288),
+            emit!("ymm11", "ymm15", "ymm0", 96, 352),
+            emit!("ymm9", "ymm13", "ymm0", 160, 416),
+            emit!("ymm10", "ymm14", "ymm0", 224, 480),
+            "vzeroupper",
+            words = in(reg) words.0.0.as_ptr(),
+            spill = in(reg) spill.0.as_mut_ptr(),
+            data = in(reg) data,
+            rot16 = in(reg) ROTATE16.0.as_ptr(),
+            rot8 = in(reg) ROTATE8.0.as_ptr(),
+            n = out(reg) _,
+            out("ymm0") _, out("ymm1") _, out("ymm2") _, out("ymm3") _,
+            out("ymm4") _, out("ymm5") _, out("ymm6") _, out("ymm7") _,
+            out("ymm8") _, out("ymm9") _, out("ymm10") _, out("ymm11") _,
+            out("ymm12") _, out("ymm13") _, out("ymm14") _, out("ymm15") _,
+            options(nostack),
+        );
     }
 }
 

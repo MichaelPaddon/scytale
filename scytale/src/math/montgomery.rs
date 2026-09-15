@@ -11,7 +11,7 @@
 //! Some moduli are cheaper than others. The reduction multiplies by
 //! every limb of `n`, and the two NIST prime fields have limbs that
 //! are each a sum of a few powers of two, so those products are
-//! shifts and additions instead. [`Montgomery::new`] recognises the
+//! shifts and additions instead. [`Montgomery::known`] recognises the
 //! two primes and halves the multiplications in every product, which
 //! is what the curve arithmetic spends its time on.
 //!
@@ -67,6 +67,7 @@ pub(crate) const P384_PRIME: [u64; 6] = [
 
 /// The shape of a modulus, by its limbs: the widths differ, so the
 /// comparison is over slices.
+#[cfg(test)]
 fn shape_of<const LIMBS: usize>(n: &Uint<LIMBS>) -> Shape {
     if n.0[..] == P256_PRIME[..] {
         Shape::P256
@@ -93,7 +94,10 @@ pub(crate) struct Montgomery<const LIMBS: usize> {
 
 impl<const LIMBS: usize> Montgomery<LIMBS> {
     /// A context for the modulus `n`, which must be odd and greater
-    /// than one; `None` otherwise.
+    /// than one; `None` otherwise. The crate's own moduli are all
+    /// known when it is built and take [`known`](Self::known); this
+    /// is what the tests check that against.
+    #[cfg(test)]
     pub(crate) fn new(n: Uint<LIMBS>) -> Option<Self> {
         let (_, borrow) = Uint::one().sub_borrow(&n);
         if !n.is_odd() || borrow == 0 {
@@ -122,6 +126,96 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
             inv,
             rr,
         })
+    }
+
+    /// The context for a modulus known when the crate is built, made
+    /// when it is built: a curve's prime or order, so that an
+    /// operation does not rebuild it, which is hundreds of modular
+    /// doublings. The same constants [`new`](Self::new) computes, by
+    /// the same method, in the subset of the language a constant
+    /// allows. A modulus that is even or at most one fails the build.
+    pub(crate) const fn known(n: Uint<LIMBS>) -> Self {
+        let limbs = n.0;
+        assert!(limbs[0] & 1 == 1, "modulus must be odd");
+        let mut above_one = limbs[0] > 1;
+        let mut i = 1;
+        while i < LIMBS {
+            above_one |= limbs[i] != 0;
+            i += 1;
+        }
+        assert!(above_one, "modulus must exceed one");
+
+        let n0 = limbs[0];
+        let mut inv = n0;
+        let mut step = 0;
+        while step < 5 {
+            inv = inv.wrapping_mul(2u64.wrapping_sub(n0.wrapping_mul(inv)));
+            step += 1;
+        }
+        let inv = inv.wrapping_neg();
+
+        // R^2 mod n by doubling 1, each doubling reduced by one
+        // conditional subtraction.
+        let mut rr = [0u64; LIMBS];
+        rr[0] = 1;
+        let mut round = 0;
+        while round < 2 * 64 * LIMBS {
+            let mut doubled = [0u64; LIMBS];
+            let mut carry = 0u64;
+            let mut j = 0;
+            while j < LIMBS {
+                doubled[j] = (rr[j] << 1) | carry;
+                carry = rr[j] >> 63;
+                j += 1;
+            }
+            let mut reduced = [0u64; LIMBS];
+            let mut borrow = 0u64;
+            let mut j = 0;
+            while j < LIMBS {
+                let (d, b1) = doubled[j].overflowing_sub(limbs[j]);
+                let (d, b2) = d.overflowing_sub(borrow);
+                reduced[j] = d;
+                borrow = (b1 | b2) as u64;
+                j += 1;
+            }
+            // Below 2n before the subtraction, so it is wanted when
+            // the doubling carried out or did not borrow.
+            rr = if carry == 1 || borrow == 0 {
+                reduced
+            } else {
+                doubled
+            };
+            round += 1;
+        }
+
+        let shape = if Self::same(&limbs, &P256_PRIME) {
+            Shape::P256
+        } else if Self::same(&limbs, &P384_PRIME) {
+            Shape::P384
+        } else {
+            Shape::General
+        };
+        Montgomery {
+            n,
+            shape,
+            inv,
+            rr: Uint(rr),
+        }
+    }
+
+    /// Whether `limbs` are exactly `prime`'s, at whatever width.
+    const fn same(limbs: &[u64; LIMBS], prime: &[u64]) -> bool {
+        if prime.len() != LIMBS {
+            return false;
+        }
+        let mut i = 0;
+        while i < LIMBS {
+            if limbs[i] != prime[i] {
+                return false;
+            }
+            i += 1;
+        }
+        true
     }
 
     /// `a * b / R mod n`, the Montgomery product. `b` must be below
@@ -287,6 +381,23 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The context made when the crate is built is the one made at
+    /// run time, for both curve primes and a general modulus.
+    #[test]
+    fn known_matches_new() {
+        fn check<const L: usize>(n: Uint<L>) {
+            let known = Montgomery::known(n);
+            let new = Montgomery::new(n).expect("odd");
+            assert_eq!(known.n.0, new.n.0);
+            assert_eq!(known.shape, new.shape);
+            assert_eq!(known.inv, new.inv);
+            assert_eq!(known.rr.0, new.rr.0);
+        }
+        check(Uint(P256_PRIME));
+        check(Uint(P384_PRIME));
+        check(Uint::<3>([0x8765432187654321, 0x1234567812345678, 0xabcd]));
+    }
 
     #[test]
     fn refuses_even_and_trivial_moduli() {
