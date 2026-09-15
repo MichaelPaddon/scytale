@@ -17,11 +17,11 @@
 [license]: https://github.com/MichaelPaddon/scytale/blob/main/LICENSE
 
 Correct, fast, portable cryptography in Rust: ciphers, authenticated
-encryption and the modes over them, hashes, message authentication, key derivation, key
-agreement, public-key encryption, signatures, post-quantum key
-encapsulation and signatures, and random numbers. It is `no_std`, has
-two dependencies, needs no C compiler and no build script, and has no
-feature flags to get wrong.
+encryption and the modes over them, hashes, message authentication,
+key derivation, key agreement, public-key encryption, signatures,
+post-quantum key encapsulation and signatures, and random numbers. It
+is `no_std`, has two dependencies, needs no C compiler and no build
+script, and has no feature flags to get wrong.
 
 ## The name
 
@@ -55,6 +55,14 @@ English ended up.
 
 ## Status
 
+Scytale is now a credible choice for a developer who needs
+cryptography in Rust. It covers what many applications need, from
+authenticated encryption to post-quantum signatures; it is checked
+against every public vector set that exists for what it implements;
+its constant-time claims are written down, file by file, in
+SECURITY.md; and its performance is competitive, although there is
+more work to be done.
+
 The algorithm set is complete enough to build serious applications
 on: encryption and authenticated encryption, hashes and MACs, key
 derivation, key agreement, public-key encryption, signatures, the
@@ -62,20 +70,20 @@ three post-quantum families, a validated random generator, and the
 key formats other software stores keys in.
 
 It is tested to the same extent. The standards' own vectors are built
-into the unit tests, and on top of them run the NIST ACVP suites and
-the Project Wycheproof files, more than seventy thousand vector cases
-before the Monte Carlo suites add several million chained calls of
-their own. Every implementation of a primitive is put through the
-whole vector set for it, at every key size, and the whole suite runs
-on x86-64, aarch64 and riscv64 hardware rather than on the machine
-that happens to be to hand. The Goals section below says exactly what that
-means.
+into the unit tests, and on top of them run the NIST [ACVP][acvp]
+suites and the [Project Wycheproof][wycheproof] files, more than
+seventy thousand vector cases before the Monte Carlo suites add
+several million chained calls of their own. Every implementation of a
+primitive is put through the whole vector set for it, at every key
+size, and the whole suite runs on x86-64, aarch64 and riscv64 hardware
+rather than on the machine that happens to be to hand. The Goals
+section below says exactly what that means.
 
 Work from here will focus on speed and algorithms that are still
 missing. The API is still being stabilized, and the version number is
 still below one, but the major shape of the library is not expected to
-change massively. Expect implementation details to become better hidden and
-interfaces to be streamlined for usuability.
+change massively. Expect implementation details to become better
+hidden and interfaces to be streamlined for usability.
 
 It builds on stable Rust 1.88 or later, on any architecture,
 with or without an operating system under it.
@@ -486,17 +494,18 @@ gcm.encrypt(&nonce, associated_data, &mut buffer, &mut tag)?;
 gcm.decrypt(&nonce, associated_data, &mut buffer, &tag)?;
 ```
 
-GCM, GCM-SIV, CCM and ChaCha20-Poly1305 share an `Aead` trait, so code that
-does not care which one it was handed -- a protocol that negotiated it,
-a format that records it -- can hold any of them behind one type. XPN
-stays out of it: its nonce is two separate halves, a secret salt and a
-frame identifier, and only the caller knows which is which. Most of
-these also have an incremental form for data that arrives in pieces. Note that incremental decryption hands back plaintext before
-the tag has been checked; the one-shot call above is the safe
-default.
+GCM, GCM-SIV, CCM and ChaCha20-Poly1305 share an `Aead` trait, so code
+that does not care which one it was handed -- a protocol that
+negotiated it, a format that records it -- can hold any of them behind
+one type. XPN stays out of it: its nonce is two separate halves, a
+secret salt and a frame identifier, and only the caller knows which is
+which. Most of these also have an incremental form for data that
+arrives in pieces. Note that incremental decryption hands back
+plaintext before the tag has been checked; the one-shot call above is
+the safe default.
 
-Hashes and MACs take their message in pieces or in one call, and a
-MAC is checked with `verify`, never by comparing bytes yourself:
+Hashes and MACs take their message in pieces or in one call, and a MAC
+is checked with `verify`, never by comparing bytes yourself:
 
 ```rust
 use scytale::hash::{sha2::Sha256, Hash};
@@ -518,12 +527,12 @@ best implementation this processor supports, probing once on first
 use, and then dispatches with a single predictable branch.
 
 Which implementation that is is not a choice a caller makes. The
-implementations are private: hardware instructions where the
-processor has them, otherwise constant-time portable code. There is a
+implementations are private: hardware instructions where the processor
+has them, otherwise constant-time portable code. There is a
 table-driven AES in the crate that is about seventy percent faster
 than the constant-time portable one, and it is never chosen, because
-it indexes tables with bytes derived from the key and so leaks the
-key to an attacker who can measure cache timing. A way for an application
+it indexes tables with bytes derived from the key and so leaks the key
+to an attacker who can measure cache timing. A way for an application
 that runs nothing untrusted to ask for it by name is still to be
 designed.
 
@@ -629,5 +638,9 @@ affects users of the library.
 BSD 2-Clause. See `LICENSE`.
 
 The test vectors under `scytale/tests/vectors` come from the NIST
-ACVP-Server project and carry their own notice, in `LICENSE.txt`
-beside them.
+[ACVP-Server][acvp-server] project and carry their own notice, in
+`LICENSE.txt` beside them.
+
+[acvp]: https://pages.nist.gov/ACVP/
+[acvp-server]: https://github.com/usnistgov/ACVP-Server
+[wycheproof]: https://github.com/C2SP/wycheproof
