@@ -422,6 +422,7 @@ is dropped.
 | riscv64 | scalar cryptography (Zknh) | SHA-256, SHA-512 |
 | aarch64 | ARMv8 SHA3 extension | SHA-3, SHAKE, cSHAKE, KMAC |
 | x86-64 | BMI1 and BMI2 | SHA-3, SHAKE, cSHAKE, KMAC |
+| x86-64 | BMI2 and ADX | RSA, P-256 field arithmetic |
 | x86-64 | AVX2 | ChaCha20 |
 | aarch64 | NEON | ChaCha20 |
 | riscv64 | vector extension with Zvkb | ChaCha20 |
@@ -450,6 +451,13 @@ is portable. ChaCha20 needs no
 special instructions, only a vector unit: several blocks are computed
 at once, eight with AVX2, four with NEON, and as many as a register
 holds on RISC-V. Poly1305 is portable everywhere.
+
+The prime curves and RSA are integer arithmetic rather than a
+primitive with instructions of its own, and what they use is the
+pair of add-with-carry chains `adcx` and `adox`, with `mulx` to keep
+the flags free: the 256-bit field product and square, and RSA's
+Montgomery block, are written out for those. Everything above them,
+the point formulas and the windows, is Rust.
 
 Support is detected while the program runs: on x86-64 with CPUID, on
 aarch64 by reading the ID registers, on RISC-V through the kernel's

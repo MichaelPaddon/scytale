@@ -23,6 +23,9 @@
 //! table by scanning every entry. The exponent's *width* in limbs is
 //! visible; its value, and where its bits lie, are not.
 
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod x86_64;
+
 use zeroize::Zeroize;
 
 use super::uint::Uint;
@@ -77,6 +80,11 @@ fn shape_of<const LIMBS: usize>(n: &Uint<LIMBS>) -> Shape {
         Shape::General
     }
 }
+
+/// Twice the widest modulus the crate builds a context for, in
+/// limbs: the RSA sizes have their own arithmetic over slices, so
+/// what is left here is the curves and what the tests reach for.
+const WIDEST: usize = 64;
 
 /// The context for arithmetic modulo one odd `n`: the constants that
 /// every product needs, computed once.
@@ -224,14 +232,112 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
     /// arithmetic either way: one branch on a public constant, then
     /// a fixed sequence of limb operations.
     pub(crate) fn mul(&self, a: &Uint<LIMBS>, b: &Uint<LIMBS>) -> Uint<LIMBS> {
+        #[cfg(target_arch = "x86_64")]
+        if self.shape == Shape::P256
+            && let Some(adx) = x86_64::probe()
+        {
+            return adx.mul(a, b);
+        }
+        self.mul_with(a, b)
+    }
+
+    /// `a a / R mod n`, the Montgomery square.
+    ///
+    /// Every cross product appears twice in a square, so ten
+    /// multiplications make the whole of a four-limb one where the
+    /// general product spends sixteen: the cross products once, then
+    /// doubled, then the squares of the limbs. The reduction
+    /// afterwards is the same as the product's, one word at a time.
+    pub(crate) fn sqr(&self, a: &Uint<LIMBS>) -> Uint<LIMBS> {
+        #[cfg(target_arch = "x86_64")]
+        if self.shape == Shape::P256
+            && let Some(adx) = x86_64::probe()
+        {
+            return adx.sqr(a);
+        }
+        let wide = |x: u64, y: u64| u128::from(x) * u128::from(y);
+        // Twice the width, and the widest modulus the crate has.
+        debug_assert!(2 * LIMBS <= WIDEST);
+        let mut t = [0u64; WIDEST];
+
+        // The cross products, each once: limb `i` against every limb
+        // above it, landing at `i + j`.
+        for i in 0..LIMBS {
+            let mut carry = 0u64;
+            for j in i + 1..LIMBS {
+                let v = u128::from(t[i + j])
+                    + wide(a.0[i], a.0[j])
+                    + u128::from(carry);
+                t[i + j] = v as u64;
+                carry = (v >> 64) as u64;
+            }
+            t[i + LIMBS] = carry;
+        }
+
+        // Doubled, which is the other half of every cross product.
+        let mut carry = 0u64;
+        for word in t[..2 * LIMBS].iter_mut() {
+            let doubled = (u128::from(*word) << 1) | u128::from(carry);
+            *word = doubled as u64;
+            carry = (doubled >> 64) as u64;
+        }
+
+        // Then the squares of the limbs, which have no partner.
+        let mut carry = 0u64;
+        for (i, &ai) in a.0.iter().enumerate() {
+            let v = u128::from(t[2 * i]) + wide(ai, ai) + u128::from(carry);
+            t[2 * i] = v as u64;
+            let v = u128::from(t[2 * i + 1]) + (v >> 64);
+            t[2 * i + 1] = v as u64;
+            carry = (v >> 64) as u64;
+        }
+        let mut hi = carry;
+
+        // The reduction, a word at a time as the product does it.
+        let mut mn = [0u128; LIMBS];
+        for i in 0..LIMBS {
+            let m = t[i].wrapping_mul(self.inv);
+            self.products(m, &mut mn);
+            let v = u128::from(t[i]) + mn[0];
+            debug_assert_eq!(v as u64, 0);
+            let mut carry = (v >> 64) as u64;
+            for j in 1..LIMBS {
+                let v = u128::from(t[i + j]) + mn[j] + u128::from(carry);
+                t[i + j] = v as u64;
+                carry = (v >> 64) as u64;
+            }
+            // The carry walks up the words the reduction has not
+            // reached yet, and past them into `hi`. Every word is
+            // visited whatever the carries are: stopping at the first
+            // that does not carry would be a branch on the value.
+            for word in t[i + LIMBS..2 * LIMBS].iter_mut() {
+                let v = u128::from(*word) + u128::from(carry);
+                *word = v as u64;
+                carry = (v >> 64) as u64;
+            }
+            hi += carry;
+        }
+
+        let mut out = Uint::<LIMBS>::ZERO;
+        out.0.copy_from_slice(&t[LIMBS..2 * LIMBS]);
+        let (reduced, borrow) = out.sub_borrow(&self.n);
+        let take = hi | (1 - borrow);
+        let mut result = out;
+        result.cmov(&reduced, take);
+        result
+    }
+
+    /// The multiple of `n` that clears a word, limb by limb, in the
+    /// shape the modulus admits.
+    #[inline(always)]
+    fn products(&self, m: u64, out: &mut [u128; LIMBS]) {
         match self.shape {
-            Shape::General => self.mul_with(a, b, |m, out| {
+            Shape::General => {
                 for (o, &nj) in out.iter_mut().zip(&self.n.0) {
                     *o = u128::from(m) * u128::from(nj);
                 }
-            }),
-            // 2^64 - 1, 2^32 - 1, 0, 2^64 - 2^32 + 1.
-            Shape::P256 => self.mul_with(a, b, |m, out| {
+            }
+            Shape::P256 => {
                 let m = u128::from(m);
                 out.copy_from_slice(&[
                     (m << 64) - m,
@@ -239,9 +345,8 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
                     0,
                     (m << 64) - (m << 32) + m,
                 ]);
-            }),
-            // 2^32 - 1, 2^64 - 2^32, 2^64 - 2, then 2^64 - 1 thrice.
-            Shape::P384 => self.mul_with(a, b, |m, out| {
+            }
+            Shape::P384 => {
                 let m = u128::from(m);
                 out.copy_from_slice(&[
                     (m << 32) - m,
@@ -251,21 +356,14 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
                     (m << 64) - m,
                     (m << 64) - m,
                 ]);
-            }),
+            }
         }
     }
 
-    /// The product by coarsely integrated operand scanning, with
-    /// `products` writing `m * n[j]` for every limb `j`. Inlined
-    /// into each of [`mul`](Self::mul)'s arms, so the shape's
-    /// arithmetic is straight-line rather than a call.
-    #[inline(always)]
-    fn mul_with(
-        &self,
-        a: &Uint<LIMBS>,
-        b: &Uint<LIMBS>,
-        products: impl Fn(u64, &mut [u128; LIMBS]),
-    ) -> Uint<LIMBS> {
+    /// The product by coarsely integrated operand scanning: a row of
+    /// products of one limb of `a` by `b`, then the multiple of `n`
+    /// that clears the low word, which the shape makes cheap.
+    fn mul_with(&self, a: &Uint<LIMBS>, b: &Uint<LIMBS>) -> Uint<LIMBS> {
         let wide = |x: u64, y: u64| u128::from(x) * u128::from(y);
         let mut t = [0u64; LIMBS];
         // The two words above the array: `hi` in full, and above it
@@ -286,7 +384,7 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
             // Adding this multiple of n clears the low word, so the
             // whole value shifts down one word, exactly.
             let m = t[0].wrapping_mul(self.inv);
-            products(m, &mut mn);
+            self.products(m, &mut mn);
             let v = u128::from(t[0]) + mn[0];
             debug_assert_eq!(v as u64, 0);
             let mut carry = (v >> 64) as u64;
@@ -335,7 +433,76 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
         self.mul(a, &Uint::one())
     }
 
-    /// `base ^ exponent mod n`, with `base` below `n`.
+    /// `base ^ exponent mod n` for an exponent that is public, with
+    /// `base` below `n`.
+    ///
+    /// A sliding window five bits wide over the exponent's bits,
+    /// which are a constant of the crate: the curve primes and group
+    /// orders, less two, and the exponent of a square root. Where the
+    /// exponent is a secret, [`modexp`](Self::modexp) is the one to
+    /// call; it cannot skip a zero window or index a table, and pays
+    /// for both. Here only the base is secret, and nothing here
+    /// depends on it.
+    pub(crate) fn exp_public<const E: usize>(
+        &self,
+        base: &Uint<LIMBS>,
+        exponent: &Uint<E>,
+    ) -> Uint<LIMBS> {
+        const WINDOW: usize = 5;
+        // The odd powers the windows call for: base^1, base^3, ...
+        let mont = self.to_mont(base);
+        let square = self.sqr(&mont);
+        let mut odd = [mont; 1 << (WINDOW - 1)];
+        for i in 1..odd.len() {
+            odd[i] = self.mul(&odd[i - 1], &square);
+        }
+
+        let bit = |i: usize| (exponent.0[i >> 6] >> (i & 63)) & 1;
+        let mut acc = self.from_mont(&self.rr);
+        let mut i = 64 * E;
+        let mut started = false;
+        while i > 0 {
+            i -= 1;
+            if bit(i) == 0 {
+                if started {
+                    acc = self.sqr(&acc);
+                }
+                continue;
+            }
+            // The longest window ending on a set bit, so the odd
+            // power it names is one the table holds.
+            let mut width = 1;
+            for w in 2..=WINDOW.min(i + 1) {
+                if bit(i + 1 - w) == 1 {
+                    width = w;
+                }
+            }
+            let mut digit = 0usize;
+            for j in 0..width {
+                digit = (digit << 1) | (bit(i - j) as usize);
+            }
+            if started {
+                for _ in 0..width {
+                    acc = self.sqr(&acc);
+                }
+                acc = self.mul(&acc, &odd[digit >> 1]);
+            } else {
+                acc = odd[digit >> 1];
+                started = true;
+            }
+            i -= width - 1;
+        }
+        self.from_mont(&acc)
+    }
+
+    /// `base ^ exponent mod n`, with `base` below `n`, for an
+    /// exponent that must not be learned from the timing.
+    ///
+    /// Nothing in the crate has a secret exponent at this width any
+    /// more: RSA has its own arithmetic over slices, and the curves'
+    /// exponents are constants. It stays as what
+    /// [`exp_public`](Self::exp_public) is checked against.
+    #[cfg(test)]
     ///
     /// Fixed four-bit windows over the exponent's full width: the
     /// same doublings, multiplications and whole-table scans
@@ -360,7 +527,7 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
         let mut acc = table[0];
         for window in (0..16 * E).rev() {
             for _ in 0..4 {
-                acc = self.mul(&acc, &acc);
+                acc = self.sqr(&acc);
             }
             let digit = (exponent.0[window >> 4] >> ((window & 15) * 4)) & 15;
             // Read the whole table, keeping the entry whose index
@@ -399,6 +566,28 @@ mod tests {
         check(Uint::<3>([0x8765432187654321, 0x1234567812345678, 0xabcd]));
     }
 
+    /// The square is the product of a value with itself, at both
+    /// curve shapes and at a general modulus.
+    #[test]
+    fn square_matches_the_product() {
+        fn check<const L: usize>(n: Uint<L>) {
+            let m = Montgomery::known(n);
+            let mut x = m.to_mont(&Uint::from_limbs(&[3]));
+            for _ in 0..100 {
+                assert_eq!(m.sqr(&x).0, m.mul(&x, &x).0);
+                x = m.mul(&x, &Uint::from_limbs(&[0x9e3779b97f4a7c15]));
+            }
+            let (below, _) = n.sub_borrow(&Uint::one());
+            for edge in [Uint::ZERO, Uint::one(), below] {
+                assert_eq!(m.sqr(&edge).0, m.mul(&edge, &edge).0);
+            }
+        }
+        check(Uint(P256_PRIME));
+        check(Uint(P384_PRIME));
+        check(Uint::<3>([0x8765432187654321, 0x1234567812345678, 0xabcd]));
+        check(Uint::<1>([1000003]));
+    }
+
     #[test]
     fn refuses_even_and_trivial_moduli() {
         assert!(Montgomery::new(Uint::<1>([8])).is_none());
@@ -430,6 +619,34 @@ mod tests {
         let x = Uint::<3>([0xdeadbeef, 0xcafe, 0x1234]);
         let back = m.from_mont(&m.to_mont(&x));
         assert_eq!(back.0, x.0);
+    }
+
+    /// The public-exponent window agrees with the constant-time
+    /// exponentiation, at the exponents the curves use and at small
+    /// ones that reach its edges.
+    #[test]
+    fn public_exponent_matches_modexp() {
+        fn check<const L: usize>(n: Uint<L>) {
+            let m = Montgomery::known(n);
+            let (less_two, _) = n.sub_borrow(&Uint::from_limbs(&[2]));
+            let (plus_one, _) = n.add_carry(&Uint::one());
+            let exponents = [
+                less_two,
+                plus_one.shr(2),
+                Uint::ZERO,
+                Uint::one(),
+                Uint::from_limbs(&[2]),
+                Uint::from_limbs(&[0xffff_ffff]),
+            ];
+            let mut x = Uint::from_limbs(&[7]);
+            for e in exponents {
+                assert_eq!(m.exp_public(&x, &e).0, m.modexp(&x, &e).0);
+                x = m.mulmod(&x, &Uint::from_limbs(&[0x9e3779b97f4a7c15]));
+            }
+        }
+        check(Uint(P256_PRIME));
+        check(Uint(P384_PRIME));
+        check(Uint::<3>([0x8765432187654321, 0x1234567812345678, 0xabcd]));
     }
 
     #[test]

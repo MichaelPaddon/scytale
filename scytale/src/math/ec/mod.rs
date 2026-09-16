@@ -68,6 +68,17 @@ pub(crate) struct Curve<const L: usize> {
 /// and so the width of the comb's digit.
 const COMB: usize = 6;
 
+/// How many combs run side by side. Each has its own table, holding
+/// the same combinations shifted a further `block / TABLES` bits, so
+/// the doublings divide by this and only the additions remain. Four
+/// costs 16 KB of table for P-256 and 24 KB for P-384, and saves
+/// three doublings in four.
+const TABLES: usize = 4;
+
+/// Entries in one comb's table: every nonzero combination of its
+/// blocks.
+const ENTRIES: usize = (1 << COMB) - 1;
+
 /// The bits in one comb block, which is how many doublings a
 /// fixed-base multiplication makes.
 const fn block<const L: usize>() -> usize {
@@ -195,6 +206,10 @@ pub(crate) struct Engine<'a, const L: usize> {
     curve: &'a Curve<L>,
     field: &'a Montgomery<L>,
     order: &'a Montgomery<L>,
+    /// The P-256 field product written out for this processor, asked
+    /// once for an operation rather than once for every product.
+    #[cfg(target_arch = "x86_64")]
+    fast: Option<crate::math::montgomery::x86_64::Adx>,
     /// `b`, in the domain.
     b: Uint<L>,
     /// One, in the domain: `R mod p`.
@@ -205,12 +220,18 @@ impl<'a, const L: usize> Engine<'a, L> {
     pub(crate) fn new(curve: &'a Curve<L>) -> Self {
         let field = &curve.field;
         let order = &curve.order;
+        #[cfg(target_arch = "x86_64")]
+        let fast = (L == 4 && curve.p.0[..] == super::montgomery::P256_PRIME)
+            .then(crate::math::montgomery::x86_64::probe)
+            .flatten();
         let one = field.to_mont(&Uint::one());
         let b = field.to_mont(&curve.b);
         Engine {
             curve,
             field,
             order,
+            #[cfg(target_arch = "x86_64")]
+            fast,
             b,
             one,
         }
@@ -218,7 +239,43 @@ impl<'a, const L: usize> Engine<'a, L> {
 
     // The field, everything in the Montgomery domain.
 
+    /// The field product. The formulas are nothing else, so this is
+    /// the one call worth taking the long way round for: where the
+    /// processor has the instructions, the product is the assembly
+    /// inlined here rather than a call into the generic width.
+    #[inline(always)]
     fn mul(&self, a: &Uint<L>, b: &Uint<L>) -> Uint<L> {
+        #[cfg(target_arch = "x86_64")]
+        if let Some(fast) = self.fast {
+            return fast.mul(a, b);
+        }
+        self.portable_mul(a, b)
+    }
+
+    /// The square, which is the product of a value with itself but
+    /// for the cross terms it need not take twice.
+    #[inline(always)]
+    fn sqr(&self, a: &Uint<L>) -> Uint<L> {
+        #[cfg(target_arch = "x86_64")]
+        if let Some(fast) = self.fast {
+            return fast.sqr(a);
+        }
+        self.portable_sqr(a)
+    }
+
+    /// The square for a width or a modulus with nothing written out
+    /// for it, kept out of line as the product is.
+    #[inline(never)]
+    fn portable_sqr(&self, a: &Uint<L>) -> Uint<L> {
+        self.field.sqr(a)
+    }
+
+    /// The product for a width or a modulus with nothing written out
+    /// for it. Kept out of line: inlined beside the assembly it
+    /// doubled the size of every formula, and the spilling that came
+    /// with that cost more than the call.
+    #[inline(never)]
+    fn portable_mul(&self, a: &Uint<L>, b: &Uint<L>) -> Uint<L> {
         self.field.mul(a, b)
     }
 
@@ -233,7 +290,7 @@ impl<'a, const L: usize> Engine<'a, L> {
     /// `a^-1`, by Fermat: `a^(p-2)`. Zero maps to zero.
     fn invert(&self, a: &Uint<L>) -> Uint<L> {
         let (exponent, _) = self.curve.p.sub_borrow(&Uint::from_limbs(&[2]));
-        let plain = self.field.modexp(&self.field.from_mont(a), &exponent);
+        let plain = self.field.exp_public(&self.field.from_mont(a), &exponent);
         self.field.to_mont(&plain)
     }
 
@@ -243,10 +300,10 @@ impl<'a, const L: usize> Engine<'a, L> {
     fn sqrt(&self, a: &Uint<L>) -> Option<Uint<L>> {
         let (exponent, _) = self.curve.p.add_carry(&Uint::one());
         let exponent = exponent.shr(2);
-        let root = self
-            .field
-            .to_mont(&self.field.modexp(&self.field.from_mont(a), &exponent));
-        if self.mul(&root, &root).0 == a.0 {
+        let root = self.field.to_mont(
+            &self.field.exp_public(&self.field.from_mont(a), &exponent),
+        );
+        if self.sqr(&root).0 == a.0 {
             Some(root)
         } else {
             None
@@ -255,7 +312,7 @@ impl<'a, const L: usize> Engine<'a, L> {
 
     /// `x^3 - 3x + b`, the right-hand side of the curve equation.
     fn rhs(&self, x: &Uint<L>) -> Uint<L> {
-        let x2 = self.mul(x, x);
+        let x2 = self.sqr(x);
         let x3 = self.mul(&x2, x);
         let three_x = self.add(&self.add(x, x), x);
         self.add(&self.sub(&x3, &three_x), &self.b)
@@ -337,9 +394,9 @@ impl<'a, const L: usize> Engine<'a, L> {
         let (x, y, z) = (&p.x, &p.y, &p.z);
         let b = &self.b;
 
-        let t0 = self.mul(x, x);
-        let t1 = self.mul(y, y);
-        let t2 = self.mul(z, z);
+        let t0 = self.sqr(x);
+        let t1 = self.sqr(y);
+        let t2 = self.sqr(z);
         let t3 = self.mul(x, y);
         let t3 = self.add(&t3, &t3);
         let z3 = self.mul(x, z);
@@ -411,31 +468,44 @@ impl<'a, const L: usize> Engine<'a, L> {
     /// [`point_mul`]: Self::point_mul
     fn mul_base(&self, k: &Uint<L>) -> Point<L> {
         let block = block::<L>();
+        let span = block.div_ceil(TABLES);
         let mut acc = self.identity();
-        for t in (0..block).rev() {
+        for t in (0..span).rev() {
             acc = self.point_double(&acc);
-            // Bit `t` of every block, gathered least block first.
-            // The last block runs past the scalar when the width is
-            // not a multiple of `COMB`; those bits are zero.
-            let mut digit = 0u64;
-            for i in 0..COMB {
-                let bit = i * block + t;
-                if bit < 64 * L {
-                    digit |= ((k.0[bit >> 6] >> (bit & 63)) & 1) << i;
+            for (i, table) in self.curve.base.chunks_exact(ENTRIES).enumerate()
+            {
+                // The bit this comb reads in each block. Where the
+                // blocks do not divide evenly the last comb runs past
+                // the end of one, which is a fact about the widths
+                // and not about the scalar.
+                let offset = i * span + t;
+                if offset >= block {
+                    continue;
                 }
+                // That bit of every block, gathered least block
+                // first. The last block runs past the scalar when the
+                // width is not a multiple of `COMB`; those bits are
+                // zero.
+                let mut digit = 0u64;
+                for j in 0..COMB {
+                    let bit = j * block + offset;
+                    if bit < 64 * L {
+                        digit |= ((k.0[bit >> 6] >> (bit & 63)) & 1) << j;
+                    }
+                }
+                // Entry `j` holds the digit `j + 1`, so a zero digit
+                // matches nothing and leaves the identity, which is
+                // what it stands for.
+                let mut chosen = self.identity();
+                for (j, entry) in table.iter().enumerate() {
+                    let index = j as u64 + 1;
+                    let matches = ((index ^ digit).wrapping_sub(1)) >> 63;
+                    chosen.x.cmov(&Uint(entry[0]), matches);
+                    chosen.y.cmov(&Uint(entry[1]), matches);
+                    chosen.z.cmov(&self.one, matches);
+                }
+                acc = self.point_add(&acc, &chosen);
             }
-            // Entry `j` holds the digit `j + 1`, so a zero digit
-            // matches nothing and leaves the identity, which is what
-            // it stands for.
-            let mut chosen = self.identity();
-            for (j, entry) in self.curve.base.iter().enumerate() {
-                let index = j as u64 + 1;
-                let matches = ((index ^ digit).wrapping_sub(1)) >> 63;
-                chosen.x.cmov(&Uint(entry[0]), matches);
-                chosen.y.cmov(&Uint(entry[1]), matches);
-                chosen.z.cmov(&self.one, matches);
-            }
-            acc = self.point_add(&acc, &chosen);
         }
         acc
     }
@@ -467,7 +537,7 @@ impl<'a, const L: usize> Engine<'a, L> {
 
     fn scalar_invert(&self, a: &Uint<L>) -> Uint<L> {
         let (exponent, _) = self.curve.n.sub_borrow(&Uint::from_limbs(&[2]));
-        self.order.modexp(a, &exponent)
+        self.order.exp_public(a, &exponent)
     }
 
     /// A value below `2^(64 L)` reduced modulo `n`, which takes one
@@ -1365,38 +1435,105 @@ mod tests {
         check(&P384);
     }
 
-    /// Every entry of a comb table is the multiple of `G` it
-    /// stands for: the sum of `2^(i * d) G` over the set bits of
-    /// its index, in the field's domain. This is what says the
-    /// checked-in tables are the curve's and not something else.
+    /// The bases each comb's table is built from: block `j` of comb
+    /// `i` stands for `2^(j block + i span) G`.
+    fn comb_bases<const L: usize>(e: &Engine<L>) -> [[Point<L>; COMB]; TABLES] {
+        let block = block::<L>();
+        let span = block.div_ceil(TABLES);
+        let mut bases = [[e.identity(); COMB]; TABLES];
+        let mut point = generator(e);
+        let mut bit = 0;
+        for j in 0..COMB {
+            for (i, table) in bases.iter_mut().enumerate() {
+                // The doublings walk the exponents in order, so each
+                // base is the one before it doubled the difference.
+                let want = j * block + i * span;
+                while bit < want {
+                    point = e.point_double(&point);
+                    bit += 1;
+                }
+                table[j] = point;
+            }
+        }
+        bases
+    }
+
+    /// The entry a digit stands for: the sum of the comb's bases over
+    /// the digit's set bits.
+    fn comb_entry<const L: usize>(
+        e: &Engine<L>,
+        bases: &[Point<L>; COMB],
+        digit: usize,
+    ) -> Point<L> {
+        let mut sum = e.identity();
+        for (j, base) in bases.iter().enumerate() {
+            if digit >> j & 1 == 1 {
+                sum = e.point_add(&sum, base);
+            }
+        }
+        sum
+    }
+
+    /// Every entry of every comb table is the multiple of `G` it
+    /// stands for: the sum of `2^(j block + i span) G` over the set
+    /// bits of its index, in the field's domain. This is what says
+    /// the checked-in tables are the curve's and not something else.
     #[test]
     fn base_tables_are_multiples_of_g() {
         fn check<const L: usize>(curve: &Curve<L>) {
             let e = Engine::new(curve);
-            let mut bases = [generator(&e); COMB];
-            for i in 1..COMB {
-                let mut p = bases[i - 1];
-                for _ in 0..block::<L>() {
-                    p = e.point_double(&p);
+            let bases = comb_bases(&e);
+            assert_eq!(curve.base.len(), TABLES * ENTRIES);
+            for (i, table) in curve.base.chunks_exact(ENTRIES).enumerate() {
+                for (j, entry) in table.iter().enumerate() {
+                    let sum = comb_entry(&e, &bases[i], j + 1);
+                    let (x, y) = e.to_affine(&sum).expect("a sum of bases");
+                    assert_eq!(e.field.to_mont(&x).0, entry[0], "{i} {j} x");
+                    assert_eq!(e.field.to_mont(&y).0, entry[1], "{i} {j} y");
                 }
-                bases[i] = p;
-            }
-            assert_eq!(curve.base.len(), (1 << COMB) - 1);
-            for (j, entry) in curve.base.iter().enumerate() {
-                let index = j + 1;
-                let mut sum = e.identity();
-                for (i, b) in bases.iter().enumerate() {
-                    if index >> i & 1 == 1 {
-                        sum = e.point_add(&sum, b);
-                    }
-                }
-                let (x, y) = e.to_affine(&sum).expect("a sum of bases");
-                assert_eq!(e.field.to_mont(&x).0, entry[0], "{index} x");
-                assert_eq!(e.field.to_mont(&y).0, entry[1], "{index} y");
             }
         }
         check(&P256);
         check(&P384);
+    }
+
+    /// Prints the tables in the form `base.rs` holds them. Ignored:
+    /// it is how that file is made, not a check on it, and
+    /// `base_tables_are_multiples_of_g` is the check.
+    #[test]
+    #[ignore = "writes the table in base.rs; run it to rebuild that"]
+    fn print_base_tables() {
+        fn print<const L: usize>(name: &str, curve: &Curve<L>) {
+            let e = Engine::new(curve);
+            let bases = comb_bases(&e);
+            std::println!(
+                "pub(crate) const {}: [[[u64; {}]; 2]; {}] = [",
+                name,
+                L,
+                TABLES * ENTRIES
+            );
+            for table in bases.iter() {
+                for digit in 1..=ENTRIES {
+                    let sum = comb_entry(&e, table, digit);
+                    let (x, y) = e.to_affine(&sum).expect("a sum of bases");
+                    let hex = |v: Uint<L>| {
+                        let words: std::vec::Vec<std::string::String> =
+                            v.0.iter()
+                                .map(|w| std::format!("0x{w:016x}"))
+                                .collect();
+                        words.join(", ")
+                    };
+                    std::println!(
+                        "    [[{}],\n     [{}]],",
+                        hex(e.field.to_mont(&x)),
+                        hex(e.field.to_mont(&y))
+                    );
+                }
+            }
+            std::println!("];");
+        }
+        print("P256_BASE", &P256);
+        print("P384_BASE", &P384);
     }
 
     /// The fixed-base multiplication agrees with the general one,
