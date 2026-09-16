@@ -422,7 +422,7 @@ is dropped.
 | riscv64 | scalar cryptography (Zknh) | SHA-256, SHA-512 |
 | aarch64 | ARMv8 SHA3 extension | SHA-3, SHAKE, cSHAKE, KMAC |
 | x86-64 | BMI1 and BMI2 | SHA-3, SHAKE, cSHAKE, KMAC |
-| x86-64 | BMI2 and ADX | RSA, P-256 field arithmetic |
+| x86-64 | BMI2 and ADX | RSA, P-256 and P-384 field arithmetic |
 | x86-64 | AVX2 | ChaCha20 |
 | aarch64 | NEON | ChaCha20 |
 | riscv64 | vector extension with Zvkb | ChaCha20 |

@@ -364,6 +364,20 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
     /// products of one limb of `a` by `b`, then the multiple of `n`
     /// that clears the low word, which the shape makes cheap.
     fn mul_with(&self, a: &Uint<LIMBS>, b: &Uint<LIMBS>) -> Uint<LIMBS> {
+        // Six limbs is P-384's width, field and order alike, and the
+        // rows there are written out for the carry-chain
+        // instructions; the shaped reduction below saves multiplies,
+        // but not as many as two chains save cycles.
+        #[cfg(target_arch = "x86_64")]
+        if LIMBS == 6
+            && let Some(adx) = x86_64::probe()
+        {
+            let mut context = [self.inv; 13];
+            context[1..7].copy_from_slice(&self.n.0);
+            context[7..].copy_from_slice(&b.0);
+            return adx.mul6(a, &context, &self.n);
+        }
+
         let wide = |x: u64, y: u64| u128::from(x) * u128::from(y);
         let mut t = [0u64; LIMBS];
         // The two words above the array: `hi` in full, and above it

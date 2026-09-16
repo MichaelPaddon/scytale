@@ -330,3 +330,140 @@ unsafe fn sqr(a: *const u64, out: *mut u64) {
         );
     }
 }
+
+/// One product of the multiplier in `rdx` by the word at `$at` bytes
+/// into the context: the low half on the carry chain into `$lo`, the
+/// high half on the overflow chain into the word above it.
+#[rustfmt::skip]
+macro_rules! wide_product {
+    ($at:literal, $lo:literal, $hi:literal) => {
+        concat!(
+            "mulx rcx, rax, qword ptr [rdi + ", $at, "]\n",
+            "adcx ", $lo, ", rax\n",
+            "adox ", $hi, ", rcx\n",
+        )
+    };
+}
+
+/// A row of products of one limb of `a` by every limb of `b`, then
+/// the multiple of the modulus that clears the row's low word.
+///
+/// Both chains run at once: the products' low halves on the carry
+/// flag, their high halves on the overflow flag. The window is eight
+/// words, which is what a row of six products and what it is added to
+/// can reach, and it rotates a place each time: the word the
+/// reduction clears becomes the top of the next, already zero.
+#[rustfmt::skip]
+macro_rules! wide_step {
+    ($i:literal, $w0:literal, $w1:literal, $w2:literal, $w3:literal,
+     $w4:literal, $w5:literal, $w6:literal, $w7:literal) => {
+        concat!(
+            "mov rdx, qword ptr [rsi + ", $i, "]\n",
+            "xor eax, eax\n",
+            wide_product!(56, $w0, $w1),
+            wide_product!(64, $w1, $w2),
+            wide_product!(72, $w2, $w3),
+            wide_product!(80, $w3, $w4),
+            wide_product!(88, $w4, $w5),
+            wide_product!(96, $w5, $w6),
+            "mov eax, 0\n",
+            "adcx ", $w6, ", rax\n",
+            "adox ", $w7, ", rax\n",
+            "adc ", $w7, ", 0\n",
+            // The multiple of the modulus that clears the low word.
+            // `imul` writes the flags, so the chains start again.
+            "mov rdx, ", $w0, "\n",
+            "imul rdx, qword ptr [rdi]\n",
+            "xor eax, eax\n",
+            wide_product!(8, $w0, $w1),
+            wide_product!(16, $w1, $w2),
+            wide_product!(24, $w2, $w3),
+            wide_product!(32, $w3, $w4),
+            wide_product!(40, $w4, $w5),
+            wide_product!(48, $w5, $w6),
+            "mov eax, 0\n",
+            "adcx ", $w6, ", rax\n",
+            "adox ", $w7, ", rax\n",
+            "adc ", $w7, ", 0\n",
+        )
+    };
+}
+
+impl Adx {
+    /// `a b / 2^384 mod n` for any six-limb odd `n`, with `b` below
+    /// `n` and `a` any six limbs; the result is below `n`.
+    ///
+    /// `context` is the modulus's low-limb inverse, then its limbs,
+    /// then `b`: one pointer for both of the things a row reads,
+    /// which is what leaves a register for the window's eighth word.
+    #[inline(always)]
+    pub(crate) fn mul6<const L: usize>(
+        self,
+        a: &Uint<L>,
+        context: &[u64; 13],
+        modulus: &Uint<L>,
+    ) -> Uint<L> {
+        debug_assert_eq!(L, 6);
+        // SAFETY: `self` was minted by `probe`, which hands one out
+        // only where the instructions are; the caller holds one for a
+        // six-limb modulus, and the context is as this asks.
+        let (value, top) = unsafe { mul6_rows(a.0.as_ptr(), context.as_ptr()) };
+        let mut out = Uint::<L>::ZERO;
+        out.0.copy_from_slice(&value);
+        // The rows leave a value below twice the modulus, so one
+        // subtraction settles it: taken when it does not borrow, or
+        // when the value overflowed the six words.
+        let (reduced, borrow) = out.sub_borrow(modulus);
+        out.cmov(&reduced, top | (1 - borrow));
+        out
+    }
+}
+
+/// The rows and reductions, leaving the value and the word above it.
+///
+/// # Safety
+/// Requires ADX and BMI2; `a` must point at six limbs and `context`
+/// at thirteen: the inverse, the modulus, then `b`.
+#[inline(always)]
+unsafe fn mul6_rows(a: *const u64, context: *const u64) -> ([u64; 6], u64) {
+    let (v0, v1, v2, v3, v4, v5): (u64, u64, u64, u64, u64, u64);
+    let (top, spare): (u64, u64);
+    unsafe {
+        core::arch::asm!(
+            "xor r8d, r8d",
+            "xor r9d, r9d",
+            "xor r10d, r10d",
+            "xor r11d, r11d",
+            "xor r12d, r12d",
+            "xor r13d, r13d",
+            "xor r14d, r14d",
+            "xor r15d, r15d",
+            wide_step!(0, "r8", "r9", "r10", "r11", "r12", "r13", "r14",
+                       "r15"),
+            wide_step!(8, "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+                       "r8"),
+            wide_step!(16, "r10", "r11", "r12", "r13", "r14", "r15", "r8",
+                       "r9"),
+            wide_step!(24, "r11", "r12", "r13", "r14", "r15", "r8", "r9",
+                       "r10"),
+            wide_step!(32, "r12", "r13", "r14", "r15", "r8", "r9", "r10",
+                       "r11"),
+            wide_step!(40, "r13", "r14", "r15", "r8", "r9", "r10", "r11",
+                       "r12"),
+            in("rsi") a,
+            in("rdi") context,
+            out("rax") _, out("rcx") _, out("rdx") _,
+            lateout("r14") v0,
+            lateout("r15") v1,
+            lateout("r8") v2,
+            lateout("r9") v3,
+            lateout("r10") v4,
+            lateout("r11") v5,
+            lateout("r12") top,
+            lateout("r13") spare,
+            options(nostack),
+        );
+    }
+    debug_assert_eq!(spare, 0);
+    ([v0, v1, v2, v3, v4, v5], top)
+}
