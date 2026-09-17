@@ -255,6 +255,13 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
         {
             return adx.sqr(a);
         }
+        // At six limbs the product is written out for the processor
+        // and the square is not, and the ten multiplications a square
+        // saves are worth less than the two carry chains.
+        #[cfg(target_arch = "x86_64")]
+        if LIMBS == 6 && x86_64::probe().is_some() {
+            return self.mul(a, a);
+        }
         let wide = |x: u64, y: u64| u128::from(x) * u128::from(y);
         // Twice the width, and the widest modulus the crate has.
         debug_assert!(2 * LIMBS <= WIDEST);

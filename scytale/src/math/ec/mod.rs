@@ -64,6 +64,57 @@ pub(crate) struct Curve<const L: usize> {
     pub(crate) oid: &'static [u8],
 }
 
+/// The bits of scalar one window of the variable-base multiplication
+/// takes.
+const WINDOW: usize = 5;
+
+/// A point in Jacobian coordinates: `x = X / Z^2`, `y = Y / Z^3`,
+/// and the identity is anything with `Z = 0`.
+#[derive(Clone, Copy)]
+struct Jacobian<const L: usize> {
+    x: Uint<L>,
+    y: Uint<L>,
+    z: Uint<L>,
+}
+
+impl<const L: usize> Jacobian<L> {
+    fn cmov(&mut self, other: &Self, condition: u64) {
+        self.x.cmov(&other.x, condition);
+        self.y.cmov(&other.y, condition);
+        self.z.cmov(&other.z, condition);
+    }
+}
+
+/// Booth's recoding of window `at` of `k`: the digit's magnitude,
+/// which is at most sixteen, and one when it is negative.
+///
+/// The window reads one bit below its own, so the digits of the whole
+/// scalar are signed and each is worth `2^(5 window)`. Nothing here
+/// branches or indexes on the scalar.
+fn booth<const L: usize>(k: &Uint<L>, at: usize) -> (u64, u64) {
+    let bit = |i: usize| -> u64 {
+        if i >= 64 * L {
+            0
+        } else {
+            (k.0[i >> 6] >> (i & 63)) & 1
+        }
+    };
+    let mut chunk = 0u64;
+    for i in 0..=WINDOW {
+        // The lowest window reads a zero below the scalar.
+        let index = at * WINDOW + i;
+        let value = if index == 0 { 0 } else { bit(index - 1) };
+        chunk |= value << i;
+    }
+    // The sign is the top bit; the magnitude is the rest, rounded to
+    // the nearest multiple of two and halved, which is Booth's digit.
+    let sign = (chunk >> WINDOW) & 1;
+    let mask = sign.wrapping_neg();
+    let complement = (1u64 << (WINDOW + 1)) - chunk - 1;
+    let magnitude = (complement & mask) | (chunk & !mask);
+    ((magnitude >> 1) + (magnitude & 1), sign)
+}
+
 /// The blocks a scalar is cut into for a fixed-base multiplication,
 /// and so the width of the comb's digit.
 const COMB: usize = 6;
@@ -191,6 +242,9 @@ struct Point<const L: usize> {
 }
 
 impl<const L: usize> Point<L> {
+    /// Only the complete multiplication the tests check against picks
+    /// between points this way now.
+    #[cfg(test)]
     fn cmov(&mut self, other: &Self, condition: u64) {
         self.x.cmov(&other.x, condition);
         self.y.cmov(&other.y, condition);
@@ -435,9 +489,188 @@ impl<'a, const L: usize> Engine<'a, L> {
         }
     }
 
-    /// `k * p`, by fixed four-bit windows over the scalar's full
-    /// width, the table read by scanning it whole.
+    // The variable-base multiplication runs in Jacobian coordinates,
+    // where `x = X / Z^2` and `y = Y / Z^3`. A doubling there costs
+    // three multiplications and five squarings against the complete
+    // formulas' eight and three, which is most of what a scalar
+    // multiplication does; the addition is not complete, so every
+    // case it does not cover is settled by a mask below.
+
+    /// Doubling in Jacobian coordinates, for `a = -3`.
+    ///
+    /// The identity has `Z = 0`, and doubling it leaves `Z = 0`, so
+    /// that case needs nothing.
+    fn jacobian_double(&self, p: &Jacobian<L>) -> Jacobian<L> {
+        let delta = self.sqr(&p.z);
+        let gamma = self.sqr(&p.y);
+        let beta = self.mul(&p.x, &gamma);
+        let sum = self.add(&p.x, &delta);
+        let difference = self.sub(&p.x, &delta);
+        let product = self.mul(&sum, &difference);
+        let alpha = self.add(&self.add(&product, &product), &product);
+        let beta4 = self.add(&beta, &beta);
+        let beta4 = self.add(&beta4, &beta4);
+        let beta8 = self.add(&beta4, &beta4);
+        let x = self.sub(&self.sqr(&alpha), &beta8);
+        let gamma2 = self.sqr(&gamma);
+        let gamma8 = {
+            let two = self.add(&gamma2, &gamma2);
+            let four = self.add(&two, &two);
+            self.add(&four, &four)
+        };
+        let y = self.sub(&self.mul(&alpha, &self.sub(&beta4, &x)), &gamma8);
+        let yz = self.add(&p.y, &p.z);
+        let z = self.sub(&self.sub(&self.sqr(&yz), &gamma), &delta);
+        Jacobian { x, y, z }
+    }
+
+    /// Addition in Jacobian coordinates.
+    ///
+    /// The formula is not complete: it is wrong when the points are
+    /// equal, and when either is the identity. Each of those is
+    /// settled by a mask rather than a branch: `twice` is the double
+    /// of `q`, which is the answer when the two are equal, `q` is the
+    /// answer when `p` is the identity, and `p` is the answer when
+    /// `q` is. Opposite points are the one case the formula does
+    /// handle, leaving `Z = 0`, which is what they add to.
+    fn jacobian_add(
+        &self,
+        p: &Jacobian<L>,
+        q: &Jacobian<L>,
+        twice: &Jacobian<L>,
+    ) -> Jacobian<L> {
+        let zz1 = self.sqr(&p.z);
+        let zz2 = self.sqr(&q.z);
+        let u1 = self.mul(&p.x, &zz2);
+        let u2 = self.mul(&q.x, &zz1);
+        let s1 = self.mul(&self.mul(&p.y, &q.z), &zz2);
+        let s2 = self.mul(&self.mul(&q.y, &p.z), &zz1);
+        let h = self.sub(&u2, &u1);
+        let r = self.sub(&s2, &s1);
+        let r = self.add(&r, &r);
+        let h2 = self.add(&h, &h);
+        let i = self.sqr(&h2);
+        let j = self.mul(&h, &i);
+        let v = self.mul(&u1, &i);
+        let x = {
+            let v2 = self.add(&v, &v);
+            self.sub(&self.sub(&self.sqr(&r), &j), &v2)
+        };
+        let y = {
+            let s1j = self.mul(&s1, &j);
+            let s1j2 = self.add(&s1j, &s1j);
+            self.sub(&self.mul(&r, &self.sub(&v, &x)), &s1j2)
+        };
+        let z = {
+            let sum = self.add(&p.z, &q.z);
+            let squared = self.sub(&self.sub(&self.sqr(&sum), &zz1), &zz2);
+            self.mul(&squared, &h)
+        };
+        let mut out = Jacobian { x, y, z };
+        // Equal points: `h` and `r` are both zero, and the formula
+        // above yields nothing useful.
+        let equal = h.is_zero_mask() & r.is_zero_mask();
+        out.cmov(twice, equal);
+        // Either being the identity, which the formula also misses.
+        out.cmov(q, p.z.is_zero_mask());
+        out.cmov(p, q.z.is_zero_mask());
+        out
+    }
+
+    /// `k * p`, by signed five-bit windows over the scalar, the table
+    /// read by scanning it whole.
+    ///
+    /// Booth's recoding gives each window a digit in `-16..=16`, so
+    /// the table holds sixteen multiples rather than thirty-two, and
+    /// a digit's sign only negates the entry, which is one
+    /// subtraction. The doubles of the same multiples ride along, for
+    /// the one case the addition cannot do itself.
     fn point_mul(&self, p: &Point<L>, k: &Uint<L>) -> Point<L> {
+        let base = self.to_jacobian(p);
+        let mut table = [base; 16];
+        let mut doubles = [base; 16];
+        let twice_base = self.jacobian_double(&base);
+        for i in 1..16 {
+            // Multiples in order, each the one before it plus the
+            // base. The first of them is the base doubled, which is
+            // the case the addition hands to `twice`.
+            table[i] = self.jacobian_add(&table[i - 1], &base, &twice_base);
+        }
+        for (double, entry) in doubles.iter_mut().zip(&table) {
+            *double = self.jacobian_double(entry);
+        }
+
+        let windows = (64 * L + 1).div_ceil(WINDOW);
+        let mut acc = self.jacobian_identity();
+        for window in (0..windows).rev() {
+            if window + 1 != windows {
+                for _ in 0..WINDOW {
+                    acc = self.jacobian_double(&acc);
+                }
+            }
+            let (digit, sign) = booth(k, window);
+            // The scan keeps the entry the digit names, and the
+            // identity for a digit of zero, which adds nothing.
+            let mut chosen = self.jacobian_identity();
+            let mut twice = self.jacobian_identity();
+            for (i, (entry, double)) in table.iter().zip(&doubles).enumerate() {
+                let matches = (((i as u64 + 1) ^ digit).wrapping_sub(1)) >> 63;
+                chosen.cmov(entry, matches);
+                twice.cmov(double, matches);
+            }
+            // A negative digit takes the entry's opposite, which is
+            // its `y` negated.
+            let negated = Jacobian {
+                x: chosen.x,
+                y: self.sub(&Uint::ZERO, &chosen.y),
+                z: chosen.z,
+            };
+            chosen.cmov(&negated, sign);
+            let negated_twice = Jacobian {
+                x: twice.x,
+                y: self.sub(&Uint::ZERO, &twice.y),
+                z: twice.z,
+            };
+            twice.cmov(&negated_twice, sign);
+            acc = self.jacobian_add(&acc, &chosen, &twice);
+        }
+        self.projective(&acc)
+    }
+
+    /// The same point in Jacobian coordinates, which for `Z = 1` and
+    /// for the identity is the same triple.
+    fn to_jacobian(&self, p: &Point<L>) -> Jacobian<L> {
+        debug_assert!(p.z.0 == self.one.0 || p.z.is_zero());
+        Jacobian {
+            x: p.x,
+            y: p.y,
+            z: p.z,
+        }
+    }
+
+    /// Back to the projective form the rest of the code holds:
+    /// `(X Z : Y : Z^3)`, which needs no inversion.
+    fn projective(&self, p: &Jacobian<L>) -> Point<L> {
+        let zz = self.sqr(&p.z);
+        Point {
+            x: self.mul(&p.x, &p.z),
+            y: p.y,
+            z: self.mul(&zz, &p.z),
+        }
+    }
+
+    fn jacobian_identity(&self) -> Jacobian<L> {
+        Jacobian {
+            x: self.one,
+            y: self.one,
+            z: Uint::ZERO,
+        }
+    }
+
+    /// `k * p` by the complete formulas, four bits at a time: what
+    /// the windowed multiplication above is checked against.
+    #[cfg(test)]
+    fn point_mul_complete(&self, p: &Point<L>, k: &Uint<L>) -> Point<L> {
         let mut table = [self.identity(); 16];
         for i in 1..16 {
             table[i] = self.point_add(&table[i - 1], p);
@@ -1534,6 +1767,52 @@ mod tests {
         }
         print("P256_BASE", &P256);
         print("P384_BASE", &P384);
+    }
+
+    /// The windowed multiplication in Jacobian coordinates agrees
+    /// with the complete formulas, over scalars that reach its
+    /// corners: zero, one, the order less one, values whose top
+    /// window is partly past the scalar, and ones whose digits repeat
+    /// so that a window's entry is what the accumulator already
+    /// holds, which is the case the formulas cannot do themselves.
+    #[test]
+    fn windowed_matches_the_complete_multiplication() {
+        fn check<const L: usize>(curve: &Curve<L>) {
+            let e = Engine::new(curve);
+            let g = generator(&e);
+            let (order_less_one, _) = curve.n.sub_borrow(&Uint::one());
+            let mut scalars = std::vec![
+                Uint::<L>::ZERO,
+                Uint::one(),
+                Uint::from_limbs(&[2]),
+                Uint::from_limbs(&[16]),
+                Uint::from_limbs(&[31]),
+                Uint::from_limbs(&[32]),
+                Uint::from_limbs(&[0x21084210]),
+                order_less_one,
+                curve.n,
+            ];
+            // Every limb the same, so every window is the same digit.
+            scalars.push(Uint([0x1084210842108421; L]));
+            let mut x = Uint::<L>::from_limbs(&[0x9e3779b97f4a7c15]);
+            for _ in 0..8 {
+                x = e.order.mulmod(&x, &Uint::from_limbs(&[0x100000001]));
+                scalars.push(x);
+            }
+            for k in scalars {
+                let want = affine(&e, &e.point_mul_complete(&g, &k));
+                let got = affine(&e, &e.point_mul(&g, &k));
+                assert_eq!(want, got, "{:?}", k.0);
+            }
+            // And the identity as the point, which has no inverse to
+            // take: every multiple of it is itself.
+            let identity = e.identity();
+            assert!(
+                e.to_affine(&e.point_mul(&identity, &Uint::one())).is_none()
+            );
+        }
+        check(&P256);
+        check(&P384);
     }
 
     /// The fixed-base multiplication agrees with the general one,

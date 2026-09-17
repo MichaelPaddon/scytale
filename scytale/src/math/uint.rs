@@ -112,6 +112,15 @@ impl<const LIMBS: usize> Uint<LIMBS> {
 
     /// Replaces `self` with `other` when `condition` is one, by a
     /// mask rather than a branch.
+    /// One when every limb is zero, without a branch on any of them.
+    pub(crate) fn is_zero_mask(&self) -> u64 {
+        let mut any = 0u64;
+        for limb in self.0 {
+            any |= limb;
+        }
+        ((any | any.wrapping_neg()) >> 63) ^ 1
+    }
+
     pub(crate) fn cmov(&mut self, other: &Self, condition: u64) {
         debug_assert!(condition <= 1);
         let mask = condition.wrapping_neg();
