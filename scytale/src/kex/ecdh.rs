@@ -48,8 +48,10 @@
 //! # Constant time
 //!
 //! The scalar multiplication is a fixed sequence of field
-//! operations for a given curve: complete addition formulas, fixed
-//! windows, and a table scanned whole.
+//! operations for a given curve: fixed windows, a table scanned
+//! whole, and the cases the Jacobian addition does not cover settled
+//! by masks rather than branches; SECURITY.md sets out which cases
+//! those are.
 
 macro_rules! ecdh_curve {
     (

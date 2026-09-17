@@ -11,18 +11,28 @@
 //!
 //! # Constant time
 //!
-//! Points are projective, and added by the complete formulas of
-//! Renes, Costello and Batina (2016) for `a = -3`: the addition
-//! handles doubling, the identity and inverse pairs with no case
-//! analysis, and the doubling beside it, which is a multiplication
-//! cheaper, is complete in the same way. A scalar multiplication is
-//! therefore a fixed sequence of field operations. The scalar is
-//! consumed in four-bit windows with
-//! the table read by scanning every entry, as [`Montgomery::modexp`]
-//! reads its own. A multiplication of the base point instead reads
-//! the comb table in [`base`], which is public; the digit that
-//! chooses an entry is not, so that read scans the table whole
-//! too. Inversion and square roots are exponentiations.
+//! Every scalar multiplication is a fixed sequence of field
+//! operations, and every table read scans the whole table, so the
+//! digit that chooses an entry never becomes an index or a branch.
+//!
+//! A multiplication of the base point is projective, added by the
+//! complete formulas of Renes, Costello and Batina (2016) for
+//! `a = -3`: the addition handles doubling, the identity and inverse
+//! pairs with no case analysis, and the doubling beside it is
+//! complete in the same way. It reads the combs in [`base`].
+//!
+//! A multiplication of any other point is Jacobian, in signed
+//! five-bit windows, where a doubling costs three multiplications
+//! and five squarings rather than eight and three. That addition is
+//! not complete, and each case it misses is settled by a mask: equal
+//! points take the double of the table entry, which is kept beside
+//! it, and either point being the identity takes the other. Inverse
+//! pairs the formula handles itself, leaving the identity.
+//!
+//! Inversion and square roots are exponentiations, whose exponent is
+//! a constant of the curve rather than a secret, so the windows are
+//! slid over it while the value being inverted steers nothing.
+//!
 //! The only value-dependent control flow is the retry ECDSA makes
 //! when a nonce yields a zero `r` or `s`, which happens once in
 //! 2^256 signatures.
