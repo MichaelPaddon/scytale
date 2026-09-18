@@ -255,11 +255,12 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
         {
             return adx.sqr(a);
         }
-        // At six limbs the product is written out for the processor
-        // and the square is not, and the ten multiplications a square
-        // saves are worth less than the two carry chains.
+        // At six limbs, and at four with an unshaped modulus, the
+        // product is written out for the processor and the square is
+        // not, and the ten multiplications a square saves are worth
+        // less than the two carry chains.
         #[cfg(target_arch = "x86_64")]
-        if LIMBS == 6 && x86_64::probe().is_some() {
+        if (LIMBS == 6 || LIMBS == 4) && x86_64::probe().is_some() {
             return self.mul(a, a);
         }
         let wide = |x: u64, y: u64| u128::from(x) * u128::from(y);
@@ -383,6 +384,15 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
             context[1..7].copy_from_slice(&self.n.0);
             context[7..].copy_from_slice(&b.0);
             return adx.mul6(a, &context, &self.n);
+        }
+
+        // Four limbs with an unshaped modulus is either curve's
+        // order, where ECDSA inverts a nonce and a signature's `s`.
+        #[cfg(target_arch = "x86_64")]
+        if LIMBS == 4
+            && let Some(adx) = x86_64::probe()
+        {
+            return adx.mul4(a, b, &self.n, self.inv);
         }
 
         let wide = |x: u64, y: u64| u128::from(x) * u128::from(y);

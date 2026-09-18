@@ -54,7 +54,10 @@
 //! curve: the base point is multiplied by the complete formulas,
 //! which have no case analysis, the scalar is consumed in fixed
 //! windows with the table scanned whole, and inversions are
-//! exponentiations. Verification handles only public values.
+//! exponentiations. Verification handles only public values, and
+//! takes the faster path whose work depends on them: one pass over
+//! both scalars in signed digits, adding only where a digit is
+//! nonzero.
 
 use crate::BlockType;
 use crate::hash::Hash;

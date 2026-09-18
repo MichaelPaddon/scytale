@@ -332,6 +332,151 @@ unsafe fn sqr(a: *const u64, out: *mut u64) {
 }
 
 /// One product of the multiplier in `rdx` by the word at `$at` bytes
+/// into `$base`: the low half on the carry chain into `$lo`, the
+/// high half on the overflow chain into the word above it.
+#[rustfmt::skip]
+macro_rules! narrow_product {
+    ($base:literal, $at:literal, $lo:literal, $hi:literal) => {
+        concat!(
+            "mulx rcx, rax, qword ptr [", $base, " + ", $at, "]\n",
+            "adcx ", $lo, ", rax\n",
+            "adox ", $hi, ", rcx\n",
+        )
+    };
+}
+
+/// One step of the four-limb product: limb `$i` of `a` against every
+/// limb of `b`, then the multiple of the modulus that clears the low
+/// word. Both halves fold in on the two carry chains, as the
+/// six-limb rows do.
+///
+/// `a`, `b` and the modulus are three pointers and the inverse is a
+/// register, so nothing is copied for a call: at six limbs there are
+/// not enough registers for that and the caller gathers the three
+/// into one array, which measured a fifth of the product's cost.
+#[rustfmt::skip]
+macro_rules! narrow_step {
+    ($i:literal, $w0:literal, $w1:literal, $w2:literal, $w3:literal,
+     $w4:literal, $w5:literal) => {
+        concat!(
+            "mov rdx, qword ptr [rsi + ", $i, "]\n",
+            "xor eax, eax\n",
+            narrow_product!("r14", 0, $w0, $w1),
+            narrow_product!("r14", 8, $w1, $w2),
+            narrow_product!("r14", 16, $w2, $w3),
+            narrow_product!("r14", 24, $w3, $w4),
+            "mov eax, 0\n",
+            "adcx ", $w4, ", rax\n",
+            "adox ", $w5, ", rax\n",
+            "adc ", $w5, ", 0\n",
+            // The multiple of the modulus that clears the low word.
+            // `imul` writes the flags, so the chains start again.
+            "mov rdx, ", $w0, "\n",
+            "imul rdx, r15\n",
+            "xor eax, eax\n",
+            narrow_product!("rdi", 0, $w0, $w1),
+            narrow_product!("rdi", 8, $w1, $w2),
+            narrow_product!("rdi", 16, $w2, $w3),
+            narrow_product!("rdi", 24, $w3, $w4),
+            "mov eax, 0\n",
+            "adcx ", $w4, ", rax\n",
+            "adox ", $w5, ", rax\n",
+            "adc ", $w5, ", 0\n",
+        )
+    };
+}
+
+impl Adx {
+    /// `a b / 2^256 mod n` for any four-limb odd `n`, with `inv` the
+    /// negated inverse of its low word modulo `2^64`: the order of
+    /// either prime curve, where the field's shaped reduction does
+    /// not apply.
+    ///
+    /// The result is below the modulus; `a` may be any four limbs
+    /// and `b` must be below it.
+    #[inline(always)]
+    pub(crate) fn mul4<const L: usize>(
+        self,
+        a: &Uint<L>,
+        b: &Uint<L>,
+        modulus: &Uint<L>,
+        inv: u64,
+    ) -> Uint<L> {
+        debug_assert_eq!(L, 4);
+        // SAFETY: `self` was minted by `probe`, which hands one out
+        // only where the instructions are; the caller holds one for a
+        // four-limb modulus, and `inv` is that modulus's.
+        let value = unsafe {
+            mul4_rows(a.0.as_ptr(), b.0.as_ptr(), modulus.0.as_ptr(), inv)
+        };
+        let mut out = Uint::<L>::ZERO;
+        out.0.copy_from_slice(&value);
+        out
+    }
+}
+
+/// The four rows and the subtraction that settles them, leaving the
+/// value.
+///
+/// # Safety
+/// Requires ADX and BMI2; `a`, `b` and `n` must each point at four
+/// limbs, `b` below the modulus.
+#[inline(always)]
+unsafe fn mul4_rows(
+    a: *const u64,
+    b: *const u64,
+    n: *const u64,
+    inv: u64,
+) -> [u64; 4] {
+    let (v0, v1, v2, v3): (u64, u64, u64, u64);
+    let spare: u64;
+    unsafe {
+        core::arch::asm!(
+            "xor r8d, r8d",
+            "xor r9d, r9d",
+            "xor r10d, r10d",
+            "xor r11d, r11d",
+            "xor r12d, r12d",
+            "xor r13d, r13d",
+            narrow_step!(0, "r8", "r9", "r10", "r11", "r12", "r13"),
+            narrow_step!(8, "r9", "r10", "r11", "r12", "r13", "r8"),
+            narrow_step!(16, "r10", "r11", "r12", "r13", "r8", "r9"),
+            narrow_step!(24, "r11", "r12", "r13", "r8", "r9", "r10"),
+            // The rows leave a value below twice the modulus, so one
+            // subtraction settles it: kept unless it borrowed while
+            // the value itself did not overflow the four words.
+            "mov rax, r12",
+            "sub rax, qword ptr [rdi]",
+            "mov rcx, r13",
+            "sbb rcx, qword ptr [rdi + 8]",
+            "mov rdx, r8",
+            "sbb rdx, qword ptr [rdi + 16]",
+            "mov rsi, r9",
+            "sbb rsi, qword ptr [rdi + 24]",
+            "sbb r10, 0",
+            "cmovnc r12, rax",
+            "cmovnc r13, rcx",
+            "cmovnc r8, rdx",
+            "cmovnc r9, rsi",
+            inout("rsi") a => _,
+            in("r14") b,
+            in("rdi") n,
+            in("r15") inv,
+            out("rax") _, out("rcx") _, out("rdx") _,
+            lateout("r12") v0,
+            lateout("r13") v1,
+            lateout("r8") v2,
+            lateout("r9") v3,
+            lateout("r10") _,
+            lateout("r11") spare,
+            options(nostack),
+        );
+    }
+    debug_assert_eq!(spare, 0);
+    [v0, v1, v2, v3]
+}
+
+/// One product of the multiplier in `rdx` by the word at `$at` bytes
 /// into the context: the low half on the carry chain into `$lo`, the
 /// high half on the overflow chain into the word above it.
 #[rustfmt::skip]

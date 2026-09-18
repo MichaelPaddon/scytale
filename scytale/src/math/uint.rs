@@ -18,7 +18,11 @@ use zeroize::Zeroize;
 
 /// An unsigned integer of `LIMBS` 64-bit words, least significant
 /// first.
+///
+/// The layout is the array's, which the assembly that reads a point
+/// straight out of memory relies on.
 #[derive(Clone, Copy, Zeroize)]
+#[repr(transparent)]
 pub(crate) struct Uint<const LIMBS: usize>(pub(crate) [u64; LIMBS]);
 
 impl<const LIMBS: usize> Uint<LIMBS> {

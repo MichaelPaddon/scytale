@@ -15,29 +15,42 @@
 //! operations, and every table read scans the whole table, so the
 //! digit that chooses an entry never becomes an index or a branch.
 //!
-//! A multiplication of the base point is projective, added by the
-//! complete formulas of Renes, Costello and Batina (2016) for
-//! `a = -3`: the addition handles doubling, the identity and inverse
-//! pairs with no case analysis, and the doubling beside it is
-//! complete in the same way. It reads the combs in [`base`].
+//! A multiplication of the base point reads per-window tables of
+//! affine multiples where the curve carries them, which P-256 does:
+//! a signed seven-bit digit for each of 37 windows, 64 entries a
+//! window, and no doublings at all, since every entry is already
+//! shifted to where it belongs. P-384, whose table at that width
+//! would be 338 KB, keeps the four combs described in [`base`] and
+//! the complete projective formulas of Renes, Costello and Batina
+//! (2016) for `a = -3`, whose addition handles doubling, the
+//! identity and inverse pairs with no case analysis.
 //!
 //! A multiplication of any other point is Jacobian, in signed
 //! five-bit windows, where a doubling costs three multiplications
 //! and five squarings rather than eight and three. That addition is
-//! not complete, and each case it misses is settled by a mask: equal
-//! points take the double of the table entry, which is kept beside
-//! it, and either point being the identity takes the other. Inverse
-//! pairs the formula handles itself, leaving the identity.
+//! not complete, and each case it misses is settled by a mask rather
+//! than a branch: either point being the identity takes the other,
+//! and inverse pairs the formula handles itself. The remaining case,
+//! two equal points, cannot arise in a windowed multiplication of a
+//! scalar below the group order, for the reason
+//! [`Engine::jacobian_add_affine`] sets out, so no table of doubles
+//! is kept for it; the tables built here, where consecutive
+//! multiples do meet, hand the addition the double itself.
 //!
 //! Inversion and square roots are exponentiations, whose exponent is
 //! a constant of the curve rather than a secret, so the windows are
-//! slid over it while the value being inverted steers nothing.
+//! slid over it while the value being inverted steers nothing. For
+//! P-256 the inversion is a fixed chain of 255 squarings and 13
+//! multiplications, written out in [`x86_64`] where the processor
+//! has the instructions.
 //!
 //! The only value-dependent control flow is the retry ECDSA makes
 //! when a nonce yields a zero `r` or `s`, which happens once in
 //! 2^256 signatures.
 
 mod base;
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
 
 use zeroize::Zeroize;
 
@@ -67,6 +80,10 @@ pub(crate) struct Curve<const L: usize> {
     gy: Uint<L>,
     /// The comb table of multiples of `G`, described in [`base`].
     base: &'static [[[u64; L]; 2]],
+    /// Per-window multiples of `G`, described in [`base`], for a
+    /// curve that carries them; empty for one that does not, which
+    /// takes the combs instead.
+    windows: &'static [[[u64; L]; 2]],
     /// Montgomery contexts for `p` and `n`, made when the crate is
     /// built rather than for every operation.
     field: Montgomery<L>,
@@ -80,7 +97,11 @@ const WINDOW: usize = 5;
 
 /// A point in Jacobian coordinates: `x = X / Z^2`, `y = Y / Z^3`,
 /// and the identity is anything with `Z = 0`.
+///
+/// The three coordinates are laid out in order, which the assembly
+/// that reads a point straight out of memory relies on.
 #[derive(Clone, Copy)]
+#[repr(C)]
 struct Jacobian<const L: usize> {
     x: Uint<L>,
     y: Uint<L>,
@@ -95,13 +116,85 @@ impl<const L: usize> Jacobian<L> {
     }
 }
 
-/// Booth's recoding of window `at` of `k`: the digit's magnitude,
-/// which is at most sixteen, and one when it is negative.
+/// A point in affine coordinates, both in the Montgomery domain.
+/// There is no identity here: a table of these holds none, and the
+/// digit that would have named one adds nothing instead.
+///
+/// Laid out in order, as [`Jacobian`] is and for the same reason.
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct Affine<const L: usize> {
+    x: Uint<L>,
+    y: Uint<L>,
+}
+
+impl<const L: usize> Affine<L> {
+    fn cmov(&mut self, other: &Self, condition: u64) {
+        self.x.cmov(&other.x, condition);
+        self.y.cmov(&other.y, condition);
+    }
+}
+
+/// Positions a signed form of the widest scalar here needs: a digit
+/// for every bit, and one past the top for the carry.
+const DIGITS: usize = 64 * 6 + 1;
+
+/// The non-adjacent form of `k`, five bits wide: a signed odd digit
+/// at about one position in six and zero elsewhere, least significant
+/// first, with one position past the scalar for the carry.
+///
+/// For public scalars: the digits are what the caller may learn.
+fn naf<const L: usize>(k: &Uint<L>) -> [i8; DIGITS] {
+    const WIDTH: u32 = 5;
+    debug_assert!(64 * L < DIGITS);
+    let span = 1i64 << WIDTH;
+    let mut digits = [0i8; DIGITS];
+    let mut carry = 0u64;
+    let mut pos = 0usize;
+    while pos <= 64 * L {
+        // The window, which may straddle two limbs and may run past
+        // the scalar, where the bits are zero.
+        let bit = |i: usize| -> u64 {
+            if i >= 64 * L {
+                0
+            } else {
+                (k.0[i >> 6] >> (i & 63)) & 1
+            }
+        };
+        let mut window = 0u64;
+        for j in 0..WIDTH as usize {
+            window |= bit(pos + j) << j;
+        }
+        let value = carry + window;
+        // An even value leaves no digit here. The carry stays as it
+        // is: a carry and a set low bit make two, which is the same
+        // carry one position up, where the window has moved to.
+        if value & 1 == 0 {
+            pos += 1;
+            continue;
+        }
+        // Past half the span the digit goes negative, and what it
+        // borrowed from the next window is the carry.
+        if (value as i64) < span / 2 {
+            carry = 0;
+            digits[pos] = value as i8;
+        } else {
+            carry = 1;
+            digits[pos] = (value as i64 - span) as i8;
+        }
+        pos += WIDTH as usize;
+    }
+    digits
+}
+
+/// Booth's recoding of window `at` of `k`, `width` bits wide: the
+/// digit's magnitude, which is at most half the window's span, and
+/// one when it is negative.
 ///
 /// The window reads one bit below its own, so the digits of the whole
-/// scalar are signed and each is worth `2^(5 window)`. Nothing here
-/// branches or indexes on the scalar.
-fn booth<const L: usize>(k: &Uint<L>, at: usize) -> (u64, u64) {
+/// scalar are signed and each is worth `2^(width window)`. Nothing
+/// here branches or indexes on the scalar.
+fn booth<const L: usize>(k: &Uint<L>, at: usize, width: usize) -> (u64, u64) {
     let bit = |i: usize| -> u64 {
         if i >= 64 * L {
             0
@@ -110,20 +203,26 @@ fn booth<const L: usize>(k: &Uint<L>, at: usize) -> (u64, u64) {
         }
     };
     let mut chunk = 0u64;
-    for i in 0..=WINDOW {
+    for i in 0..=width {
         // The lowest window reads a zero below the scalar.
-        let index = at * WINDOW + i;
+        let index = at * width + i;
         let value = if index == 0 { 0 } else { bit(index - 1) };
         chunk |= value << i;
     }
     // The sign is the top bit; the magnitude is the rest, rounded to
     // the nearest multiple of two and halved, which is Booth's digit.
-    let sign = (chunk >> WINDOW) & 1;
+    let sign = (chunk >> width) & 1;
     let mask = sign.wrapping_neg();
-    let complement = (1u64 << (WINDOW + 1)) - chunk - 1;
+    let complement = (1u64 << (width + 1)) - chunk - 1;
     let magnitude = (complement & mask) | (chunk & !mask);
     ((magnitude >> 1) + (magnitude & 1), sign)
 }
+
+/// The bits of scalar one window of the per-window fixed-base table
+/// takes, and the entries that width needs: every digit magnitude a
+/// Booth window of it can name, the zero apart.
+const BASE_WINDOW: usize = 7;
+const BASE_ENTRIES: usize = 1 << (BASE_WINDOW - 1);
 
 /// The blocks a scalar is cut into for a fixed-base multiplication,
 /// and so the width of the comb's digit.
@@ -196,6 +295,7 @@ pub(crate) const P256: Curve<4> = Curve {
         "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
     ),
     base: &base::P256_BASE,
+    windows: &base::P256_WINDOWS,
     field: Montgomery::known(P256_P),
     order: Montgomery::known(P256_N),
     // 1.2.840.10045.3.1.7
@@ -231,6 +331,8 @@ pub(crate) const P384: Curve<6> = Curve {
          0a60b1ce1d7e819d7a431d7c90ea0e5f",
     ),
     base: &base::P384_BASE,
+    // The same layout would be 338 KB here, where the combs are 24.
+    windows: &[],
     field: Montgomery::known(P384_P),
     order: Montgomery::known(P384_N),
     // 1.3.132.0.34
@@ -274,6 +376,11 @@ pub(crate) struct Engine<'a, const L: usize> {
     /// once for an operation rather than once for every product.
     #[cfg(target_arch = "x86_64")]
     fast: Option<crate::math::montgomery::x86_64::Adx>,
+    /// The table read written out for this processor, asked the same
+    /// way. Four-limb entries only, so the wider curve scans its
+    /// table as the compiler makes it.
+    #[cfg(target_arch = "x86_64")]
+    vector: Option<x86_64::Avx2>,
     /// `b`, in the domain.
     b: Uint<L>,
     /// One, in the domain: `R mod p`.
@@ -288,6 +395,8 @@ impl<'a, const L: usize> Engine<'a, L> {
         let fast = (L == 4 && curve.p.0[..] == super::montgomery::P256_PRIME)
             .then(crate::math::montgomery::x86_64::probe)
             .flatten();
+        #[cfg(target_arch = "x86_64")]
+        let vector = (L == 4).then(x86_64::probe).flatten();
         let one = field.to_mont(&Uint::one());
         let b = field.to_mont(&curve.b);
         Engine {
@@ -296,6 +405,8 @@ impl<'a, const L: usize> Engine<'a, L> {
             order,
             #[cfg(target_arch = "x86_64")]
             fast,
+            #[cfg(target_arch = "x86_64")]
+            vector,
             b,
             one,
         }
@@ -353,9 +464,74 @@ impl<'a, const L: usize> Engine<'a, L> {
 
     /// `a^-1`, by Fermat: `a^(p-2)`. Zero maps to zero.
     fn invert(&self, a: &Uint<L>) -> Uint<L> {
+        #[cfg(target_arch = "x86_64")]
+        if let Some(fast) = self.fast {
+            return fast.invert(a);
+        }
         let (exponent, _) = self.curve.p.sub_borrow(&Uint::from_limbs(&[2]));
-        let plain = self.field.exp_public(&self.field.from_mont(a), &exponent);
-        self.field.to_mont(&plain)
+        self.exp(a, &exponent)
+    }
+
+    /// The inverse by the generic exponentiation, which is what the
+    /// written out chain is checked against.
+    #[cfg(all(test, target_arch = "x86_64"))]
+    fn portable_invert(&self, a: &Uint<L>) -> Uint<L> {
+        let (exponent, _) = self.curve.p.sub_borrow(&Uint::from_limbs(&[2]));
+        self.exp(a, &exponent)
+    }
+
+    /// `a^e`, both in the domain, for an exponent that is a constant
+    /// of the curve: five-bit windows slid over it.
+    ///
+    /// The generic exponentiation would do the same arithmetic, but
+    /// through the width's own product rather than the one this
+    /// engine holds, which for P-256 is the assembly inlined here;
+    /// at 250-odd operations for an inversion that is the difference
+    /// between a third of a key generation and a fifth.
+    fn exp(&self, a: &Uint<L>, exponent: &Uint<L>) -> Uint<L> {
+        const WIDTH: usize = 5;
+        // The odd powers the windows name: a, a^3, ... a^31.
+        let square = self.sqr(a);
+        let mut odd = [*a; 1 << (WIDTH - 1)];
+        for i in 1..odd.len() {
+            odd[i] = self.mul(&odd[i - 1], &square);
+        }
+        let bit = |i: usize| (exponent.0[i >> 6] >> (i & 63)) & 1;
+        let mut acc = self.one;
+        let mut i = 64 * L;
+        let mut started = false;
+        while i > 0 {
+            i -= 1;
+            if bit(i) == 0 {
+                if started {
+                    acc = self.sqr(&acc);
+                }
+                continue;
+            }
+            // The longest window ending on a set bit, so that the
+            // power it names is one the table holds.
+            let mut width = 1;
+            for w in 2..=WIDTH.min(i + 1) {
+                if bit(i + 1 - w) == 1 {
+                    width = w;
+                }
+            }
+            let mut digit = 0usize;
+            for j in 0..width {
+                digit = (digit << 1) | (bit(i - j) as usize);
+            }
+            if started {
+                for _ in 0..width {
+                    acc = self.sqr(&acc);
+                }
+                acc = self.mul(&acc, &odd[digit >> 1]);
+            } else {
+                acc = odd[digit >> 1];
+                started = true;
+            }
+            i -= width - 1;
+        }
+        acc
     }
 
     /// A square root of `a`, or `None` when it has none. Both
@@ -364,9 +540,7 @@ impl<'a, const L: usize> Engine<'a, L> {
     fn sqrt(&self, a: &Uint<L>) -> Option<Uint<L>> {
         let (exponent, _) = self.curve.p.add_carry(&Uint::one());
         let exponent = exponent.shr(2);
-        let root = self.field.to_mont(
-            &self.field.exp_public(&self.field.from_mont(a), &exponent),
-        );
+        let root = self.exp(a, &exponent);
         if self.sqr(&root).0 == a.0 {
             Some(root)
         } else {
@@ -511,6 +685,16 @@ impl<'a, const L: usize> Engine<'a, L> {
     /// The identity has `Z = 0`, and doubling it leaves `Z = 0`, so
     /// that case needs nothing.
     fn jacobian_double(&self, p: &Jacobian<L>) -> Jacobian<L> {
+        #[cfg(target_arch = "x86_64")]
+        if let Some(fast) = self.fast {
+            return fast.jacobian_double(p);
+        }
+        self.portable_double(p)
+    }
+
+    /// The doubling as the formula reads, which is what the written
+    /// out one is checked against.
+    fn portable_double(&self, p: &Jacobian<L>) -> Jacobian<L> {
         let delta = self.sqr(&p.z);
         let gamma = self.sqr(&p.y);
         let beta = self.mul(&p.x, &gamma);
@@ -544,6 +728,30 @@ impl<'a, const L: usize> Engine<'a, L> {
     /// `q` is. Opposite points are the one case the formula does
     /// handle, leaving `Z = 0`, which is what they add to.
     fn jacobian_add(
+        &self,
+        p: &Jacobian<L>,
+        q: &Jacobian<L>,
+        twice: &Jacobian<L>,
+    ) -> Jacobian<L> {
+        #[cfg(target_arch = "x86_64")]
+        if let Some(fast) = self.fast {
+            let mut out = fast.jacobian_add(p, q);
+            // Equal points, which the formula cannot do itself, are
+            // read off the sum: it is zero throughout only for them.
+            // A pair of inverses, the other case with a zero `z`,
+            // leaves `x` as `r^2`, which is not zero there.
+            let same = out.x.is_zero_mask() & out.z.is_zero_mask();
+            out.cmov(twice, same);
+            out.cmov(q, p.z.is_zero_mask());
+            out.cmov(p, q.z.is_zero_mask());
+            return out;
+        }
+        self.portable_add(p, q, twice)
+    }
+
+    /// The addition as the formula reads, which is what the written
+    /// out one is checked against.
+    fn portable_add(
         &self,
         p: &Jacobian<L>,
         q: &Jacobian<L>,
@@ -587,28 +795,186 @@ impl<'a, const L: usize> Engine<'a, L> {
         out
     }
 
+    /// `p + q`, where `q` is affine: seven multiplications and four
+    /// squarings, against the eleven and five of the general
+    /// addition, because `q`'s `Z` is one and every product with it
+    /// falls away.
+    ///
+    /// The identity is settled by a mask, as in [`jacobian_add`]:
+    /// `p` being it takes `q` lifted. The case that addition needs a
+    /// table of doubles for, `p` and `q` equal, cannot arise here,
+    /// and the callers are why. Every caller is a windowed
+    /// multiplication over Booth digits, where before the addition
+    /// at window `w` the accumulator holds `S * P` for
+    /// `S = sum(d[j] 2^(W j), j > w)`, a multiple of `2^(W(w+1))`,
+    /// and the entry is `d[w] 2^(W w) P` with `|d[w]| <= 2^(W-1)`.
+    /// A collision would need `S -/+ d[w] 2^(W w)` to be zero or a
+    /// multiple of the order: zero is out because the two magnitudes
+    /// differ, the first being either zero, which the mask covers,
+    /// or at least `2^(W(w+1))`, and the second below it; and a
+    /// nonzero multiple `m n` is out because that difference is
+    /// divisible by `2^(W w)` while `n` is odd and `|m|` is at most
+    /// two for scalars below the order.
+    ///
+    /// [`jacobian_add`]: Self::jacobian_add
+    fn jacobian_add_affine(
+        &self,
+        p: &Jacobian<L>,
+        q: &Affine<L>,
+    ) -> Jacobian<L> {
+        #[cfg(target_arch = "x86_64")]
+        if let Some(fast) = self.fast {
+            let mut out = fast.jacobian_add_affine(p, q);
+            out.cmov(
+                &Jacobian {
+                    x: q.x,
+                    y: q.y,
+                    z: self.one,
+                },
+                p.z.is_zero_mask(),
+            );
+            return out;
+        }
+        self.portable_add_affine(p, q)
+    }
+
+    /// The mixed addition as the formula reads, which is what the
+    /// written out one is checked against.
+    fn portable_add_affine(
+        &self,
+        p: &Jacobian<L>,
+        q: &Affine<L>,
+    ) -> Jacobian<L> {
+        let zz = self.sqr(&p.z);
+        let u2 = self.mul(&q.x, &zz);
+        let s2 = self.mul(&self.mul(&q.y, &p.z), &zz);
+        let h = self.sub(&u2, &p.x);
+        let r = {
+            let d = self.sub(&s2, &p.y);
+            self.add(&d, &d)
+        };
+        let hh = self.sqr(&h);
+        let i = {
+            let h2 = self.add(&h, &h);
+            self.sqr(&h2)
+        };
+        let j = self.mul(&h, &i);
+        let v = self.mul(&p.x, &i);
+        let x = {
+            let v2 = self.add(&v, &v);
+            self.sub(&self.sub(&self.sqr(&r), &j), &v2)
+        };
+        let y = {
+            let yj = self.mul(&p.y, &j);
+            let yj2 = self.add(&yj, &yj);
+            self.sub(&self.mul(&r, &self.sub(&v, &x)), &yj2)
+        };
+        let z = {
+            let sum = self.add(&p.z, &h);
+            self.sub(&self.sub(&self.sqr(&sum), &zz), &hh)
+        };
+        let mut out = Jacobian { x, y, z };
+        out.cmov(
+            &Jacobian {
+                x: q.x,
+                y: q.y,
+                z: self.one,
+            },
+            p.z.is_zero_mask(),
+        );
+        out
+    }
+
+    /// The affine form of every point given, by Montgomery's trick:
+    /// the inverses of all the `Z` come from one inversion and three
+    /// multiplications a point, rather than an inversion each.
+    ///
+    /// No point here may be the identity; none is, because each is a
+    /// multiple of a point of prime order by a factor below it.
+    #[cfg(all(test, target_arch = "x86_64"))]
+    fn normalise<const N: usize>(
+        &self,
+        points: &[Jacobian<L>; N],
+    ) -> [[[u64; L]; 2]; N] {
+        // Running products of the `Z`, so that entry `i` holds the
+        // product of every one below it.
+        let mut prefix = [self.one; N];
+        let mut running = self.one;
+        for (slot, point) in prefix.iter_mut().zip(points) {
+            *slot = running;
+            running = self.mul(&running, &point.z);
+        }
+        let mut inverse = self.invert(&running);
+        let mut out = [[[0u64; L]; 2]; N];
+        // Back down, peeling one `Z` off the running inverse at each
+        // step to leave that point's own.
+        for i in (0..N).rev() {
+            let zi = self.mul(&inverse, &prefix[i]);
+            inverse = self.mul(&inverse, &points[i].z);
+            let zi2 = self.sqr(&zi);
+            out[i] = [
+                self.mul(&points[i].x, &zi2).0,
+                self.mul(&points[i].y, &self.mul(&zi2, &zi)).0,
+            ];
+        }
+        out
+    }
+
+    /// The entry of `table` the digit names, counted from one, or
+    /// zero where it names none. The digit is secret, so every entry
+    /// is read and nothing indexes.
+    ///
+    /// Word by word, which the compiler makes vector code of: the
+    /// same scan written out in AVX2 by hand measured five times
+    /// slower, its blends being one entry to an iteration where this
+    /// unrolls.
+    #[inline(always)]
+    fn select(&self, table: &[[[u64; L]; 2]], digit: u64) -> Affine<L> {
+        #[cfg(target_arch = "x86_64")]
+        if let Some(vector) = self.vector {
+            let (x, y) = vector.select(table, digit);
+            return Affine { x, y };
+        }
+        let mut chosen = Affine {
+            x: Uint::ZERO,
+            y: Uint::ZERO,
+        };
+        for (i, entry) in table.iter().enumerate() {
+            let matches = (((i as u64 + 1) ^ digit).wrapping_sub(1)) >> 63;
+            chosen.cmov(
+                &Affine {
+                    x: Uint(entry[0]),
+                    y: Uint(entry[1]),
+                },
+                matches,
+            );
+        }
+        chosen
+    }
+
     /// `k * p`, by signed five-bit windows over the scalar, the table
     /// read by scanning it whole.
     ///
     /// Booth's recoding gives each window a digit in `-16..=16`, so
     /// the table holds sixteen multiples rather than thirty-two, and
     /// a digit's sign only negates the entry, which is one
-    /// subtraction. The doubles of the same multiples ride along, for
-    /// the one case the addition cannot do itself.
+    /// subtraction. It holds no doubles beside them: the case that
+    /// would want one cannot arise, for the reason
+    /// [`jacobian_add_affine`] gives.
+    ///
+    /// [`jacobian_add_affine`]: Self::jacobian_add_affine
     fn point_mul(&self, p: &Point<L>, k: &Uint<L>) -> Point<L> {
         let base = self.to_jacobian(p);
-        let mut table = [base; 16];
-        let mut doubles = [base; 16];
+        let mut multiples = [base; 16];
         let twice_base = self.jacobian_double(&base);
         for i in 1..16 {
             // Multiples in order, each the one before it plus the
             // base. The first of them is the base doubled, which is
             // the case the addition hands to `twice`.
-            table[i] = self.jacobian_add(&table[i - 1], &base, &twice_base);
+            multiples[i] =
+                self.jacobian_add(&multiples[i - 1], &base, &twice_base);
         }
-        for (double, entry) in doubles.iter_mut().zip(&table) {
-            *double = self.jacobian_double(entry);
-        }
+        let table = multiples;
 
         let windows = (64 * L + 1).div_ceil(WINDOW);
         let mut acc = self.jacobian_identity();
@@ -618,15 +984,11 @@ impl<'a, const L: usize> Engine<'a, L> {
                     acc = self.jacobian_double(&acc);
                 }
             }
-            let (digit, sign) = booth(k, window);
-            // The scan keeps the entry the digit names, and the
-            // identity for a digit of zero, which adds nothing.
+            let (digit, sign) = booth(k, window, WINDOW);
             let mut chosen = self.jacobian_identity();
-            let mut twice = self.jacobian_identity();
-            for (i, (entry, double)) in table.iter().zip(&doubles).enumerate() {
+            for (i, entry) in table.iter().enumerate() {
                 let matches = (((i as u64 + 1) ^ digit).wrapping_sub(1)) >> 63;
                 chosen.cmov(entry, matches);
-                twice.cmov(double, matches);
             }
             // A negative digit takes the entry's opposite, which is
             // its `y` negated.
@@ -636,24 +998,31 @@ impl<'a, const L: usize> Engine<'a, L> {
                 z: chosen.z,
             };
             chosen.cmov(&negated, sign);
-            let negated_twice = Jacobian {
-                x: twice.x,
-                y: self.sub(&Uint::ZERO, &twice.y),
-                z: twice.z,
-            };
-            twice.cmov(&negated_twice, sign);
-            acc = self.jacobian_add(&acc, &chosen, &twice);
+            // Nothing is handed to the case of two equal points,
+            // which cannot arise here: the argument is the one
+            // `jacobian_add_affine` sets out, and the accumulator is
+            // the higher windows of the same scalar.
+            acc = self.jacobian_add(&acc, &chosen, &self.jacobian_identity());
         }
-        self.projective(&acc)
+        let mut out = self.projective(&acc);
+        // The table cannot hold the identity, so a point that is one
+        // has no multiples to read and the sum above means nothing.
+        // Every multiple of it is the identity.
+        let none = p.z.is_zero_mask();
+        out.x.cmov(&Uint::ZERO, none);
+        out.y.cmov(&self.one, none);
+        out.z.cmov(&Uint::ZERO, none);
+        out
     }
 
-    /// The same point in Jacobian coordinates, which for `Z = 1` and
-    /// for the identity is the same triple.
+    /// The same point in Jacobian coordinates: `(X Z : Y Z^2 : Z)`,
+    /// which for `Z = 1`, as a point read from outside has, and for
+    /// the identity is the triple unchanged.
     fn to_jacobian(&self, p: &Point<L>) -> Jacobian<L> {
-        debug_assert!(p.z.0 == self.one.0 || p.z.is_zero());
+        let zz = self.sqr(&p.z);
         Jacobian {
-            x: p.x,
-            y: p.y,
+            x: self.mul(&p.x, &p.z),
+            y: self.mul(&p.y, &zz),
             z: p.z,
         }
     }
@@ -674,6 +1043,134 @@ impl<'a, const L: usize> Engine<'a, L> {
             x: self.one,
             y: self.one,
             z: Uint::ZERO,
+        }
+    }
+
+    /// `a p + b G`, for scalars and a point that are all public.
+    ///
+    /// One pass over both scalars in signed digits five bits wide,
+    /// sharing the doublings, with an addition only where a digit is
+    /// nonzero, which is about one position in six. The odd multiples
+    /// of each point are built first, and a digit's sign takes an
+    /// entry's opposite.
+    ///
+    /// For public values only: which additions happen, and from which
+    /// entries, is what the scalars are. Verification is the only
+    /// caller, and everything it holds came with the signature.
+    fn mul_add_vartime(
+        &self,
+        p: &Point<L>,
+        a: &Uint<L>,
+        b: &Uint<L>,
+    ) -> Point<L> {
+        let (point, point_twice) = self.odd_multiples(&self.to_jacobian(p));
+        // Where the curve has per-window multiples of `G` checked in,
+        // the base point's part of the sum is read from those instead
+        // of built here: 37 additions and no doublings, and no table
+        // to make first.
+        let windowed = !self.curve.windows.is_empty();
+        let (base, base_twice) = if windowed {
+            ([self.jacobian_identity(); 8], [self.jacobian_identity(); 8])
+        } else {
+            self.odd_multiples(&self.to_jacobian(&self.generator()))
+        };
+        let a_digits = naf(a);
+        // All zero leaves the loop below nothing to do for `b`.
+        let b_digits = if windowed { [0i8; DIGITS] } else { naf(b) };
+
+        let mut acc = self.jacobian_identity();
+        let mut started = false;
+        for i in (0..=64 * L).rev() {
+            if started {
+                acc = self.jacobian_double(&acc);
+            }
+            for (digits, table, doubles) in [
+                (&a_digits, &point, &point_twice),
+                (&b_digits, &base, &base_twice),
+            ] {
+                let digit = digits[i];
+                if digit == 0 {
+                    continue;
+                }
+                let at = (digit.unsigned_abs() as usize) >> 1;
+                let (mut entry, mut twice) = (table[at], doubles[at]);
+                if digit < 0 {
+                    entry.y = self.sub(&Uint::ZERO, &entry.y);
+                    twice.y = self.sub(&Uint::ZERO, &twice.y);
+                }
+                // As in the constant-time multiplication, `twice` is
+                // what an addition of a point to itself comes to.
+                acc = self.jacobian_add(&acc, &entry, &twice);
+                started = true;
+            }
+        }
+        if windowed {
+            let bg = self.mul_base_vartime(b);
+            // The two parts of the sum could be the same point, which
+            // the addition settles with the double beside it.
+            let twice = self.jacobian_double(&acc);
+            acc = self.jacobian_add(&acc, &bg, &twice);
+        }
+        self.projective(&acc)
+    }
+
+    /// `k * G` for a public scalar, over the same per-window tables
+    /// the fixed-base multiplication reads.
+    ///
+    /// The digit indexes its table rather than scanning it, and a
+    /// zero digit is skipped. For public values only: verification
+    /// is the caller, and the scalar there came with the signature.
+    fn mul_base_vartime(&self, k: &Uint<L>) -> Jacobian<L> {
+        let mut acc = self.jacobian_identity();
+        let tables = self.curve.windows.chunks_exact(BASE_ENTRIES);
+        for (window, table) in tables.enumerate() {
+            let (digit, sign) = booth(k, window, BASE_WINDOW);
+            if digit == 0 {
+                continue;
+            }
+            let entry = &table[digit as usize - 1];
+            let mut q = Affine {
+                x: Uint(entry[0]),
+                y: Uint(entry[1]),
+            };
+            if sign == 1 {
+                q.y = self.sub(&Uint::ZERO, &q.y);
+            }
+            acc = self.jacobian_add_affine(&acc, &q);
+        }
+        acc
+    }
+
+    /// `p`, `3 p`, ... `15 p`, which are the entries a five-bit
+    /// signed digit names, and their doubles, which the addition
+    /// wants for the case of a point added to itself.
+    fn odd_multiples(
+        &self,
+        p: &Jacobian<L>,
+    ) -> ([Jacobian<L>; 8], [Jacobian<L>; 8]) {
+        let twice = self.jacobian_double(p);
+        let fallback = self.jacobian_double(&twice);
+        let mut table = [*p; 8];
+        for i in 1..8 {
+            // Each is the one before it plus twice the point; only
+            // the first of them is that point itself, which is the
+            // case `fallback` covers.
+            table[i] = self.jacobian_add(&table[i - 1], &twice, &fallback);
+        }
+        let mut doubles = table;
+        for double in doubles.iter_mut() {
+            *double = self.jacobian_double(double);
+        }
+        (table, doubles)
+    }
+
+    /// The curve's base point.
+    fn generator(&self) -> Point<L> {
+        // The first entry of the first comb is the generator itself.
+        Point {
+            x: Uint(self.curve.base[0][0]),
+            y: Uint(self.curve.base[0][1]),
+            z: self.one,
         }
     }
 
@@ -710,6 +1207,9 @@ impl<'a, const L: usize> Engine<'a, L> {
     ///
     /// [`point_mul`]: Self::point_mul
     fn mul_base(&self, k: &Uint<L>) -> Point<L> {
+        if !self.curve.windows.is_empty() {
+            return self.mul_base_windows(k);
+        }
         let block = block::<L>();
         let span = block.div_ceil(TABLES);
         let mut acc = self.identity();
@@ -751,6 +1251,32 @@ impl<'a, const L: usize> Engine<'a, L> {
             }
         }
         acc
+    }
+
+    /// `k * G` over per-window tables: a signed seven-bit digit for
+    /// each window of the scalar, each naming one of the 64 affine
+    /// multiples of `2^(7 window) G` that window's table holds, and
+    /// no doublings at all, since every entry is already shifted to
+    /// where it belongs.
+    ///
+    /// The table is public and the digit that reads it is secret, so
+    /// the read scans every entry, as the variable-base one does.
+    fn mul_base_windows(&self, k: &Uint<L>) -> Point<L> {
+        let mut acc = self.jacobian_identity();
+        let tables = self.curve.windows.chunks_exact(BASE_ENTRIES);
+        for (window, table) in tables.enumerate() {
+            let (digit, sign) = booth(k, window, BASE_WINDOW);
+            let mut chosen = self.select(table, digit);
+            let negated = Affine {
+                x: chosen.x,
+                y: self.sub(&Uint::ZERO, &chosen.y),
+            };
+            chosen.cmov(&negated, sign);
+            let sum = self.jacobian_add_affine(&acc, &chosen);
+            // A digit of zero names no entry and adds nothing.
+            acc.cmov(&sum, (digit | digit.wrapping_neg()) >> 63);
+        }
+        self.projective(&acc)
     }
 
     /// The affine coordinates, plain, or `None` for the identity.
@@ -1031,8 +1557,7 @@ impl<const L: usize> Public<L> {
         let w = e.scalar_invert(&s);
         let u1 = e.scalar_mul(&z, &w);
         let u2 = e.scalar_mul(&r, &w);
-        let sum =
-            e.point_add(&e.mul_base(&u1), &e.point_mul(&e.lift(self), &u2));
+        let sum = e.mul_add_vartime(&e.lift(self), &u2, &u1);
         let (x, _) = e.to_affine(&sum).ok_or(Error::InvalidSignature)?;
         if e.reduce_scalar(&x).0 == r.0 {
             Ok(())
@@ -1717,6 +2242,227 @@ mod tests {
         sum
     }
 
+    /// The table read keeps the entry the digit names, and nothing
+    /// for a digit that names none. Where the processor has the
+    /// instructions this is the vectorised read; the expectation
+    /// here is written out rather than taken from the scan it
+    /// replaced.
+    #[test]
+    fn table_reads_keep_the_entry_the_digit_names() {
+        let e = Engine::new(&P256);
+        let mut table = [[[0u64; 4]; 2]; BASE_ENTRIES];
+        for (i, entry) in table.iter_mut().enumerate() {
+            for (j, limb) in entry.iter_mut().flatten().enumerate() {
+                *limb = (i as u64 + 1).wrapping_mul(0x0123456789abcdef)
+                    ^ ((j as u64) << 40);
+            }
+        }
+        for digit in 0..=BASE_ENTRIES as u64 + 1 {
+            let chosen = e.select(&table, digit);
+            let wanted = match digit {
+                0 => [[0u64; 4]; 2],
+                d if d as usize <= BASE_ENTRIES => table[d as usize - 1],
+                _ => [[0u64; 4]; 2],
+            };
+            assert_eq!(chosen.x.0, wanted[0], "digit {digit} x");
+            assert_eq!(chosen.y.0, wanted[1], "digit {digit} y");
+        }
+    }
+
+    /// The doubling written out for the processor agrees with the
+    /// formula as Rust reads it, on points whose coordinates run to
+    /// the ends of the field.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn written_out_doubling_matches_the_formula() {
+        let e = Engine::new(&P256);
+        let Some(fast) = e.fast else {
+            return;
+        };
+        let mut point = e.to_jacobian(&generator(&e));
+        for i in 0..64 {
+            assert_eq!(
+                fast.jacobian_double(&point).x.0,
+                e.portable_double(&point).x.0,
+                "{i} x"
+            );
+            assert_eq!(
+                fast.jacobian_double(&point).y.0,
+                e.portable_double(&point).y.0,
+                "{i} y"
+            );
+            assert_eq!(
+                fast.jacobian_double(&point).z.0,
+                e.portable_double(&point).z.0,
+                "{i} z"
+            );
+            point = e.portable_double(&point);
+        }
+        // The identity, and a point whose coordinates are the
+        // largest the field holds.
+        let (prime, _) = P256.p.sub_borrow(&Uint::one());
+        for odd in [
+            e.jacobian_identity(),
+            Jacobian {
+                x: prime,
+                y: prime,
+                z: prime,
+            },
+        ] {
+            assert_eq!(
+                fast.jacobian_double(&odd).x.0,
+                e.portable_double(&odd).x.0
+            );
+            assert_eq!(
+                fast.jacobian_double(&odd).y.0,
+                e.portable_double(&odd).y.0
+            );
+            assert_eq!(
+                fast.jacobian_double(&odd).z.0,
+                e.portable_double(&odd).z.0
+            );
+        }
+    }
+
+    /// The mixed addition written out for the processor agrees with
+    /// the formula as Rust reads it, on points whose coordinates run
+    /// to the ends of the field, and where the point added to is the
+    /// identity.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn written_out_mixed_addition_matches_the_formula() {
+        let e = Engine::new(&P256);
+        if e.fast.is_none() {
+            return;
+        }
+        let g = e.to_jacobian(&generator(&e));
+        let table = e.normalise(&[e.jacobian_double(&g)]);
+        // Adding the same multiple each time keeps the two points
+        // distinct, which is the case the formula is for.
+        let q = Affine {
+            x: Uint(table[0][0]),
+            y: Uint(table[0][1]),
+        };
+        let mut point = g;
+        for i in 0..32 {
+            let wanted = e.portable_add_affine(&point, &q);
+            let got = e.jacobian_add_affine(&point, &q);
+            assert_eq!(got.x.0, wanted.x.0, "{i} x");
+            assert_eq!(got.y.0, wanted.y.0, "{i} y");
+            assert_eq!(got.z.0, wanted.z.0, "{i} z");
+            point = wanted;
+        }
+        // The identity, which both settle by the same mask.
+        let none = e.jacobian_identity();
+        let wanted = e.portable_add_affine(&none, &q);
+        let got = e.jacobian_add_affine(&none, &q);
+        assert_eq!(got.x.0, wanted.x.0);
+        assert_eq!(got.y.0, wanted.y.0);
+        assert_eq!(got.z.0, wanted.z.0);
+    }
+
+    /// The general addition written out for the processor agrees
+    /// with the formula as Rust reads it, on distinct points, on
+    /// equal ones, on a pair of inverses, and where either side is
+    /// the identity.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn written_out_addition_matches_the_formula() {
+        let e = Engine::new(&P256);
+        if e.fast.is_none() {
+            return;
+        }
+        let g = e.to_jacobian(&generator(&e));
+        let two = e.jacobian_double(&g);
+        let four = e.jacobian_double(&two);
+        let minus = Jacobian {
+            x: g.x,
+            y: e.sub(&Uint::ZERO, &g.y),
+            z: g.z,
+        };
+        let none = e.jacobian_identity();
+        let pairs = [
+            (g, two),
+            (two, four),
+            (g, g),
+            (g, minus),
+            (none, g),
+            (g, none),
+            (none, none),
+        ];
+        for (i, (p, q)) in pairs.iter().enumerate() {
+            let twice = e.jacobian_double(p);
+            let wanted = e.portable_add(p, q, &twice);
+            let got = e.jacobian_add(p, q, &twice);
+            assert_eq!(got.x.0, wanted.x.0, "{i} x");
+            assert_eq!(got.y.0, wanted.y.0, "{i} y");
+            assert_eq!(got.z.0, wanted.z.0, "{i} z");
+        }
+    }
+
+    /// The inversion chain written out for the processor is the
+    /// same value as the exponentiation it replaces.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn written_out_inversion_matches_the_exponentiation() {
+        let e = Engine::new(&P256);
+        if e.fast.is_none() {
+            return;
+        }
+        let mut value = e.one;
+        for i in 0..32 {
+            assert_eq!(e.invert(&value).0, e.portable_invert(&value).0, "{i}");
+            value = e.add(&e.mul(&value, &value), &e.one);
+        }
+        // Zero inverts to zero, and one to one.
+        assert_eq!(e.invert(&Uint::ZERO).0, [0u64; 4]);
+        assert_eq!(e.invert(&e.one).0, e.one.0);
+        // The largest value the field holds.
+        let (top, _) = P256.p.sub_borrow(&Uint::one());
+        assert_eq!(e.invert(&top).0, e.portable_invert(&top).0);
+    }
+
+    /// The multiples one per-window table holds, window by window:
+    /// entry `j` of window `w` is `(j + 1) 2^(BASE_WINDOW w) G`.
+    fn window_entries<const L: usize>(
+        e: &Engine<L>,
+    ) -> std::vec::Vec<std::vec::Vec<Point<L>>> {
+        let count = (64 * L + 1).div_ceil(BASE_WINDOW);
+        let mut shifted = generator(e);
+        let mut out = std::vec::Vec::new();
+        for _ in 0..count {
+            let mut table = std::vec::Vec::with_capacity(BASE_ENTRIES);
+            let mut multiple = shifted;
+            table.push(multiple);
+            for _ in 1..BASE_ENTRIES {
+                multiple = e.point_add(&multiple, &shifted);
+                table.push(multiple);
+            }
+            out.push(table);
+            for _ in 0..BASE_WINDOW {
+                shifted = e.point_double(&shifted);
+            }
+        }
+        out
+    }
+
+    /// Every entry of the per-window table is the multiple of `G` it
+    /// stands for, as the comb check below says of the combs.
+    #[test]
+    fn base_windows_are_multiples_of_g() {
+        let e = Engine::new(&P256);
+        let wanted = window_entries(&e);
+        assert_eq!(P256.windows.len(), wanted.len() * BASE_ENTRIES);
+        let tables = P256.windows.chunks_exact(BASE_ENTRIES);
+        for (w, (table, multiples)) in tables.zip(&wanted).enumerate() {
+            for (j, (entry, point)) in table.iter().zip(multiples).enumerate() {
+                let (x, y) = e.to_affine(point).expect("a multiple of G");
+                assert_eq!(e.field.to_mont(&x).0, entry[0], "{w} {j} x");
+                assert_eq!(e.field.to_mont(&y).0, entry[1], "{w} {j} y");
+            }
+        }
+    }
+
     /// Every entry of every comb table is the multiple of `G` it
     /// stands for: the sum of `2^(j block + i span) G` over the set
     /// bits of its index, in the field's domain. This is what says
@@ -1777,6 +2523,31 @@ mod tests {
         }
         print("P256_BASE", &P256);
         print("P384_BASE", &P384);
+
+        let e = Engine::new(&P256);
+        let tables = window_entries(&e);
+        std::println!(
+            "pub(crate) static P256_WINDOWS: [[[u64; 4]; 2]; {}] = [",
+            tables.len() * BASE_ENTRIES
+        );
+        for table in &tables {
+            for point in table {
+                let (x, y) = e.to_affine(point).expect("a multiple of G");
+                let hex = |v: Uint<4>| {
+                    let words: std::vec::Vec<std::string::String> =
+                        v.0.iter()
+                            .map(|w| std::format!("0x{w:016x}"))
+                            .collect();
+                    words.join(", ")
+                };
+                std::println!(
+                    "    [[{}],\n     [{}]],",
+                    hex(e.field.to_mont(&x)),
+                    hex(e.field.to_mont(&y))
+                );
+            }
+        }
+        std::println!("];");
     }
 
     /// The windowed multiplication in Jacobian coordinates agrees
@@ -1820,6 +2591,43 @@ mod tests {
             assert!(
                 e.to_affine(&e.point_mul(&identity, &Uint::one())).is_none()
             );
+        }
+        check(&P256);
+        check(&P384);
+    }
+
+    /// The variable-time double multiplication agrees with the
+    /// constant-time routines it stands in for.
+    #[test]
+    fn vartime_matches_the_constant_time_multiplications() {
+        fn check<const L: usize>(curve: &Curve<L>) {
+            let e = Engine::new(curve);
+            let g = generator(&e);
+            let q = e.point_mul(&g, &Uint::from_limbs(&[7]));
+            let (order_less_one, _) = curve.n.sub_borrow(&Uint::one());
+            let mut scalars = std::vec![
+                Uint::<L>::ZERO,
+                Uint::one(),
+                Uint::from_limbs(&[2]),
+                Uint::from_limbs(&[15]),
+                Uint::from_limbs(&[16]),
+                order_less_one,
+            ];
+            let mut x = Uint::<L>::from_limbs(&[0x9e3779b97f4a7c15]);
+            for _ in 0..6 {
+                x = e.order.mulmod(&x, &Uint::from_limbs(&[0x100000001]));
+                scalars.push(x);
+            }
+            for a in &scalars {
+                for b in &scalars {
+                    let want = affine(
+                        &e,
+                        &e.point_add(&e.point_mul(&q, a), &e.mul_base(b)),
+                    );
+                    let got = affine(&e, &e.mul_add_vartime(&q, a, b));
+                    assert_eq!(want, got, "{:?} {:?}", a.0, b.0);
+                }
+            }
         }
         check(&P256);
         check(&P384);
