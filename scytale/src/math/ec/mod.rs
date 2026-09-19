@@ -48,6 +48,8 @@
 //! when a nonce yields a zero `r` or `s`, which happens once in
 //! 2^256 signatures.
 
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
 mod base;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
@@ -468,13 +470,17 @@ impl<'a, const L: usize> Engine<'a, L> {
         if let Some(fast) = self.fast {
             return fast.invert(a);
         }
+        #[cfg(target_arch = "aarch64")]
+        if L == 4 {
+            return aarch64::invert_field(a);
+        }
         let (exponent, _) = self.curve.p.sub_borrow(&Uint::from_limbs(&[2]));
         self.exp(a, &exponent)
     }
 
     /// The inverse by the generic exponentiation, which is what the
     /// written out chain is checked against.
-    #[cfg(all(test, target_arch = "x86_64"))]
+    #[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
     fn portable_invert(&self, a: &Uint<L>) -> Uint<L> {
         let (exponent, _) = self.curve.p.sub_borrow(&Uint::from_limbs(&[2]));
         self.exp(a, &exponent)
@@ -689,6 +695,10 @@ impl<'a, const L: usize> Engine<'a, L> {
         if let Some(fast) = self.fast {
             return fast.jacobian_double(p);
         }
+        #[cfg(target_arch = "aarch64")]
+        if L == 4 {
+            return aarch64::jacobian_double(p);
+        }
         self.portable_double(p)
     }
 
@@ -733,6 +743,15 @@ impl<'a, const L: usize> Engine<'a, L> {
         q: &Jacobian<L>,
         twice: &Jacobian<L>,
     ) -> Jacobian<L> {
+        #[cfg(target_arch = "aarch64")]
+        if L == 4 {
+            let mut out = aarch64::jacobian_add(p, q);
+            let same = out.x.is_zero_mask() & out.z.is_zero_mask();
+            out.cmov(twice, same);
+            out.cmov(q, p.z.is_zero_mask());
+            out.cmov(p, q.z.is_zero_mask());
+            return out;
+        }
         #[cfg(target_arch = "x86_64")]
         if let Some(fast) = self.fast {
             let mut out = fast.jacobian_add(p, q);
@@ -822,6 +841,19 @@ impl<'a, const L: usize> Engine<'a, L> {
         p: &Jacobian<L>,
         q: &Affine<L>,
     ) -> Jacobian<L> {
+        #[cfg(target_arch = "aarch64")]
+        if L == 4 {
+            let mut out = aarch64::jacobian_add_affine(p, q);
+            out.cmov(
+                &Jacobian {
+                    x: q.x,
+                    y: q.y,
+                    z: self.one,
+                },
+                p.z.is_zero_mask(),
+            );
+            return out;
+        }
         #[cfg(target_arch = "x86_64")]
         if let Some(fast) = self.fast {
             let mut out = fast.jacobian_add_affine(p, q);
@@ -891,7 +923,7 @@ impl<'a, const L: usize> Engine<'a, L> {
     ///
     /// No point here may be the identity; none is, because each is a
     /// multiple of a point of prime order by a factor below it.
-    #[cfg(all(test, target_arch = "x86_64"))]
+    #[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
     fn normalise<const N: usize>(
         &self,
         points: &[Jacobian<L>; N],
@@ -2269,30 +2301,43 @@ mod tests {
         }
     }
 
+    /// Whether this processor takes the written-out blocks: on
+    /// x86-64 they need ADX and BMI2, and on A64 they are baseline.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn written_out<const L: usize>(e: &Engine<L>) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        return e.fast.is_some();
+        #[cfg(target_arch = "aarch64")]
+        return {
+            let _ = e;
+            L == 4
+        };
+    }
+
     /// The doubling written out for the processor agrees with the
     /// formula as Rust reads it, on points whose coordinates run to
     /// the ends of the field.
     #[test]
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn written_out_doubling_matches_the_formula() {
         let e = Engine::new(&P256);
-        let Some(fast) = e.fast else {
+        if !written_out(&e) {
             return;
-        };
+        }
         let mut point = e.to_jacobian(&generator(&e));
         for i in 0..64 {
             assert_eq!(
-                fast.jacobian_double(&point).x.0,
+                e.jacobian_double(&point).x.0,
                 e.portable_double(&point).x.0,
                 "{i} x"
             );
             assert_eq!(
-                fast.jacobian_double(&point).y.0,
+                e.jacobian_double(&point).y.0,
                 e.portable_double(&point).y.0,
                 "{i} y"
             );
             assert_eq!(
-                fast.jacobian_double(&point).z.0,
+                e.jacobian_double(&point).z.0,
                 e.portable_double(&point).z.0,
                 "{i} z"
             );
@@ -2310,15 +2355,15 @@ mod tests {
             },
         ] {
             assert_eq!(
-                fast.jacobian_double(&odd).x.0,
+                e.jacobian_double(&odd).x.0,
                 e.portable_double(&odd).x.0
             );
             assert_eq!(
-                fast.jacobian_double(&odd).y.0,
+                e.jacobian_double(&odd).y.0,
                 e.portable_double(&odd).y.0
             );
             assert_eq!(
-                fast.jacobian_double(&odd).z.0,
+                e.jacobian_double(&odd).z.0,
                 e.portable_double(&odd).z.0
             );
         }
@@ -2329,10 +2374,10 @@ mod tests {
     /// to the ends of the field, and where the point added to is the
     /// identity.
     #[test]
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn written_out_mixed_addition_matches_the_formula() {
         let e = Engine::new(&P256);
-        if e.fast.is_none() {
+        if !written_out(&e) {
             return;
         }
         let g = e.to_jacobian(&generator(&e));
@@ -2366,10 +2411,10 @@ mod tests {
     /// equal ones, on a pair of inverses, and where either side is
     /// the identity.
     #[test]
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn written_out_addition_matches_the_formula() {
         let e = Engine::new(&P256);
-        if e.fast.is_none() {
+        if !written_out(&e) {
             return;
         }
         let g = e.to_jacobian(&generator(&e));
@@ -2403,10 +2448,10 @@ mod tests {
     /// The inversion chain written out for the processor is the
     /// same value as the exponentiation it replaces.
     #[test]
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn written_out_inversion_matches_the_exponentiation() {
         let e = Engine::new(&P256);
-        if e.fast.is_none() {
+        if !written_out(&e) {
             return;
         }
         let mut value = e.one;
