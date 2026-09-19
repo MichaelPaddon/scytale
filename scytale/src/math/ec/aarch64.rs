@@ -387,18 +387,140 @@ macro_rules! fmul_held {
     };
 }
 
-/// The square, which is the product of a value with itself until a
-/// written-out square is measured to be worth its own block: the
-/// cross products would save six of the sixteen, and the rows here
-/// spend nothing on loads to save them from.
+/// `a a / 2^256 mod p`. The cross products appear twice in a square,
+/// so six products and one doubling stand in for twelve, and four
+/// more give the limbs' own squares: ten where the general product
+/// spends sixteen.
+///
+/// The whole eight-word product is formed first, and the reduction
+/// then walks the low half, keeping each step's carry word aside and
+/// adding the four of them to the high half at the end, rather than
+/// carrying through the high half four times.
+///
+/// The low half is `x12..x15` and the high half `x8, x9, x4, x5`,
+/// which is where a product leaves its value, so the same ending
+/// settles either.
 #[rustfmt::skip]
-macro_rules! fsqr {
-    ($dst:literal, $a:literal) => { fmul!($dst, $a, $a) };
+macro_rules! fsqr_body {
+    ($a:literal) => {
+        concat!(
+            "ldp x20, x21, ", at!($a, 0), "\n",
+            "ldp x22, x23, ", at!($a, 16), "\n",
+            // The cross products, each once: a0 against the three
+            // above it, then a1 against two, then a2 against one.
+            "mul x13, x20, x21\n",
+            "umulh x10, x20, x21\n",
+            "mul x11, x20, x22\n",
+            "umulh x16, x20, x22\n",
+            "mul x17, x20, x23\n",
+            "umulh x7, x20, x23\n",
+            "adds x14, x10, x11\n",
+            "adcs x15, x16, x17\n",
+            "adc x8, x7, xzr\n",
+            "mul x10, x21, x22\n",
+            "umulh x11, x21, x22\n",
+            "mul x16, x21, x23\n",
+            "umulh x17, x21, x23\n",
+            "adds x15, x15, x10\n",
+            "adcs x8, x8, x11\n",
+            "adc x9, xzr, xzr\n",
+            "adds x8, x8, x16\n",
+            "adcs x9, x9, x17\n",
+            "adc x4, xzr, xzr\n",
+            "mul x10, x22, x23\n",
+            "umulh x11, x22, x23\n",
+            "adds x9, x9, x10\n",
+            "adcs x4, x4, x11\n",
+            "adc x5, xzr, xzr\n",
+            // Doubled, which is those products' other halves.
+            "adds x13, x13, x13\n",
+            "adcs x14, x14, x14\n",
+            "adcs x15, x15, x15\n",
+            "adcs x8, x8, x8\n",
+            "adcs x9, x9, x9\n",
+            "adcs x4, x4, x4\n",
+            "adc x5, x5, x5\n",
+            // Then each limb's own square on the diagonal.
+            "mul x12, x20, x20\n",
+            "umulh x10, x20, x20\n",
+            "mul x11, x21, x21\n",
+            "umulh x16, x21, x21\n",
+            "adds x13, x13, x10\n",
+            "adcs x14, x14, x11\n",
+            "adcs x15, x15, x16\n",
+            "mul x10, x22, x22\n",
+            "umulh x11, x22, x22\n",
+            "adcs x8, x8, x10\n",
+            "adcs x9, x9, x11\n",
+            "mul x16, x23, x23\n",
+            "umulh x17, x23, x23\n",
+            "adcs x4, x4, x16\n",
+            "adc x5, x5, x17\n",
+            // The reduction. Each step clears the low word with that
+            // word itself, which is two shifts near the bottom and
+            // one product by the prime's top limb three words up; the
+            // high half of that product is the step's carry word, and
+            // the next step adds into it.
+            sqr_step!("x12", "x13", "x14", "x15", "x12"),
+            sqr_step!("x13", "x14", "x15", "x12", "x13"),
+            sqr_step!("x14", "x15", "x12", "x13", "x14"),
+            sqr_step!("x15", "x12", "x13", "x14", "x15"),
+            // The four carry words onto the high half.
+            "adds x8, x8, x12\n",
+            "adcs x9, x9, x13\n",
+            "adcs x4, x4, x14\n",
+            "adcs x5, x5, x15\n",
+            "adc x6, xzr, xzr\n",
+        )
+    };
 }
 
+/// One reduction step of the square: `$w0` is the word to clear, the
+/// three words above it take the multiple of the prime, and `$hi`
+/// comes out holding what belongs four words up.
+#[rustfmt::skip]
+macro_rules! sqr_step {
+    ($w0:literal, $w1:literal, $w2:literal, $w3:literal,
+     $hi:literal) => {
+        concat!(
+            "lsl x10, ", $w0, ", #32\n",
+            "lsr x11, ", $w0, ", #32\n",
+            "mul x16, ", $w0, ", x25\n",
+            "umulh x17, ", $w0, ", x25\n",
+            "adds ", $w1, ", ", $w1, ", x10\n",
+            "adcs ", $w2, ", ", $w2, ", x11\n",
+            "adcs ", $w3, ", ", $w3, ", x16\n",
+            "adc ", $hi, ", x17, xzr\n",
+        )
+    };
+}
+
+/// The square, into a slot of the frame.
+#[rustfmt::skip]
+macro_rules! fsqr {
+    ($dst:literal, $a:literal) => {
+        concat!(
+            fsqr_body!($a),
+            settle!(),
+            "stp x8, x9, ", at!($dst, 0), "\n",
+            "stp x4, x5, ", at!($dst, 16), "\n",
+        )
+    };
+}
+
+/// The square, held in `x0..x3` for the next step to take.
 #[rustfmt::skip]
 macro_rules! fsqr_held {
-    ($a:literal) => { fmul_held!($a, $a) };
+    ($a:literal) => {
+        concat!(
+            fsqr_body!($a),
+            settle!(),
+            "mov x0, x8\n",
+            "mov x1, x9\n",
+            "mov x2, x4\n",
+            "mov x3, x5\n",
+        )
+    };
 }
 
 /// `dst` squared `$n` times in place, as a counted loop. The count
