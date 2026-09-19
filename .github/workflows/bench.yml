@@ -17,7 +17,7 @@ on:
           alternatives separated by commas). Empty runs everything,
           which takes a long time.
         type: string
-        default: p256 p384
+        default: p256,p384
       seconds:
         description: Seconds a row is measured for.
         type: string

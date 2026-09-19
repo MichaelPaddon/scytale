@@ -277,7 +277,7 @@ const P256_P: Uint<4> = from_hex(
 );
 
 /// The P-256 group order.
-const P256_N: Uint<4> = from_hex(
+pub(crate) const P256_N: Uint<4> = from_hex(
     "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
 );
 
@@ -309,7 +309,7 @@ const P384_P: Uint<6> = from_hex(
 );
 
 /// The P-384 group order.
-const P384_N: Uint<6> = from_hex(
+pub(crate) const P384_N: Uint<6> = from_hex(
     "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf\
      581a0db248b0a77aecec196accc52973",
 );

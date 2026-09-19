@@ -23,6 +23,8 @@
 //! table by scanning every entry. The exponent's *width* in limbs is
 //! visible; its value, and where its bits lie, are not.
 
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod aarch64;
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod x86_64;
 
@@ -238,6 +240,10 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
         {
             return adx.mul(a, b);
         }
+        #[cfg(target_arch = "aarch64")]
+        if self.shape == Shape::P256 {
+            return aarch64::mul(a, b);
+        }
         self.mul_with(a, b)
     }
 
@@ -254,6 +260,18 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
             && let Some(adx) = x86_64::probe()
         {
             return adx.sqr(a);
+        }
+        #[cfg(target_arch = "aarch64")]
+        if self.shape == Shape::P256 {
+            return aarch64::sqr(a);
+        }
+        // The written-out rows keep the whole running value in
+        // registers, so a square that saves six of the sixteen
+        // products but spends them on moves is not ahead; both widths
+        // go through the product.
+        #[cfg(target_arch = "aarch64")]
+        if LIMBS == 6 || LIMBS == 4 {
+            return self.mul(a, a);
         }
         // At six limbs, and at four with an unshaped modulus, the
         // product is written out for the processor and the square is
@@ -386,6 +404,11 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
             return adx.mul6(a, &context, &self.n);
         }
 
+        #[cfg(target_arch = "aarch64")]
+        if LIMBS == 6 {
+            return aarch64::mul6(a, b, &self.n, self.inv);
+        }
+
         // Four limbs with an unshaped modulus is either curve's
         // order, where ECDSA inverts a nonce and a signature's `s`.
         #[cfg(target_arch = "x86_64")]
@@ -395,6 +418,18 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
             return adx.mul4(a, b, &self.n, self.inv);
         }
 
+        #[cfg(target_arch = "aarch64")]
+        if LIMBS == 4 {
+            return aarch64::mul4(a, b, &self.n, self.inv);
+        }
+
+        self.mul_portable(a, b)
+    }
+
+    /// The same product with nothing written out for the processor:
+    /// the definition the blocks above are checked against, and the
+    /// path taken at every width they do not cover.
+    fn mul_portable(&self, a: &Uint<LIMBS>, b: &Uint<LIMBS>) -> Uint<LIMBS> {
         let wide = |x: u64, y: u64| u128::from(x) * u128::from(y);
         let mut t = [0u64; LIMBS];
         // The two words above the array: `hi` in full, and above it
@@ -755,6 +790,45 @@ mod tests {
     #[test]
     fn p384_reduction_matches_the_general_one() {
         shaped_matches_general(&P384_PRIME);
+    }
+
+    /// The products written out for the processor against the
+    /// portable definition, over both curve primes, both group orders
+    /// and a modulus of neither shape.
+    ///
+    /// Where an architecture writes both the shaped and the general
+    /// reduction out, `shaped_matches_general` compares one block
+    /// with another; this is what compares either with the arithmetic
+    /// they are meant to be.
+    #[test]
+    fn the_processor_product_is_the_portable_one() {
+        fn check<const L: usize>(n: Uint<L>) {
+            let m = Montgomery::known(n);
+            let mut state = 0xb7e151628aed2a6b;
+            for _ in 0..200 {
+                let a = below(&mut state, &n);
+                let b = below(&mut state, &n);
+                assert_eq!(m.mul(&a, &b).0, m.mul_portable(&a, &b).0);
+                assert_eq!(m.sqr(&a).0, m.mul_portable(&a, &a).0);
+            }
+            // The edges the random values will not reach.
+            let (top, _) = n.sub_borrow(&Uint::one());
+            for a in [Uint::ZERO, Uint::one(), top] {
+                for b in [Uint::ZERO, Uint::one(), top] {
+                    assert_eq!(m.mul(&a, &b).0, m.mul_portable(&a, &b).0);
+                }
+            }
+        }
+        check(Uint(P256_PRIME));
+        check(Uint(P384_PRIME));
+        check(crate::math::ec::P256_N);
+        check(crate::math::ec::P384_N);
+        check(Uint::<4>([
+            0x9e3779b97f4a7c15,
+            0x243f6a8885a308d3,
+            0x13198a2e03707344,
+            0xa4093822299f31d1,
+        ]));
     }
 
     /// A modulus of another width, or of the same width and a
