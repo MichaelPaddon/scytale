@@ -1,0 +1,81 @@
+name: Bench
+
+# Measurements on real hardware, started by hand. Development happens
+# on x86-64, so this is the only way to see what an arm64 or riscv64
+# processor does with a change: emulation reports instructions it
+# never really issued, on a clock that is not the target's.
+#
+# A run is one `scripts/bench` invocation per architecture, with the
+# filter words given below, and the rows land in the job's log.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rows:
+        description: >-
+          Filter words, as scripts/bench takes them (a word may offer
+          alternatives separated by commas). Empty runs everything,
+          which takes a long time.
+        type: string
+        default: p256 p384
+      seconds:
+        description: Seconds a row is measured for.
+        type: string
+        default: "1"
+      arch:
+        description: Which processor to measure on.
+        type: choice
+        default: all
+        options: [all, x86-64, arm64, riscv64]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  bench:
+    name: bench (${{ matrix.arch }})
+    if: inputs.arch == 'all' || inputs.arch == matrix.arch
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86-64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: riscv64
+            runner: ubuntu-24.04-riscv
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          if command -v rustup > /dev/null; then
+              rustup update --no-self-update stable
+              rustup default stable
+          else
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+                  | sh -s -- -y --profile minimal \
+                        --default-toolchain stable
+              echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Report toolchain and processor
+        # A number means nothing without the processor it came off,
+        # and a shared runner does not say which one it gave us.
+        run: |
+          uname -m
+          rustc --version --verbose
+          grep -m1 -E '^(isa|Features|flags)' /proc/cpuinfo || true
+          grep -m1 -E '^(model name|uarch)' /proc/cpuinfo || true
+          nproc
+
+      - name: Measure
+        # Through the environment rather than spliced into the command
+        # line: the inputs are free text.
+        env:
+          ROWS: ${{ inputs.rows }}
+          SECONDS_EACH: ${{ inputs.seconds }}
+        run: scripts/bench $ROWS --seconds "$SECONDS_EACH"
