@@ -956,15 +956,20 @@ impl<'a, const L: usize> Engine<'a, L> {
     /// zero where it names none. The digit is secret, so every entry
     /// is read and nothing indexes.
     ///
-    /// Word by word, which the compiler makes vector code of: the
-    /// same scan written out in AVX2 by hand measured five times
-    /// slower, its blends being one entry to an iteration where this
-    /// unrolls.
+    /// Word by word, which on x86-64 the compiler makes vector code
+    /// of, so the hand-written scan there is worth it only for being
+    /// twice as wide. On AArch64 it makes no vector code at all, and
+    /// the scan there is worth it for being vector code.
     #[inline(always)]
     fn select(&self, table: &[[[u64; L]; 2]], digit: u64) -> Affine<L> {
         #[cfg(target_arch = "x86_64")]
         if let Some(vector) = self.vector {
             let (x, y) = vector.select(table, digit);
+            return Affine { x, y };
+        }
+        #[cfg(target_arch = "aarch64")]
+        if L == 4 && !table.is_empty() {
+            let (x, y) = aarch64::select(table, digit);
             return Affine { x, y };
         }
         let mut chosen = Affine {

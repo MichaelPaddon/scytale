@@ -678,6 +678,87 @@ unsafe fn add(io: *mut u64) {
     }
 }
 
+/// The entry of `table` whose position, counted from one, is
+/// `digit`, or zero where the digit names none. Four-limb entries
+/// only.
+///
+/// The scan itself is the portable one's: every entry is read, and
+/// the comparison is on the counter. What this changes is that the
+/// compiler leaves that scan scalar on this architecture, three
+/// instructions and a load for each of the eight words of an entry;
+/// here an entry is four loads, one compare and four inserts.
+#[inline(always)]
+pub(super) fn select<const L: usize>(
+    table: &[[[u64; L]; 2]],
+    digit: u64,
+) -> (Uint<L>, Uint<L>) {
+    debug_assert_eq!(L, 4);
+    debug_assert!(!table.is_empty());
+    let mut out = [Uint::<L>::ZERO; 2];
+    // SAFETY: the entries are four limbs, which the width the caller
+    // uses this at says, and the count is the table's own.
+    unsafe {
+        scan(
+            table.as_ptr().cast::<u64>(),
+            table.len(),
+            digit,
+            out.as_mut_ptr().cast::<u64>(),
+        );
+    }
+    (out[0], out[1])
+}
+
+/// Scans `count` entries of eight words each, keeping the one whose
+/// position counted from one is `digit`. Every entry is read whatever
+/// the digit is, and the comparison is on the counter, so no address
+/// and no branch depends on it.
+///
+/// # Safety
+/// `table` must point at `count * 8` words with `count >= 1`, and
+/// `out` at eight.
+unsafe fn scan(table: *const u64, count: usize, digit: u64, out: *mut u64) {
+    unsafe {
+        core::arch::asm!(
+            // The entry kept so far, the digit in both lanes to
+            // compare the counter against, and the counter and its
+            // step, which are both one to start with.
+            "movi v0.2d, #0",
+            "movi v1.2d, #0",
+            "movi v2.2d, #0",
+            "movi v3.2d, #0",
+            "dup v4.2d, {digit}",
+            "mov {step}, #1",
+            "dup v5.2d, {step}",
+            "dup v6.2d, {step}",
+            "2:",
+            // All ones where this is the entry wanted, which the
+            // insert then takes bit by bit.
+            "cmeq v7.2d, v5.2d, v4.2d",
+            "ldp q16, q17, [{table}]",
+            "ldp q18, q19, [{table}, #32]",
+            "bit v0.16b, v16.16b, v7.16b",
+            "bit v1.16b, v17.16b, v7.16b",
+            "bit v2.16b, v18.16b, v7.16b",
+            "bit v3.16b, v19.16b, v7.16b",
+            "add v5.2d, v5.2d, v6.2d",
+            "add {table}, {table}, #64",
+            "subs {count}, {count}, #1",
+            "b.ne 2b",
+            "stp q0, q1, [{out}]",
+            "stp q2, q3, [{out}, #32]",
+            table = inout(reg) table => _,
+            count = inout(reg) count => _,
+            digit = in(reg) digit,
+            out = in(reg) out,
+            step = out(reg) _,
+            out("v0") _, out("v1") _, out("v2") _, out("v3") _,
+            out("v4") _, out("v5") _, out("v6") _, out("v7") _,
+            out("v16") _, out("v17") _, out("v18") _, out("v19") _,
+            options(nostack),
+        );
+    }
+}
+
 /// Twice `p`, in Jacobian coordinates.
 ///
 /// The width is a parameter only so that the curve arithmetic, which
