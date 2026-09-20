@@ -578,12 +578,12 @@ second counted in millions and thousands of millions:
 
 | What | Implementation | Speed |
 | --- | --- | --- |
-| AES-128-GCM encrypt | `vaes` | 14.2 GB/s |
+| AES-128-GCM encrypt | `vaes` | 14.0 GB/s |
 | AES-128-GCM encrypt | `aesni` | 8.6 GB/s |
-| AES-128-GCM encrypt | `bitsliced` | 279 MB/s |
+| AES-128-GCM encrypt | `bitsliced` | 272 MB/s |
 | SHA-256 | `shani` | 2.4 GB/s |
-| SHA-256 | `portable` | 335 MB/s |
-| ChaCha20-Poly1305 encrypt | `avx2` | 2.1 GB/s |
+| SHA-256 | `portable` | 349 MB/s |
+| ChaCha20-Poly1305 encrypt | `avx2` | 2.7 GB/s |
 
 ChaCha20-Poly1305 is the one to reach for where the processor has no
 AES instructions: there it is several times faster than any AES here,
@@ -601,10 +601,11 @@ taskset -c 0 scripts/bench
 ```
 
 The pin matters on a hybrid processor: unpinned, a row records which
-core the scheduler picked rather than how fast the code is. The
-benchmark has only been run on this x86-64 machine, so there are no
-timings for the ARM and RISC-V implementations. On a laptop running
-on battery, expect about half of each figure.
+core the scheduler picked rather than how fast the code is. A full
+pass has only been saved for this x86-64 machine; the ARM and RISC-V
+implementations are measured a few rows at a time on the native CI
+runners, by starting the `Bench` workflow by hand. On a laptop
+running on battery, expect about half of each figure.
 
 [bench]: https://github.com/MichaelPaddon/scytale/blob/main/scytale/benchmarks/i7-1355u.md
 
