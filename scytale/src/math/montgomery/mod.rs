@@ -235,13 +235,14 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
     /// a fixed sequence of limb operations.
     pub(crate) fn mul(&self, a: &Uint<LIMBS>, b: &Uint<LIMBS>) -> Uint<LIMBS> {
         #[cfg(target_arch = "x86_64")]
-        if self.shape == Shape::P256
+        if LIMBS == 4
+            && self.shape == Shape::P256
             && let Some(adx) = x86_64::probe()
         {
             return adx.mul(a, b);
         }
         #[cfg(target_arch = "aarch64")]
-        if self.shape == Shape::P256 {
+        if LIMBS == 4 && self.shape == Shape::P256 {
             return aarch64::mul(a, b);
         }
         self.mul_with(a, b)
@@ -256,13 +257,14 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
     /// afterwards is the same as the product's, one word at a time.
     pub(crate) fn sqr(&self, a: &Uint<LIMBS>) -> Uint<LIMBS> {
         #[cfg(target_arch = "x86_64")]
-        if self.shape == Shape::P256
+        if LIMBS == 4
+            && self.shape == Shape::P256
             && let Some(adx) = x86_64::probe()
         {
             return adx.sqr(a);
         }
         #[cfg(target_arch = "aarch64")]
-        if self.shape == Shape::P256 {
+        if LIMBS == 4 && self.shape == Shape::P256 {
             return aarch64::sqr(a);
         }
         // The written-out rows keep the whole running value in
