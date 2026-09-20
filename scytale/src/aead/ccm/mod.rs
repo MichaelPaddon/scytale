@@ -28,12 +28,12 @@
 //! # Speed
 //!
 //! A CBC-MAC chains, so the tag is one block cipher call after
-//! another, however fast the processor is. On x86-64 with the AES
-//! instructions the MAC and the keystream run as one loop, a
-//! keystream block beside each MAC block, so the processor overlaps
-//! them; elsewhere runs of whole blocks go to the chaining loop CBC
-//! encryption has written out, and the keystream runs in bulk as
-//! [`Ctr`] does. [`Gcm`](super::Gcm) is the faster of the two
+//! another, however fast the processor is. On x86-64 and on AArch64
+//! with the AES instructions the MAC and the keystream run as one
+//! loop, a keystream block beside each MAC block, so the processor
+//! overlaps them; elsewhere runs of whole blocks go to the chaining
+//! loop CBC encryption has written out, and the keystream runs in
+//! bulk as [`Ctr`] does. [`Gcm`](super::Gcm) is the faster of the two
 //! wherever there is a choice.
 //!
 //! # Using it safely
@@ -68,6 +68,8 @@
 //!
 //! [`Ctr`]: crate::cipher::mode::Ctr
 
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
@@ -112,6 +114,8 @@ pub struct Ccm<C: BlockCipher<Block = [u8; BLOCK]>> {
     /// The MAC's chaining loop, which needs no key of its own.
     chain: MacEngine<C>,
     /// Both halves as one loop, where the processor has one written.
+    #[cfg(target_arch = "aarch64")]
+    native: Option<aarch64::Engine<C>>,
     #[cfg(target_arch = "x86_64")]
     native: Option<x86_64::Engine<C>>,
 }
@@ -167,7 +171,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ccm<C> {
         Ccm {
             ctr: Ctr::new(key),
             chain: MacEngine::new(),
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
             native: best_native(),
         }
     }
@@ -187,6 +191,8 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ccm<C> {
             ctr: Ctr::with_implementation(key, implementation)?,
             chain: MacEngine::with(implementation)
                 .or_else(|| MacEngine::with(Implementation::Portable))?,
+            #[cfg(target_arch = "aarch64")]
+            native: aarch64::Engine::of(implementation),
             #[cfg(target_arch = "x86_64")]
             native: x86_64::Engine::of(implementation),
         })
@@ -290,7 +296,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ccm<C> {
         whole: &mut [u8],
         encrypt: bool,
     ) -> bool {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         if let Some(native) = &self.native {
             return native.run(
                 self.ctr.cipher(),
@@ -333,6 +339,14 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ccm<C> {
         }
         mac
     }
+}
+
+/// The interleaved loop this processor has, best first.
+#[cfg(target_arch = "aarch64")]
+fn best_native<C: BlockCipher>() -> Option<aarch64::Engine<C>> {
+    crate::cipher::mode::ctr::CHOICES
+        .iter()
+        .find_map(|&implementation| aarch64::Engine::of(implementation))
 }
 
 /// The interleaved loop this processor has, best first.
