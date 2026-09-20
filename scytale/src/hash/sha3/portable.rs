@@ -133,6 +133,10 @@ impl Permutation for Keccak {
         if super::x86_64::permute(state) {
             return;
         }
+        #[cfg(target_arch = "riscv64")]
+        if super::riscv64::permute(state) {
+            return;
+        }
         keccak_f1600(state)
     }
 }

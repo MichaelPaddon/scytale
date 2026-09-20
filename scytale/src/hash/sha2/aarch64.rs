@@ -52,6 +52,17 @@ fn ask_sha256() -> bool {
     cfg!(target_feature = "sha2") || id_register_sha2() >= 1
 }
 
+/// Whether the SHA-1 instructions are available: the SHA1 field of
+/// the same register, bits 11:8. SHA-1 lives in
+/// [`sha1`](crate::hash::sha1), but every field of this register is
+/// read here.
+pub(crate) fn has_sha1() -> bool {
+    SHA1.yes(|| cfg!(target_feature = "sha2") || (isar0() >> 8) & 0xf >= 1)
+}
+
+/// Kept, as [`SHA256`] is.
+static SHA1: Probe = Probe::new();
+
 /// Whether the SHA-512 instructions are available.
 pub(crate) fn has_sha512() -> bool {
     SHA512.yes(ask_sha512)
@@ -65,10 +76,16 @@ fn ask_sha512() -> bool {
 }
 
 /// The SHA2 field of ID_AA64ISAR0_EL1, bits 15:12: 1 means SHA-256,
-/// 2 means SHA-256 and SHA-512. Linux traps and emulates reads of the
-/// ID registers from user space (since 4.11).
-#[cfg(target_os = "linux")]
+/// 2 means SHA-256 and SHA-512.
 fn id_register_sha2() -> u64 {
+    (isar0() >> 12) & 0xf
+}
+
+/// ID_AA64ISAR0_EL1, which says which of these instruction sets the
+/// processor has. Linux traps and emulates reads of the ID registers
+/// from user space (since 4.11).
+#[cfg(target_os = "linux")]
+fn isar0() -> u64 {
     let isar0: u64;
     // SAFETY: reads a register the kernel exposes to user space; no
     // memory is touched.
@@ -79,13 +96,13 @@ fn id_register_sha2() -> u64 {
             options(nomem, nostack, preserves_flags),
         );
     }
-    (isar0 >> 12) & 0xf
+    isar0
 }
 
 /// Without an operating system that exposes the ID registers there is
 /// no safe way to ask, so only the compile-time feature counts.
 #[cfg(not(target_os = "linux"))]
-fn id_register_sha2() -> u64 {
+fn isar0() -> u64 {
     0
 }
 

@@ -19,9 +19,10 @@
 //! is the right choice for anything new; this module exists so the
 //! old form can be read.
 //!
-//! On x86-64 with SHA-NI the compression runs on those instructions;
-//! everywhere else it is portable. Legacy formats still verify with
-//! SHA-1 at volume, and the instructions are there to be used.
+//! On x86-64 with SHA-NI, and on AArch64 with the cryptographic
+//! extensions, the compression runs on those instructions; everywhere
+//! else it is portable. Legacy formats still verify with SHA-1 at
+//! volume, and the instructions are there to be used.
 //!
 //! ```
 //! use scytale::hash::sha1::Sha1;
@@ -34,6 +35,8 @@
 //! # }
 //! ```
 
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
@@ -66,6 +69,10 @@ const IV: [u32; 5] =
 /// The compression function over whole blocks, on the processor's
 /// instructions where it has them.
 fn compress(state: &mut [u32; 5], blocks: &[[u8; 64]]) {
+    #[cfg(target_arch = "aarch64")]
+    if aarch64::compress(state, blocks) {
+        return;
+    }
     #[cfg(target_arch = "x86_64")]
     if x86_64::compress(state, blocks) {
         return;
@@ -343,9 +350,14 @@ mod tests {
     /// The instructions give the state the portable compression does,
     /// block by block and over runs of blocks, from states other
     /// than the initial one.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     #[test]
-    fn sha_ni_matches_portable() {
+    fn the_instructions_match_portable() {
+        #[cfg(target_arch = "aarch64")]
+        use aarch64::compress as written_out;
+        #[cfg(target_arch = "x86_64")]
+        use x86_64::compress as written_out;
+
         let mut blocks = [[0u8; 64]; 9];
         for (i, block) in blocks.iter_mut().enumerate() {
             for (j, byte) in block.iter_mut().enumerate() {
@@ -356,12 +368,12 @@ mod tests {
         let mut actual = IV;
         for n in 1..=blocks.len() {
             portable(&mut expected, &blocks[..n]);
-            if !x86_64::compress(&mut actual, &blocks[..n]) {
+            if !written_out(&mut actual, &blocks[..n]) {
                 return;
             }
             assert_eq!(actual, expected, "{n} blocks");
         }
-        assert!(x86_64::compress(&mut actual, &[]));
+        assert!(written_out(&mut actual, &[]));
         assert_eq!(actual, expected, "no blocks");
     }
 

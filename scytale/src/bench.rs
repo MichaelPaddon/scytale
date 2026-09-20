@@ -761,9 +761,9 @@ where
 }
 
 /// The rows whose implementation is settled inside them and cannot
-/// be named from out here: SHA-1 has no hardware anywhere, the
-/// generator builds its own cipher, and Poly1305 and the AEAD over
-/// ChaCha20 each take the best the processor has without being asked.
+/// be named from out here: SHA-1 picks its own, the generator builds
+/// its own cipher, and Poly1305 and the AEAD over ChaCha20 each take
+/// the best the processor has without being asked.
 const DISPATCHING: [&str; 6] = [
     "sha-1",
     "ctr-drbg",
