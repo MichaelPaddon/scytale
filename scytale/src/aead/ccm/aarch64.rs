@@ -201,18 +201,18 @@ macro_rules! rounds {
 macro_rules! rounds_both {
     ($label:literal) => {
         concat!(
-            "aese v1.16b, v6.16b\n",
             "aese v0.16b, v7.16b\n",
-            "aesmc v1.16b, v1.16b\n",
             "aesmc v0.16b, v0.16b\n",
+            "aese v1.16b, v6.16b\n",
+            "aesmc v1.16b, v1.16b\n",
             "add {k}, {rk}, #16\n",
             "mov {n}, {nr}\n",
             $label, ":\n",
             "ld1 {{v2.16b}}, [{k}], #16\n",
-            "aese v1.16b, v2.16b\n",
             "aese v0.16b, v2.16b\n",
-            "aesmc v1.16b, v1.16b\n",
             "aesmc v0.16b, v0.16b\n",
+            "aese v1.16b, v2.16b\n",
+            "aesmc v1.16b, v1.16b\n",
             "subs {n}, {n}, #1\n",
             "b.ne ", $label, "b\n",
             "ld1 {{v2.16b, v3.16b}}, [{k}]\n",
@@ -313,17 +313,21 @@ macro_rules! group_block {
     ($ks:literal, $pt:literal) => {
         concat!(
             "eor v14.16b, v15.16b, ", $pt, ".16b\n",
+            // Each round instruction stays next to the one that
+            // mixes its columns: the processor fuses that pair, and
+            // anything between them is a round of latency added to
+            // the chain that sets the pace.
             "aese v13.16b, v14.16b\n",
-            "aese ", $ks, ".16b, v15.16b\n",
             "aesmc v13.16b, v13.16b\n",
+            "aese ", $ks, ".16b, v15.16b\n",
             "aesmc ", $ks, ".16b, ", $ks, ".16b\n",
             "add {k}, {rk}, #16\n",
             "mov {n}, {nr}\n",
             "2:\n",
             "ld1 {{v8.16b}}, [{k}], #16\n",
             "aese v13.16b, v8.16b\n",
-            "aese ", $ks, ".16b, v8.16b\n",
             "aesmc v13.16b, v13.16b\n",
+            "aese ", $ks, ".16b, v8.16b\n",
             "aesmc ", $ks, ".16b, ", $ks, ".16b\n",
             "subs {n}, {n}, #1\n",
             "b.ne 2b\n",
