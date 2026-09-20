@@ -48,17 +48,17 @@ const BLOCK: usize = 16;
 
 /// Blocks a group keeps in flight, and bytes in one. Enough
 /// independent blocks to cover the latency of the round instruction.
-const GROUP: usize = 8;
+pub(crate) const GROUP: usize = 8;
 const SPAN: usize = GROUP * BLOCK;
 
 /// Reverses the bytes of a register, as `tbl` indices, which puts the
 /// counter field in the low word and afterwards puts it back.
-static BSWAP: At16<[u8; BLOCK]> =
+pub(crate) static BSWAP: At16<[u8; BLOCK]> =
     At16([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]);
 
 /// What each register adds to the base counter to make its block,
 /// then one group's worth to move the base on.
-static OFFSETS: At16<[u32; 4 * GROUP + 4]> = {
+pub(crate) static OFFSETS: At16<[u32; 4 * GROUP + 4]> = {
     let mut w = [0u32; 4 * GROUP + 4];
     let mut i = 0;
     while i < GROUP {
