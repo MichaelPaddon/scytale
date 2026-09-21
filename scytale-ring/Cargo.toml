@@ -1,0 +1,40 @@
+[package]
+name = "scytale-ring"
+description = "ring's API, answered by scytale"
+# ring's numbering, not scytale's: the version says which ring this
+# answers for, and satisfies a `ring = "0.17"` requirement.
+version = "0.17.14"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository = "https://github.com/MichaelPaddon/scytale"
+documentation = "https://docs.rs/scytale-ring"
+readme = "README.md"
+keywords = ["cryptography", "ring", "tls", "no-std"]
+categories = ["cryptography", "no-std", "no-std::no-alloc"]
+
+# Code written against ring names the crate `ring`, and so do ring's
+# own test files, which run here unchanged.
+[lib]
+name = "ring"
+
+[dependencies]
+scytale = { path = "../scytale", version = "0.7" }
+untrusted = "0.9"
+zeroize = { version = "1", default-features = false }
+
+# ring's features, so that a manifest which asks for them still
+# resolves. None changes anything here: there is no allocator to
+# enable, and randomness always comes from scytale's own source.
+[features]
+default = ["alloc", "dev_urandom_fallback"]
+alloc = []
+std = ["alloc"]
+dev_urandom_fallback = []
+less-safe-getrandom-custom-or-rdrand = []
+less-safe-getrandom-espidf = []
+slow_tests = []
+test_logging = []
+unstable-testing-arm-no-hw = []
+unstable-testing-arm-no-neon = []
+wasm32_unknown_unknown_js = []

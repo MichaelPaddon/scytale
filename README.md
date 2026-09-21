@@ -571,6 +571,21 @@ erase.
 The expanded key inside a cipher is wiped when the cipher is
 dropped, as it always was, and the generator wipes its state.
 
+### In place of ring
+
+[`scytale-ring`](scytale-ring) presents ring 0.17's API over scytale,
+under the library name `ring`, so code written against ring compiles
+unchanged:
+
+```toml
+[dependencies]
+ring = { package = "scytale-ring", version = "0.17" }
+```
+
+rustls and rustls-webpki pass their own test suites on it
+(`scripts/test-ring-downstream`). Its README says where it differs
+from ring, the main difference being deterministic ECDSA signatures.
+
 ## Speed
 
 Measured on a 13th Gen Intel Core i7-1355U, one thread pinned to a

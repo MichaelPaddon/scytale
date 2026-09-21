@@ -332,7 +332,7 @@ jobs:
 
       - name: Line length
         run: |
-          long=$(find scytale scytale-cli -name '*.rs' \
+          long=$(find scytale scytale-cli scytale-ring -name '*.rs' \
               -exec awk 'length > 80 {print FILENAME": "FNR}' {} +)
           if [ -n "$long" ]; then
               echo "lines over 80 columns:" >&2
@@ -343,10 +343,27 @@ jobs:
       - name: ASCII only
         run: |
           if grep -rnP '[^\x00-\x7F]' \
-              scytale/src scytale-cli/src; then
+              scytale/src scytale-cli/src scytale-ring/src; then
               echo "non-ASCII characters found" >&2
               exit 1
           fi
+
+  # rustls-webpki and rustls run their own test suites with
+  # scytale-ring as their ring. Their tests are not in the published
+  # crates, so the script clones each at its release tag.
+  ring-downstream:
+    name: test (rustls and webpki on scytale-ring)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          rustup update --no-self-update stable
+          rustup default stable
+
+      - name: Test
+        run: scripts/test-ring-downstream
 
   # The published crate omits the vendored vectors, so check that it
   # still builds and that nothing else went missing.
@@ -361,8 +378,10 @@ jobs:
           rustup update --no-self-update stable
           rustup default stable
 
-      - name: Package and build the crate as published
-        run: cargo package -p scytale
+      - name: Package and build the crates as published
+        # scytale-ring is built against scytale as published, not the
+        # copy beside it, which is what anyone who installs it gets.
+        run: cargo package -p scytale -p scytale-ring
 
       - name: Report crate size
         run: ls -lh target/package/*.crate

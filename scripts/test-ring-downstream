@@ -1,0 +1,85 @@
+#!/bin/sh
+# Runs webpki's and rustls's own test suites with their `ring`
+# dependency pointed at scytale-ring. Their tests and vector files
+# are not in the published crates, so each is cloned at its release
+# tag. The clones live in target/downstream and are refreshed each
+# run.
+#
+# A crate's own `ring` can only be replaced by editing its manifest:
+# cargo's [patch] matches the replacement's real package name, which
+# is scytale-ring. So each clone's manifest is edited, and rustls is
+# given the edited webpki by [patch].
+#
+# Usage: scripts/test-ring-downstream
+
+set -eu
+
+WEBPKI_TAG=v/0.103.15
+RUSTLS_TAG=v/0.23.45
+
+cd "$(dirname "$0")/.."
+shim=$(pwd)/scytale-ring
+work=target/downstream
+rm -rf "$work"
+mkdir -p "$work"
+cd "$work"
+
+git clone -q --depth 1 --branch "$WEBPKI_TAG" \
+    https://github.com/rustls/webpki.git webpki
+git clone -q --depth 1 --branch "$RUSTLS_TAG" \
+    https://github.com/rustls/rustls.git rustls
+
+# Replaces exactly one line of a manifest, or fails: a release that
+# spells the line differently must stop the run, not pass unshimmed.
+swap() {
+    file=$1 old=$2 new=$3
+    count=$(grep -cxF "$old" "$file" || true)
+    if [ "$count" != 1 ]; then
+        echo "$file: expected one line '$old', found $count" >&2
+        exit 1
+    fi
+    awk -v old="$old" -v new="$new" \
+        '$0 == old { print new; next } { print }' \
+        "$file" > "$file.new"
+    mv "$file.new" "$file"
+}
+
+opts='default-features = false, optional = true'
+swap webpki/Cargo.toml "ring = { version = \"0.17\", $opts }" \
+    "ring = { package = \"scytale-ring\", path = \"$shim\", $opts }"
+# The clone sits inside this repository's workspace directory; this
+# makes it a workspace of its own.
+printf '\n[workspace]\n' >> webpki/Cargo.toml
+
+swap rustls/Cargo.toml 'ring = "0.17"' \
+    "ring = { package = \"scytale-ring\", path = \"$shim\" }"
+swap rustls/Cargo.toml 'rustls = { path = "rustls" }' \
+    'rustls = { path = "rustls" }
+rustls-webpki = { path = "../webpki" }'
+
+# No real ring may be left in either graph, or a pass proves nothing.
+check() {
+    if cargo tree "$@" -e normal,dev --prefix none \
+        | grep -E '^ring v' >/dev/null; then
+        echo "the real ring is still in the graph" >&2
+        exit 1
+    fi
+}
+
+echo "==> webpki $WEBPKI_TAG"
+(
+    cd webpki
+    check --no-default-features --features ring,alloc,std
+    cargo test --no-default-features --features ring,alloc,std
+)
+
+echo "==> rustls $RUSTLS_TAG"
+(
+    cd rustls
+    features=ring,tls12,logging,std
+    check -p rustls --no-default-features --features "$features"
+    cargo test -p rustls --no-default-features --features "$features" \
+        --all-targets
+)
+
+echo "webpki and rustls passed against scytale-ring"
