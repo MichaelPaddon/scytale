@@ -120,7 +120,7 @@ dependencies = [
 
 [[package]]
 name = "scytale-ring"
-version = "0.17.14"
+version = "0.7.0"
 dependencies = [
  "scytale",
  "untrusted",

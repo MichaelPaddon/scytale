@@ -9,13 +9,25 @@ scytale, which is portable Rust with hardware acceleration chosen at
 run time. The library is named `ring`, so code written against ring
 compiles unchanged.
 
+## Which ring
+
+The version number is scytale's, since the two are released together,
+so it says nothing about ring. This table does:
+
+| scytale-ring | ring API | Tested with |
+| --- | --- | --- |
+| 0.7 | 0.17, checked against 0.17.14 | rustls 0.23.45, rustls-webpki 0.103.15 |
+
+A new ring API arrives in a new scytale-ring minor version, and a row
+here says so.
+
 ## Using it
 
 Replace ring in your own manifest:
 
 ```toml
 [dependencies]
-ring = { package = "scytale-ring", version = "0.17" }
+ring = { package = "scytale-ring", version = "0.7" }
 ```
 
 That reaches your crate's own calls. It does not reach a dependency
