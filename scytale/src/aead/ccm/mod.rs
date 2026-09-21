@@ -278,9 +278,9 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ccm<C> {
         }
         if encrypt {
             mac.update(tail);
-            self.ctr.encrypt(&counter, tail)?;
+            self.ctr.encrypt(&counter, tail);
         } else {
-            self.ctr.encrypt(&counter, tail)?;
+            self.ctr.encrypt(&counter, tail);
             mac.update(tail);
         }
         mac.pad();

@@ -93,7 +93,7 @@ impl Aead for ChaCha20Poly1305 {
         let mut state = self.encryptor(nonce)?;
         state.aad(aad)?;
         state.update(data)?;
-        *tag = state.finalize()?;
+        *tag = state.finalize();
         Ok(())
     }
 
@@ -194,7 +194,10 @@ impl<'a> Core<'a> {
             return Err(Error::OutOfOrder);
         }
         self.mac.update(data);
-        self.aad_bytes += data.len() as u64;
+        // Saturating rather than wrapping: a count that wrapped
+        // would put a length in the tag that is not the one that was
+        // authenticated. Unreachable at 2^64 bytes, and cheap.
+        self.aad_bytes = self.aad_bytes.saturating_add(data.len() as u64);
         Ok(())
     }
 
@@ -218,7 +221,8 @@ impl<'a> Core<'a> {
     /// Feeds ciphertext to the MAC.
     fn absorb(&mut self, ciphertext: &[u8]) {
         self.mac.update(ciphertext);
-        self.message_bytes += ciphertext.len() as u64;
+        self.message_bytes =
+            self.message_bytes.saturating_add(ciphertext.len() as u64);
     }
 
     fn tag(mut self) -> [u8; TAG] {
@@ -257,8 +261,8 @@ impl Encryptor<'_> {
     }
 
     /// Finishes, returning the tag.
-    pub fn finalize(self) -> Result<[u8; TAG], Error> {
-        Ok(self.core.tag())
+    pub fn finalize(self) -> [u8; TAG] {
+        self.core.tag()
     }
 }
 
@@ -411,7 +415,7 @@ mod tests {
                 e.update(piece).unwrap();
             }
             assert_eq!(data, whole, "chunk {chunk}");
-            assert_eq!(e.finalize().unwrap(), tag, "chunk {chunk}");
+            assert_eq!(e.finalize(), tag, "chunk {chunk}");
 
             let mut d = aead.decryptor(&nonce).unwrap();
             d.aad(&aad).unwrap();

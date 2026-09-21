@@ -64,6 +64,9 @@ pub struct Cfb1<C: BlockCipher> {
 impl<C: BlockCipher> Cfb1<C> {
     /// Takes the key the cipher runs under.
     pub fn new(key: &C::Key) -> Self {
+        // A cipher of the caller's own whose block is no bytes at
+        // all would leave the loop below with nothing to advance by.
+        const { assert!(size_of::<C::Block>() > 0) };
         Cfb1 {
             cipher: C::new(key),
         }
@@ -111,7 +114,9 @@ impl<C: BlockCipher> Cfb1<C> {
 
 /// Checks that `data` holds `bits` bits.
 fn check(data: &[u8], bits: usize) -> Result<(), Error> {
-    if bits > 8 * data.len() {
+    // In bytes, since `8 * data.len()` overflows a 32-bit `usize`
+    // for a slice of 512 MiB.
+    if bits.div_ceil(8) > data.len() {
         return Err(Error::InvalidLength(bits));
     }
     Ok(())

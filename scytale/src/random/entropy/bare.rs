@@ -187,9 +187,27 @@ impl Choice {
     /// Whether the processor has `rndr` (ID_AA64ISAR0_EL1 bits
     /// 63:60).
     fn try_new() -> Result<Self, Error> {
+        if cfg!(target_feature = "rand") || Self::id_register_reports_rndr() {
+            Ok(Choice)
+        } else {
+            Err(Error::NotSupported)
+        }
+    }
+
+    /// Asks the identification register, where asking is safe.
+    ///
+    /// The register is not readable from user space: the read traps,
+    /// and it is the operating system that answers it. Linux does
+    /// (since 4.11). macOS and Windows do not, and there the
+    /// instruction itself is the illegal one, so the question is
+    /// never put and only a build that names the feature has it.
+    /// Bare metal runs where the register is simply readable.
+    #[cfg(any(target_os = "linux", target_os = "none"))]
+    fn id_register_reports_rndr() -> bool {
         let isar0: u64;
         // SAFETY: reads an identification register, which is what
-        // they are for; no memory is touched.
+        // they are for, on a system where that read is answered; no
+        // memory is touched.
         unsafe {
             core::arch::asm!(
                 "mrs {}, ID_AA64ISAR0_EL1",
@@ -197,11 +215,12 @@ impl Choice {
                 options(nomem, nostack, preserves_flags),
             );
         }
-        if isar0 >> 60 != 0 {
-            Ok(Choice)
-        } else {
-            Err(Error::NotSupported)
-        }
+        isar0 >> 60 != 0
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "none")))]
+    fn id_register_reports_rndr() -> bool {
+        false
     }
 
     fn tries(&self) -> usize {
@@ -231,6 +250,35 @@ impl Choice {
             );
         }
         (failed == 0).then_some(word)
+    }
+}
+
+/// What one read of the Zkr `seed` register said.
+#[cfg(any(target_arch = "riscv64", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verdict {
+    /// Sixteen bits of entropy.
+    Ready(u64),
+    /// Nothing yet: ask again.
+    Wait,
+    /// The source has failed for good.
+    Dead,
+}
+
+/// Reads the register's verdict out of what it returned.
+///
+/// The state, `OPST`, is bits 31:30, not the whole of the top half:
+/// `BIST` (00) while the source tests itself, `WAIT` (01) while it
+/// gathers, `ES16` (10) with sixteen good bits below, `DEAD` (11).
+/// Bits 29:16 are reserved or the implementation's own and say
+/// nothing. The self test is a state the source passes through on
+/// its way up, so it is a wait and not a failure.
+#[cfg(any(target_arch = "riscv64", test))]
+fn seed_verdict(seed: u64) -> Verdict {
+    match (seed >> 30) & 3 {
+        0b10 => Verdict::Ready(seed & 0xffff),
+        0b00 | 0b01 => Verdict::Wait,
+        _ => Verdict::Dead,
     }
 }
 
@@ -271,10 +319,6 @@ impl Choice {
     /// a failure, so it does not count against the attempts; a
     /// generator reporting itself broken is, and stops immediately.
     fn attempt(&self) -> Option<u64> {
-        /// The register's verdict, in bits 31:16 of what it returns.
-        const WAIT: u64 = 1;
-        const READY: u64 = 2;
-
         let mut word = 0u64;
         for half in 0..4 {
             let mut got = None;
@@ -291,16 +335,16 @@ impl Choice {
                         options(nostack, preserves_flags),
                     );
                 }
-                match seed >> 16 {
-                    READY => {
-                        got = Some(seed & 0xffff);
+                match seed_verdict(seed) {
+                    Verdict::Ready(bits) => {
+                        got = Some(bits);
                         break;
                     }
-                    // Still gathering. Worth asking again.
-                    WAIT => continue,
-                    // Self-test, or reporting itself dead. Neither
-                    // will improve by asking again.
-                    _ => return None,
+                    // Testing itself or still gathering. Both pass.
+                    Verdict::Wait => continue,
+                    // Reporting itself dead, which asking again
+                    // will not mend.
+                    Verdict::Dead => return None,
                 }
             }
             word |= got? << (16 * half);
@@ -351,6 +395,26 @@ mod tests {
     /// the test run rather than fail a test.
     const TESTABLE: bool =
         cfg!(any(target_arch = "aarch64", target_arch = "x86_64"));
+
+    /// The `seed` register's state is its bits 31:30, as the Zkr
+    /// specification lays it out. Reading it from the whole top half
+    /// takes a good read, `0x8000_xxxx`, for a failure, and the
+    /// source then never yields anything. No machine here can run
+    /// the read itself, so the decoding is what is tested.
+    #[test]
+    fn the_seed_register_is_read_from_its_state_bits() {
+        assert_eq!(seed_verdict(0x8000_1234), Verdict::Ready(0x1234));
+        assert_eq!(seed_verdict(0x8000_0000), Verdict::Ready(0));
+        assert_eq!(seed_verdict(0x8000_ffff), Verdict::Ready(0xffff));
+        // The reserved and custom bits below the state say nothing.
+        assert_eq!(seed_verdict(0xbfff_abcd), Verdict::Ready(0xabcd));
+        // Self test and gathering both mean ask again.
+        assert_eq!(seed_verdict(0x0000_0000), Verdict::Wait);
+        assert_eq!(seed_verdict(0x4000_0000), Verdict::Wait);
+        assert_eq!(seed_verdict(0x7fff_ffff), Verdict::Wait);
+        assert_eq!(seed_verdict(0xc000_0000), Verdict::Dead);
+        assert_eq!(seed_verdict(0xffff_ffff), Verdict::Dead);
+    }
 
     /// The processor's own noise source, where the machine running
     /// the tests has one, must produce samples that differ.

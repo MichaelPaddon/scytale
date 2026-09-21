@@ -48,16 +48,17 @@ use crate::hash::Hash;
 use crate::mac::Mac;
 use crate::mac::hmac::Hmac;
 use crate::{BlockType, Error};
+use zeroize::Zeroize;
 
 /// Extracts a pseudorandom key from `ikm` under `salt`, which may be
 /// empty.
-pub fn extract<H: Hash + Clone + BlockType>(
+pub fn extract<H: Hash + Clone + BlockType + Default>(
     salt: &[u8],
     ikm: &[u8],
-) -> Result<H::Output, Error> {
-    let mut mac = Hmac::<H>::try_new(salt)?;
+) -> H::Output {
+    let mut mac = Hmac::<H>::new(salt);
     mac.update(ikm);
-    Ok(mac.finalize())
+    mac.finalize()
 }
 
 /// Fills `okm` with keying material expanded from `prk` and `info`.
@@ -67,7 +68,7 @@ pub fn extract<H: Hash + Clone + BlockType>(
 ///
 /// Returns [`Error::InvalidLength`] if `okm` is longer than 255
 /// digests, the most the construction defines.
-pub fn expand<H: Hash + Clone + BlockType>(
+pub fn expand<H: Hash + Clone + BlockType + Default>(
     prk: &[u8],
     info: &[&[u8]],
     okm: &mut [u8],
@@ -75,7 +76,7 @@ pub fn expand<H: Hash + Clone + BlockType>(
     if okm.len() > 255 * size_of::<H::Output>() {
         return Err(Error::InvalidLength(okm.len()));
     }
-    let mut mac = Hmac::<H>::try_new(prk)?;
+    let mut mac = Hmac::<H>::new(prk);
     // T(0) is empty; T(i) = HMAC(PRK, T(i-1) || info || i). Each
     // `finalize` leaves the MAC keyed and ready for the next.
     let mut previous: Option<H::Output> = None;
@@ -91,18 +92,23 @@ pub fn expand<H: Hash + Clone + BlockType>(
         chunk.copy_from_slice(&t.as_ref()[..chunk.len()]);
         previous = Some(t);
     }
+    // The last block of T is output key material the caller already
+    // has; it does not linger here as well.
+    if let Some(previous) = previous.as_mut() {
+        previous.as_mut().zeroize();
+    }
     Ok(())
 }
 
 /// Extracts from `ikm` under `salt`, then expands with `info` to fill
 /// `okm`. `info` is a list of parts, as [`expand`] takes.
-pub fn derive<H: Hash + Clone + BlockType>(
+pub fn derive<H: Hash + Clone + BlockType + Default>(
     salt: &[u8],
     ikm: &[u8],
     info: &[&[u8]],
     okm: &mut [u8],
 ) -> Result<(), Error> {
-    let prk = extract::<H>(salt, ikm)?;
+    let prk = extract::<H>(salt, ikm);
     expand::<H>(prk.as_ref(), info, okm)
 }
 
@@ -153,7 +159,7 @@ mod tests {
         let ikm = [0x0b; 22];
         let salt = hex::<13>("000102030405060708090a0b0c");
         let info = hex::<10>("f0f1f2f3f4f5f6f7f8f9");
-        let prk = extract::<Sha256>(&salt, &ikm).unwrap();
+        let prk = extract::<Sha256>(&salt, &ikm);
         assert_eq!(
             prk,
             hex::<32>(
@@ -212,7 +218,7 @@ mod tests {
         let ikm = [0x0b; 11];
         let salt = hex::<13>("000102030405060708090a0b0c");
         let info = hex::<10>("f0f1f2f3f4f5f6f7f8f9");
-        let prk = extract::<Sha1>(&salt, &ikm).unwrap();
+        let prk = extract::<Sha1>(&salt, &ikm);
         assert_eq!(prk, hex::<20>("9b6c18c432a7bf8f0e71c8eb88f4b30baa2ba243"));
         let mut okm = [0u8; 42];
         expand::<Sha1>(&prk, &[&info], &mut okm).unwrap();

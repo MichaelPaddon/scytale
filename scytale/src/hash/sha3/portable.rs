@@ -148,14 +148,18 @@ mod tests {
 
     #[test]
     fn known_answers() {
-        check_known_answers::<
-            Sha3_224,
-            Sha3_256,
-            Sha3_384,
-            Sha3_512,
-            Shake128,
-            Shake256,
-        >();
+        check_known_answers(
+            (
+                || Sha3_224::try_new().expect("portable"),
+                || Sha3_256::try_new().expect("portable"),
+                || Sha3_384::try_new().expect("portable"),
+                || Sha3_512::try_new().expect("portable"),
+            ),
+            (
+                || Shake128::try_new().expect("portable"),
+                || Shake256::try_new().expect("portable"),
+            ),
+        );
     }
 
     /// The permutation of the zero state, from the Keccak team's

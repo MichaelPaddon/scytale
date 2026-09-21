@@ -122,7 +122,12 @@ pub trait Random {
     ///
     /// # Errors
     ///
-    /// Whatever [`fill`](Random::fill) refuses with.
+    /// Whatever [`fill`](Random::fill) refuses with, and
+    /// [`Error::KeyGenerationFailed`] if 128 draws in a row are
+    /// refused. A draw is refused less than half the time, so a
+    /// working source does that once in 2^128 calls; a source stuck
+    /// on one value does it every time, and would otherwise hold the
+    /// caller here for ever.
     fn below(&mut self, n: NonZeroU64) -> Result<u64, Error> {
         let n = n.get();
         // There are 2^64 words, and the top (2^64 mod n) of them are
@@ -133,13 +138,14 @@ pub trait Random {
         let excess = (u64::MAX % n + 1) % n;
         let top = u64::MAX - excess;
         let mut bytes = [0u8; 8];
-        loop {
+        for _ in 0..128 {
             self.fill(&mut bytes)?;
             let x = u64::from_be_bytes(bytes);
             if x <= top {
                 return Ok(x % n);
             }
         }
+        Err(Error::KeyGenerationFailed)
     }
 }
 
@@ -254,10 +260,20 @@ impl<B: ByteArray> fmt::Debug for Key<B> {
 /// A fixed-size byte array, and the mechanism for cutting a byte
 /// slice into a slice of them and back.
 ///
-/// Implemented for every `[u8; N]`. Code that runs a block cipher
-/// over a message bounds the cipher's block with this so that it can
-/// hand the cipher whole blocks; nothing else needs it.
-pub trait ByteArray: Copy + Zeroize + AsRef<[u8]> + AsMut<[u8]> {
+/// Implemented for every `[u8; N]`, and sealed, so for nothing else.
+/// Code that runs a block cipher over a message bounds the cipher's
+/// block with this so that it can hand the cipher whole blocks, and
+/// a hash's digest is one so that its length is its type's size.
+///
+/// Sealed because the library relies on what an array guarantees
+/// and a trait cannot say: that `as_ref` is every byte of the value
+/// and no more, so that `size_of` is the length, and that a slice of
+/// them is its bytes laid end to end. A type of the caller's own
+/// could break either, and the code that trusts them would then
+/// index past an end or fail to make progress.
+pub trait ByteArray:
+    sealed::Sealed + Copy + Zeroize + AsRef<[u8]> + AsMut<[u8]>
+{
     /// An array of zeros.
     fn zeroed() -> Self;
 
@@ -272,6 +288,12 @@ pub trait ByteArray: Copy + Zeroize + AsRef<[u8]> + AsMut<[u8]> {
 
     /// The arrays as the bytes they are.
     fn flatten_mut(arrays: &mut [Self]) -> &mut [u8];
+}
+
+/// Keeps [`ByteArray`] to the arrays.
+mod sealed {
+    pub trait Sealed {}
+    impl<const N: usize> Sealed for [u8; N] {}
 }
 
 impl<const N: usize> ByteArray for [u8; N] {
@@ -424,6 +446,24 @@ mod tests {
         let eight = NonZeroU64::new(8).unwrap();
         let mut rng = Words(&[u64::MAX]);
         assert_eq!(rng.below(eight).unwrap(), 7);
+    }
+
+    /// A source stuck on a refused value ends the draw rather than
+    /// holding the caller for ever.
+    #[test]
+    fn below_gives_up_on_a_stuck_source() {
+        struct Stuck;
+        impl Random for Stuck {
+            fn fill(&mut self, out: &mut [u8]) -> Result<(), Error> {
+                out.fill(0xff);
+                Ok(())
+            }
+        }
+        let three = NonZeroU64::new(3).unwrap();
+        assert_eq!(Stuck.below(three), Err(Error::KeyGenerationFailed));
+        // The same source is fine where nothing is refused.
+        let four = NonZeroU64::new(4).unwrap();
+        assert_eq!(Stuck.below(four), Ok(3));
     }
 
     /// A source that fails takes the draw down with it.

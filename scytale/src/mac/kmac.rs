@@ -98,6 +98,12 @@ fn clear_below(tag: &mut [u8], bits: usize) {
 /// Squeezes `tag.len()` bytes and compares them with `tag`, both cut
 /// to `bits`, reading every byte whatever the outcome.
 fn matches(reader: &mut impl XofReader, tag: &[u8], bits: usize) -> bool {
+    // A tag of no bytes authenticates nothing, and the loop below
+    // would not run at all: `ok` would keep the `true` it starts
+    // with and every message would verify under every key.
+    if tag.is_empty() {
+        return false;
+    }
     let mut ok = true;
     let mut got = [0u8; 64];
     let mut want = [0u8; 64];
@@ -333,8 +339,8 @@ macro_rules! kmac {
         impl Mac for $name {
             type Tag = [u8; $tag];
 
-            fn try_new(key: &Self::Key) -> Result<Self, Error> {
-                Ok(Self::new(key.as_ref(), b""))
+            fn new(key: &Self::Key) -> Self {
+                Self::keyed(key.as_ref(), bits_of(key.as_ref()), b"")
             }
 
             fn reset(&mut self) {
@@ -605,6 +611,30 @@ mod tests {
             mac.verify_bits(0, 0, &bad, 800),
             Err(Error::AuthenticationFailed)
         );
+    }
+
+    /// An empty tag is not a tag, and must not verify.
+    ///
+    /// The comparison runs over the tag's own bytes, so with none
+    /// there is nothing to disagree with: every message would
+    /// authenticate under every key.
+    #[test]
+    fn an_empty_tag_never_verifies() {
+        let mut mac = Kmac256::new(&KEY, TAGGED);
+        mac.update(b"message");
+        assert_eq!(mac.verify_tag(&[]), Err(Error::AuthenticationFailed));
+
+        mac.update(b"message");
+        assert_eq!(
+            mac.verify_bits(0, 0, &[], 0),
+            Err(Error::AuthenticationFailed)
+        );
+
+        // The key and message are beside the point: nothing about
+        // them can make an empty tag right.
+        let mut other = Kmac128::new(b"a different key", TAGGED);
+        other.update(b"another message");
+        assert_eq!(other.verify_tag(&[]), Err(Error::AuthenticationFailed));
     }
 
     /// The bit calls with whole-byte lengths are the byte calls.

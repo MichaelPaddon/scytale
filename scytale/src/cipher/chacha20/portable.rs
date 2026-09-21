@@ -9,6 +9,7 @@
 
 // Only the trait impl is unsafe, and it calls safe code.
 use super::{BLOCK_SIZE, Backend, CONSTANTS, Cipher, Sealed};
+use zeroize::Zeroize;
 
 /// ChaCha20, portably.
 pub type ChaCha20 = Cipher<Portable>;
@@ -95,7 +96,7 @@ pub(crate) fn xor(
         for (lane, word) in state[12].iter_mut().enumerate() {
             *word = counter.wrapping_add(lane as u32);
         }
-        let out = block(&state);
+        let mut out = block(&state);
         for (lane, block) in group.chunks_mut(BLOCK_SIZE).enumerate() {
             for (word, bytes) in block.chunks_exact_mut(4).enumerate() {
                 let k = out[word][lane].to_le_bytes();
@@ -105,7 +106,12 @@ pub(crate) fn xor(
             }
         }
         counter = counter.wrapping_add((group.len() / BLOCK_SIZE) as u32);
+        // A block of keystream under this key and nonce.
+        out.zeroize();
     }
+    // Words 4 to 11 are the key. The x86-64 backend wipes its own
+    // working state for the same reason.
+    state.zeroize();
 }
 
 /// The keystream generator in plain Rust.

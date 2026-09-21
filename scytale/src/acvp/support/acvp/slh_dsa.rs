@@ -59,7 +59,7 @@ macro_rules! set {
                 message: &[u8],
             ) -> Vec<u8> {
                 let sk: [u8; $module::KEY_SIZE] = sk.try_into().expect("sk");
-                let key = $module::PrivateKey::try_new(&sk).expect("key");
+                let key = $module::PrivateKey::new(&sk);
                 let sig = match rnd {
                     Some(rnd) => key
                         .sign(&mut Fixed(rnd.to_vec()), context, message)
@@ -84,7 +84,7 @@ macro_rules! set {
                 else {
                     return false;
                 };
-                let key = $module::PublicKey::try_new(&pk).expect("pk");
+                let key = $module::PublicKey::new(&pk);
                 key.verify(context, message, &sig).is_ok()
             }
         }

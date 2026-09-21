@@ -41,6 +41,12 @@ pub(super) fn probe() -> Option<Adx> {
 static ADX: Probe = Probe::new();
 
 fn ask() -> bool {
+    // A processor whose highest leaf is below seven answers this one
+    // with the data of its highest, not with zeros, so the bits
+    // would be whatever that leaf happens to hold.
+    if core::arch::x86_64::__cpuid(0).eax < 7 {
+        return false;
+    }
     let ebx = __cpuid_count(7, 0).ebx;
     ebx & (1 << 19) != 0 && ebx & (1 << 8) != 0
 }

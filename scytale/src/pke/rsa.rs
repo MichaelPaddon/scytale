@@ -283,7 +283,7 @@ impl<'a> PublicKeyRef<'a> {
     }
 
     /// Encrypts with OAEP; see [`PublicKey::encrypt_oaep`].
-    pub fn encrypt_oaep<H: Hash, R: Random>(
+    pub fn encrypt_oaep<H: Hash + Default, R: Random>(
         &self,
         rng: &mut R,
         label: &[u8],
@@ -296,7 +296,7 @@ impl<'a> PublicKeyRef<'a> {
         if self.modulus_len() < 2 * h_len + 2 {
             return Err(Error::MessageTooLong);
         }
-        let mut seed = H::digest(&[])?;
+        let mut seed = H::digest(&[]);
         rng.fill(seed.as_mut())?;
         let ciphertext =
             self.oaep_encode::<H>(seed.as_ref(), label, message, scratch);
@@ -306,7 +306,7 @@ impl<'a> PublicKeyRef<'a> {
 
     /// The encoding half of OAEP, with the seed handed in so the
     /// tests can pin it.
-    fn oaep_encode<H: Hash>(
+    fn oaep_encode<H: Hash + Default>(
         &self,
         seed: &[u8],
         label: &[u8],
@@ -325,7 +325,7 @@ impl<'a> PublicKeyRef<'a> {
         let db_len = len - h_len - 1;
         {
             let db = &mut em[1 + h_len..];
-            db[..h_len].copy_from_slice(H::digest(label)?.as_ref());
+            db[..h_len].copy_from_slice(H::digest(label).as_ref());
             db[db_len - message.len() - 1] = 0x01;
             db[db_len - message.len()..].copy_from_slice(message);
         }
@@ -503,7 +503,7 @@ impl<'a> PrivateKeyRef<'a> {
     }
 
     /// Decrypts an OAEP ciphertext; see [`PrivateKey::decrypt_oaep`].
-    pub fn decrypt_oaep<H: Hash>(
+    pub fn decrypt_oaep<H: Hash + Default>(
         &self,
         label: &[u8],
         ciphertext: &[u8],
@@ -537,7 +537,7 @@ impl<'a> PrivateKeyRef<'a> {
         // the label hash, and the zeros-then-0x01 frame around the
         // message.
         let mut bad = head[0];
-        let lhash = H::digest(label)?;
+        let lhash = H::digest(label);
         for (a, b) in db[..h_len].iter().zip(lhash.as_ref()) {
             bad |= a ^ b;
         }
@@ -719,7 +719,7 @@ impl PublicKey {
     /// most the modulus length minus two digest lengths and two
     /// bytes. The label is rarely wanted and usually empty; whatever
     /// it is, decryption must present the same one.
-    pub fn encrypt_oaep<H: Hash, R: Random>(
+    pub fn encrypt_oaep<H: Hash + Default, R: Random>(
         &self,
         rng: &mut R,
         label: &[u8],
@@ -732,7 +732,7 @@ impl PublicKey {
 
     /// The encoding half of OAEP with the seed pinned, for the tests.
     #[cfg(test)]
-    fn oaep_encode<H: Hash>(
+    fn oaep_encode<H: Hash + Default>(
         &self,
         seed: &[u8],
         label: &[u8],
@@ -956,7 +956,7 @@ impl PrivateKey {
     /// failed gives an attacker the message one query at a time
     /// (Manger's attack), so nothing here branches on secret bytes
     /// until the single verdict.
-    pub fn decrypt_oaep<H: Hash>(
+    pub fn decrypt_oaep<H: Hash + Default>(
         &self,
         label: &[u8],
         ciphertext: &[u8],

@@ -68,11 +68,9 @@ fn aft<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
         };
         let mut data = input;
         if encrypt {
-            cfb.encrypt(&block::<C>(&iv), &mut data)
-                .expect("any length");
+            cfb.encrypt(&block::<C>(&iv), &mut data);
         } else {
-            cfb.decrypt(&block::<C>(&iv), &mut data)
-                .expect("any length");
+            cfb.decrypt(&block::<C>(&iv), &mut data);
         }
         assert_eq!(data, expected, "tgId {} tcId {}", group["tgId"], t["tcId"]);
         count += 1;
@@ -107,14 +105,14 @@ fn mct<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
             if encrypt {
                 let mut state = cfb.encryptor(&block::<C>(&iv));
                 for j in 0..MCT_SEGMENTS {
-                    state.update(&mut segment).expect("one byte");
+                    state.update(&mut segment);
                     outputs[j] = segment[0];
                     segment = [next_input(&iv, &outputs, j)];
                 }
             } else {
                 let mut state = cfb.decryptor(&block::<C>(&iv));
                 for j in 0..MCT_SEGMENTS {
-                    state.update(&mut segment).expect("one byte");
+                    state.update(&mut segment);
                     outputs[j] = segment[0];
                     segment = [next_input(&iv, &outputs, j)];
                 }

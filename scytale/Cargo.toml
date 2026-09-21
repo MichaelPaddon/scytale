@@ -27,10 +27,13 @@ zeroize = { version = "1", default-features = false, features = ["derive"] }
 
 [dev-dependencies]
 serde_json = "1"
+
 # Only the benchmark uses this, for CPU time rather than wall clock:
 # clock_gettime(CLOCK_THREAD_CPUTIME_ID) where there is one, and
 # GetThreadTimes on Windows. A dev-dependency, so nothing that depends
-# on this crate ever builds it.
+# on this crate ever builds it. Wasm has neither, and does not build
+# the benchmark.
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 cpu-time = "1"
 
 # Only where there is something to ask. A bare metal target has

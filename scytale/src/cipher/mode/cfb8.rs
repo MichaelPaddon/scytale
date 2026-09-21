@@ -28,8 +28,8 @@
 //!
 //! // Any length, down to a single byte.
 //! let mut data = [0u8; 5];
-//! cfb.encrypt(&iv, &mut data)?;
-//! cfb.decrypt(&iv, &mut data)?;
+//! cfb.encrypt(&iv, &mut data);
+//! cfb.decrypt(&iv, &mut data);
 //! assert_eq!(data, [0u8; 5]);
 //! # Ok(())
 //! # }
@@ -38,7 +38,6 @@
 use core::fmt;
 
 use super::shift_in_byte;
-use crate::Error;
 use crate::KeyType;
 use crate::cipher::{BlockCipher, OneBlock};
 
@@ -61,6 +60,9 @@ pub struct Cfb8<C: BlockCipher> {
 impl<C: BlockCipher> Cfb8<C> {
     /// Takes the key the cipher runs under.
     pub fn new(key: &C::Key) -> Self {
+        // A cipher of the caller's own whose block is no bytes at
+        // all would leave the loop below with nothing to advance by.
+        const { assert!(size_of::<C::Block>() > 0) };
         Cfb8 {
             cipher: C::new(key),
         }
@@ -68,13 +70,13 @@ impl<C: BlockCipher> Cfb8<C> {
 
     /// Encrypts `data` in place under `iv`. Any length of message is
     /// allowed.
-    pub fn encrypt(&self, iv: &C::Block, data: &mut [u8]) -> Result<(), Error> {
-        self.encryptor(iv).update(data)
+    pub fn encrypt(&self, iv: &C::Block, data: &mut [u8]) {
+        self.encryptor(iv).update(data);
     }
 
     /// Decrypts `data` in place under `iv`, which must be one block.
-    pub fn decrypt(&self, iv: &C::Block, data: &mut [u8]) -> Result<(), Error> {
-        self.decryptor(iv).update(data)
+    pub fn decrypt(&self, iv: &C::Block, data: &mut [u8]) {
+        self.decryptor(iv).update(data);
     }
 
     /// Starts encrypting a message that arrives in pieces.
@@ -103,14 +105,13 @@ pub struct Encryptor<'a, C: BlockCipher> {
 
 impl<C: BlockCipher> Encryptor<'_, C> {
     /// Encrypts the next piece of the message in place.
-    pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
+    pub fn update(&mut self, data: &mut [u8]) {
         for byte in data.iter_mut() {
             let mut keystream = self.register;
             self.cipher.encrypt_one(&mut keystream);
             *byte ^= keystream.as_ref()[0];
             shift_in_byte(self.register.as_mut(), *byte);
         }
-        Ok(())
     }
 }
 
@@ -123,7 +124,7 @@ pub struct Decryptor<'a, C: BlockCipher> {
 
 impl<C: BlockCipher> Decryptor<'_, C> {
     /// Decrypts the next piece of the message in place.
-    pub fn update(&mut self, data: &mut [u8]) -> Result<(), Error> {
+    pub fn update(&mut self, data: &mut [u8]) {
         for byte in data.iter_mut() {
             let mut keystream = self.register;
             self.cipher.encrypt_one(&mut keystream);
@@ -133,7 +134,6 @@ impl<C: BlockCipher> Decryptor<'_, C> {
             *byte ^= keystream.as_ref()[0];
             shift_in_byte(self.register.as_mut(), ciphertext);
         }
-        Ok(())
     }
 }
 
@@ -186,9 +186,9 @@ mod tests {
         let cfb = cfb(&key);
 
         let mut data = plain;
-        cfb.encrypt(&iv, &mut data).unwrap();
+        cfb.encrypt(&iv, &mut data);
         assert_eq!(data, cipher, "encrypt");
-        cfb.decrypt(&iv, &mut data).unwrap();
+        cfb.decrypt(&iv, &mut data);
         assert_eq!(data, plain, "decrypt");
     }
 
@@ -204,11 +204,11 @@ mod tests {
         for n in [0, 1, 2, 15, 16, 17, 33, 40] {
             let mut data = [0u8; 40];
             data[..n].copy_from_slice(&plain[..n]);
-            cfb.encrypt(&iv, &mut data[..n]).unwrap();
+            cfb.encrypt(&iv, &mut data[..n]);
             if n > 0 {
                 assert_ne!(data[..n], plain[..n], "{n} bytes");
             }
-            cfb.decrypt(&iv, &mut data[..n]).unwrap();
+            cfb.decrypt(&iv, &mut data[..n]);
             assert_eq!(data[..n], plain[..n], "{n} bytes");
         }
     }
@@ -224,19 +224,19 @@ mod tests {
         // Splits that fall inside a block, unlike the block modes.
         for split in [1, 5, 16, 23] {
             let mut whole = plain;
-            cfb.encrypt(&iv, &mut whole).unwrap();
+            cfb.encrypt(&iv, &mut whole);
 
             let mut pieces = plain;
             let mut e = cfb.encryptor(&iv);
             let (a, b) = pieces.split_at_mut(split);
-            e.update(a).unwrap();
-            e.update(b).unwrap();
+            e.update(a);
+            e.update(b);
             assert_eq!(pieces, whole, "encrypt split at {split}");
 
             let mut d = cfb.decryptor(&iv);
             let (a, b) = pieces.split_at_mut(split);
-            d.update(a).unwrap();
-            d.update(b).unwrap();
+            d.update(a);
+            d.update(b);
             assert_eq!(pieces, plain, "decrypt split at {split}");
         }
     }

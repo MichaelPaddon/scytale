@@ -12,7 +12,7 @@ use serde_json::Value;
 
 /// Runs the one-shot and variable-output groups against `X`; a no-op
 /// without the vendored vectors.
-pub fn run_aft<X: BitXof>(file: &str, algorithm: &str) {
+pub fn run_aft<X: BitXof>(file: &str, algorithm: &str, start: fn() -> X) {
     let Some(doc) = load(file, algorithm, "1.0") else {
         return;
     };
@@ -24,7 +24,7 @@ pub fn run_aft<X: BitXof>(file: &str, algorithm: &str) {
         for t in group["tests"].as_array().expect("tests") {
             let bits = t["outLen"].as_u64().expect("outLen") as usize;
             let mut out = vec![0u8; bits.div_ceil(8)];
-            Message::of(t).squeeze::<X>(&mut out);
+            Message::of(t).squeeze(&mut out, start);
             // A length that is not whole bytes keeps the last byte's
             // low bits, numbered as FIPS 202 numbers them, and the
             // rest zero.
@@ -47,7 +47,7 @@ pub fn run_aft<X: BitXof>(file: &str, algorithm: &str) {
 
 /// Runs the Monte Carlo groups against `X`; a no-op without the
 /// vendored vectors. Slow: 100,000 SHAKE calls per group.
-pub fn run_mct<X: BitXof>(file: &str, algorithm: &str) {
+pub fn run_mct<X: BitXof>(file: &str, algorithm: &str, start: fn() -> X) {
     let Some(doc) = load(file, algorithm, "1.0") else {
         return;
     };
@@ -56,15 +56,15 @@ pub fn run_mct<X: BitXof>(file: &str, algorithm: &str) {
         if group["testType"] != "MCT" {
             continue;
         }
-        count += mct::<X>(group);
+        count += mct(group, start);
     }
     assert!(count >= 100, "only {count} MCT steps");
 }
 
 impl Message {
     /// Squeezes `out.len()` bytes from the message.
-    fn squeeze<X: BitXof>(&self, out: &mut [u8]) {
-        let mut xof = X::try_new().expect("xof");
+    fn squeeze<X: BitXof>(&self, out: &mut [u8], start: fn() -> X) {
+        let mut xof = start();
         let (whole, tail) = self.split(Family::Sha3);
         xof.update(whole);
         let mut reader = match tail {
@@ -81,7 +81,7 @@ impl Message {
 /// times, feeding the first 16 bytes of each output (zero-padded)
 /// into the next, with the output length chosen each time by the
 /// last two bytes of the previous output within the group's range.
-fn mct<X: BitXof>(group: &Value) -> usize {
+fn mct<X: BitXof>(group: &Value, start: fn() -> X) -> usize {
     let min_bits = group["minOutLen"].as_u64().expect("minOutLen") as usize;
     let max_bits = group["maxOutLen"].as_u64().expect("maxOutLen") as usize;
     let range = (max_bits - min_bits) / 8 + 1;
@@ -101,7 +101,7 @@ fn mct<X: BitXof>(group: &Value) -> usize {
                     bits: 128,
                 };
                 let mut out = vec![0u8; out_len];
-                message.squeeze::<X>(&mut out);
+                message.squeeze(&mut out, start);
                 let tail = &out[out.len() - 2..];
                 let right = u16::from_be_bytes([tail[0], tail[1]]) as usize;
                 out_len = min_bits / 8 + right % range;

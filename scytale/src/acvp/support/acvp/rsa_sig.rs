@@ -48,7 +48,7 @@ macro_rules! dispatch_hash {
 
 /// One verification, generic over the hash; the key's length is
 /// whatever the group's modulus is.
-fn verify_one<H: crate::sig::rsa::DigestInfo>(
+fn verify_one<H: crate::sig::rsa::DigestInfo + Default>(
     group: &Value,
     t: &Value,
 ) -> bool {

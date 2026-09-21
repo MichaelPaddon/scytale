@@ -25,7 +25,7 @@
 //!     key: &M::Key,
 //!     message: &[u8],
 //! ) -> Result<M::Tag, scytale::Error> {
-//!     let mut mac = M::try_new(key)?;
+//!     let mut mac = M::new(key);
 //!     mac.update(message);
 //!     Ok(mac.finalize())
 //! }
@@ -36,7 +36,7 @@
 //! // On receipt: never compare the tag yourself. HMAC takes a key
 //! // of any length too, and a short one is the same MAC as its
 //! // zero-padded block.
-//! let mut mac = HmacSha256::try_new(b"key")?;
+//! let mut mac = HmacSha256::new(b"key");
 //! mac.update(b"message");
 //! mac.verify(&tag)?;
 //! # Ok(())
@@ -55,21 +55,23 @@ use crate::{Error, KeyType};
 
 /// A message authentication code, computed incrementally.
 ///
-/// Only construction can fail. [`finalize`](Mac::finalize) and
-/// [`verify`](Mac::verify) return the tag or check it and leave the
+/// Only [`verify`](Mac::verify) can fail, and only by refusing a
+/// tag. [`finalize`](Mac::finalize) and `verify` leave the
 /// state as [`reset`](Mac::reset) would: at the start of a message,
 /// under the same key, without re-deriving anything from it.
 ///
 /// The key and the tag are types, so the trait is usable as an
 /// object once they are named: `&mut dyn Mac<Key = [u8; 64], Tag =
-/// [u8; 32]>`. Only [`try_new`](Mac::try_new) needs the concrete
-/// type.
+/// [u8; 32]>`. Only [`new`](Mac::new) needs the concrete type.
 pub trait Mac: KeyType {
     /// The tag; `[u8; 32]` for HMAC-SHA-256.
     type Tag: Copy + AsRef<[u8]> + AsMut<[u8]>;
 
     /// Starts a MAC under `key`.
-    fn try_new(key: &Self::Key) -> Result<Self, Error>
+    ///
+    /// Every one of these is defined for any key of its type, so
+    /// there is nothing here that can fail.
+    fn new(key: &Self::Key) -> Self
     where
         Self: Sized;
 
@@ -122,8 +124,8 @@ mod tests {
             mac.update(b"message");
             mac.finalize()
         }
-        let mut mac = HmacSha256::try_new(b"key").unwrap();
-        assert_eq!(tag(&mut mac), HmacSha256::mac(b"key", b"message").unwrap());
+        let mut mac = HmacSha256::new(b"key");
+        assert_eq!(tag(&mut mac), HmacSha256::mac(b"key", b"message"));
 
         fn tag16(
             mac: &mut dyn Mac<Key = Key<[u8; 32]>, Tag = [u8; 16]>,
@@ -148,7 +150,7 @@ mod tests {
             mac.update(b"message");
             mac.finalize()
         }
-        let mut kmac = Kmac128::try_new(&Key::from([7u8; 32])).unwrap();
+        let mut kmac = <Kmac128 as Mac>::new(&Key::from([7u8; 32]));
         let mut direct = Kmac128::new(&[7u8; 32], b"");
         direct.update(b"message");
         let mut expected = [0u8; 32];
@@ -161,12 +163,12 @@ mod tests {
     #[test]
     fn finalize_resets() {
         fn check<M: Mac>(key: &M::Key) {
-            let mut mac = M::try_new(key).unwrap();
+            let mut mac = M::new(key);
             mac.update(b"garbage");
             let _ = mac.finalize();
             mac.update(b"abc");
             let tag = mac.finalize();
-            let mut fresh = M::try_new(key).unwrap();
+            let mut fresh = M::new(key);
             fresh.update(b"abc");
             assert_eq!(tag.as_ref(), fresh.finalize().as_ref());
             mac.update(b"abc");

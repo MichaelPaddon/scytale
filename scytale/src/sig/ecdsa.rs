@@ -83,7 +83,7 @@ macro_rules! ecdsa_curve {
             /// `H` is the hash the verifier will use; P-256 pairs
             /// with SHA-256 and P-384 with SHA-384 almost everywhere,
             /// though any hash is accepted.
-            pub fn sign<H: Hash + Clone + BlockType>(
+            pub fn sign<H: Hash + Clone + BlockType + Default>(
                 &self,
                 message: &[u8],
             ) -> Result<[u8; SIGNATURE_SIZE], Error> {
@@ -99,7 +99,7 @@ macro_rules! ecdsa_curve {
             ///
             /// [`Error::InvalidSignature`] for anything that does
             /// not, which deliberately says no more than that.
-            pub fn verify<H: Hash>(
+            pub fn verify<H: Hash + Default>(
                 &self,
                 message: &[u8],
                 signature: &[u8; SIGNATURE_SIZE],

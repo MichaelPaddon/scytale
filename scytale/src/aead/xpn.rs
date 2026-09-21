@@ -91,11 +91,12 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xpn<C> {
     /// The same over the implementation `implementation` names, or `None`
     /// where this processor or this cipher has no such thing.
     ///
-    /// For the tests and the benchmark, which name an implementation
-    /// rather than take whichever this processor would pick. There is
-    /// nothing of XPN's own to choose: it is [`Gcm`] with the nonce
-    /// assembled differently, so the implementation is GCM's.
-    #[cfg(test)]
+    /// For the benchmark, which names an implementation rather than
+    /// take whichever this processor would pick, and so built only
+    /// where the benchmark is. There is nothing of XPN's own to
+    /// choose: it is [`Gcm`] with the nonce assembled differently, so
+    /// the implementation is GCM's.
+    #[cfg(all(test, not(target_family = "wasm")))]
     pub(crate) fn with_implementation(
         key: &C::Key,
         implementation: crate::implementation::Implementation,
@@ -202,7 +203,7 @@ mod tests {
         let mut xpn_tag = [0u8; 16];
         xpn()
             .encrypt(&salt, &frame, b"head", &mut by_xpn, &mut xpn_tag)
-            .unwrap();
+            .expect("encrypt");
 
         let gcm = Gcm::<Aes128>::new(&Key::from([0x42; 16]));
         let mut by_gcm = plain;

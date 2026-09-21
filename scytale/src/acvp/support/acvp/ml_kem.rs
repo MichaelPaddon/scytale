@@ -74,8 +74,7 @@ macro_rules! set {
             }
             fn decapsulate_seed(seed: &[u8], c: &[u8]) -> Vec<u8> {
                 let seed: [u8; 64] = seed.try_into().expect("seed width");
-                let key =
-                    $module::PrivateKey::try_from_seed(&seed).expect("seed");
+                let key = $module::PrivateKey::from_seed(&seed);
                 let c: [u8; $module::CIPHERTEXT_SIZE] =
                     c.try_into().expect("c width");
                 key.decapsulate(&c).to_vec()

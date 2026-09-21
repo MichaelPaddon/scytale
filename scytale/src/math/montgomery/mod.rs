@@ -518,8 +518,8 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
     ) -> Uint<LIMBS> {
         const WINDOW: usize = 5;
         // The odd powers the windows call for: base^1, base^3, ...
-        let mont = self.to_mont(base);
-        let square = self.sqr(&mont);
+        let mut mont = self.to_mont(base);
+        let mut square = self.sqr(&mont);
         let mut odd = [mont; 1 << (WINDOW - 1)];
         for i in 1..odd.len() {
             odd[i] = self.mul(&odd[i - 1], &square);
@@ -560,7 +560,16 @@ impl<const LIMBS: usize> Montgomery<LIMBS> {
             }
             i -= width - 1;
         }
-        self.from_mont(&acc)
+        let out = self.from_mont(&acc);
+        // The base is secret even where the exponent is not: the
+        // ECDSA nonce is inverted through here, and `odd[0]` is that
+        // nonce in the domain. Everything worked out from it goes
+        // before this returns.
+        mont.zeroize();
+        square.zeroize();
+        odd.zeroize();
+        acc.zeroize();
+        out
     }
 
     /// `base ^ exponent mod n`, with `base` below `n`, for an
@@ -818,6 +827,72 @@ mod tests {
             for a in [Uint::ZERO, Uint::one(), top] {
                 for b in [Uint::ZERO, Uint::one(), top] {
                     assert_eq!(m.mul(&a, &b).0, m.mul_portable(&a, &b).0);
+                }
+            }
+        }
+        check(Uint(P256_PRIME));
+        check(Uint(P384_PRIME));
+        check(crate::math::ec::P256_N);
+        check(crate::math::ec::P384_N);
+        check(Uint::<4>([
+            0x9e3779b97f4a7c15,
+            0x243f6a8885a308d3,
+            0x13198a2e03707344,
+            0xa4093822299f31d1,
+        ]));
+    }
+
+    /// The same comparison over the values a carry bug hides behind.
+    ///
+    /// A wrong carry in a written-out product shows only when a limb
+    /// sum lands exactly on a word boundary, which a random value
+    /// does once in 2^64. So every limb here is one of the words
+    /// that make boundaries happen: all zeros, all ones, one either
+    /// side of them, and the two half-words the primes themselves
+    /// are made of.
+    #[test]
+    fn the_processor_product_survives_the_carry_patterns() {
+        const WORDS: [u64; 7] = [
+            0,
+            1,
+            u64::MAX,
+            u64::MAX - 1,
+            0xffff_ffff,
+            0xffff_ffff_0000_0000,
+            0x8000_0000_0000_0000,
+        ];
+        fn check<const L: usize>(n: Uint<L>) {
+            let m = Montgomery::known(n);
+            // The value whose limbs are the digits of `index` in
+            // base seven, brought below `n`.
+            let pattern = |mut index: usize| {
+                let mut v = Uint([0u64; L]);
+                for limb in v.0.iter_mut() {
+                    *limb = WORDS[index % WORDS.len()];
+                    index /= WORDS.len();
+                }
+                let (reduced, borrow) = v.sub_borrow(&n);
+                v.cmov(&reduced, 1 - borrow);
+                v
+            };
+            let count = WORDS.len().pow(L as u32);
+            // Every pattern at four limbs; a spread of them at six,
+            // where there are too many to take all.
+            let step = (count / 2401).max(1);
+            let mut state = 0x9e3779b97f4a7c15;
+            for i in (0..count).step_by(step) {
+                let a = pattern(i);
+                assert_eq!(m.sqr(&a).0, m.mul_portable(&a, &a).0, "{i}");
+                // Partners drawn from the same patterns, so that
+                // boundaries meet boundaries.
+                for _ in 0..24 {
+                    let j = (xorshift(&mut state) % count as u64) as usize;
+                    let b = pattern(j);
+                    assert_eq!(
+                        m.mul(&a, &b).0,
+                        m.mul_portable(&a, &b).0,
+                        "{i} by {j}"
+                    );
                 }
             }
         }

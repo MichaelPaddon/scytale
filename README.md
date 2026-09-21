@@ -343,13 +343,13 @@ an unbiased number under a bound, so an index or a shuffle never
 comes from a byte reduced modulo something.
 
 `from_system` asks this machine for the seed, which is what almost
-every caller wants. `entropy::Processor` names the processor's own
-generator for the cases that are not, and entropy you gather any
-other way goes in by implementing `random::Entropy` over it and
-handing that to `CtrDrbg::try_new`. There is deliberately no way to
-build a generator from a seed alone: one with no source cannot reseed
-itself, and a seed that is a constant or a test value looks exactly
-like a good one. What your code should take is the `Random` trait,
+every caller wants, and it is one call with one shape on every
+target, so nothing built on it has to say where it runs. Entropy you
+gather any other way goes in by implementing `random::Entropy` over
+it and handing that to `CtrDrbg::try_new`. There is deliberately no
+way to build a generator from a seed alone: one with no source cannot
+reseed itself, and a seed that is a constant or a test value looks
+exactly like a good one. What your code should take is the `Random` trait,
 so a second generator, or a fixed sequence in a test, drops in
 without it noticing.
 
@@ -480,15 +480,16 @@ the target.
 
 ```rust
 use scytale::cipher::aes::Aes128;
+use scytale::cipher::BlockCipher;
 
-let aes = Aes128::try_new(&key)?; // key: [u8; 16]
+let aes = Aes128::new(&key); // key: Key<[u8; 16]>
 
 let mut block = [0u8; 16];
-aes.encrypt_block(&mut block);
-aes.decrypt_block(&mut block);
+aes.encrypt(core::slice::from_mut(&mut block));
+aes.decrypt(core::slice::from_mut(&mut block));
 
 // Any number of blocks, each encrypted independently.
-aes.encrypt_blocks(&mut blocks); // blocks: [[u8; 16]; N]
+aes.encrypt(&mut blocks); // blocks: [[u8; 16]; N]
 ```
 
 An AEAD wraps the cipher. It returns a tag, and decryption checks it
@@ -522,10 +523,10 @@ is checked with `verify`, never by comparing bytes yourself:
 use scytale::hash::{sha2::Sha256, Hash};
 use scytale::mac::{hmac::HmacSha256, Mac};
 
-let digest = Sha256::digest(message)?;
+let digest = Sha256::digest(message);
 
-let tag = HmacSha256::mac(&key, message)?;
-let mut mac = HmacSha256::try_new(&key)?;
+let tag = HmacSha256::mac(&key, message);
+let mut mac = HmacSha256::new(&key);
 mac.update(message);
 mac.verify(&tag)?;
 ```

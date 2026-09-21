@@ -55,7 +55,6 @@
 
 use zeroize::Zeroize;
 
-use crate::Error;
 use crate::constant_time;
 use crate::hash::sha3::{Sha3_256, Sha3_512, Shake128, Shake256};
 use crate::hash::{Hash, Xof, XofReader};
@@ -443,8 +442,8 @@ impl Poly {
     /// `SampleNTT`, algorithm 7: the entry of `A` at `row`, `col`,
     /// by rejection sampling from SHAKE-128 over the seed and the
     /// two indices, column first as the standard has it.
-    fn sample_ntt(rho: &[u8; 32], row: u8, col: u8) -> Result<Poly, Error> {
-        let mut xof = Shake128::try_new()?;
+    fn sample_ntt(rho: &[u8; 32], row: u8, col: u8) -> Poly {
+        let mut xof = Shake128::new();
         xof.update(rho);
         xof.update(&[col, row]);
         let mut reader = xof.finalize_xof();
@@ -467,7 +466,7 @@ impl Poly {
                 }
             }
         }
-        Ok(out)
+        out
     }
 
     /// `SamplePolyCBD_eta`, algorithm 8, over `64 eta` bytes of PRF
@@ -515,15 +514,15 @@ impl Poly {
 
     /// A polynomial of small coefficients from the PRF of `seed` and
     /// the counter `n`, `PRF_eta` feeding `SamplePolyCBD_eta`.
-    fn sample_noise(eta: usize, seed: &[u8; 32], n: u8) -> Result<Poly, Error> {
-        let mut xof = Shake256::try_new()?;
+    fn sample_noise(eta: usize, seed: &[u8; 32], n: u8) -> Poly {
+        let mut xof = Shake256::new();
         xof.update(seed);
         xof.update(&[n]);
         let mut bytes = [0u8; 64 * 3];
         xof.finalize_xof().squeeze(&mut bytes[..64 * eta]);
         let out = Poly::sample_cbd(eta, &bytes[..64 * eta]);
         bytes.zeroize();
-        Ok(out)
+        out
     }
 }
 
@@ -536,32 +535,34 @@ impl Zeroize for Poly {
 // The scheme, over an expanded key of rank K.
 
 /// `G`, SHA3-512 split in two.
-fn g(parts: &[&[u8]]) -> Result<([u8; 32], [u8; 32]), Error> {
-    let mut hash = Sha3_512::try_new()?;
+fn g(parts: &[&[u8]]) -> ([u8; 32], [u8; 32]) {
+    let mut hash = Sha3_512::new();
     for part in parts {
         hash.update(part);
     }
-    let digest = hash.finalize();
+    let mut digest = hash.finalize();
     let mut a = [0u8; 32];
     let mut b = [0u8; 32];
     a.copy_from_slice(&digest[..32]);
     b.copy_from_slice(&digest[32..]);
-    Ok((a, b))
+    // In decapsulation the first half is the shared secret itself.
+    digest.zeroize();
+    (a, b)
 }
 
 /// `H`, SHA3-256.
-fn h(data: &[u8]) -> Result<[u8; 32], Error> {
+fn h(data: &[u8]) -> [u8; 32] {
     Sha3_256::digest(data)
 }
 
 /// `J`, 32 bytes of SHAKE-256, for the implicit rejection secret.
-fn j(z: &[u8], c: &[u8]) -> Result<[u8; SECRET], Error> {
-    let mut xof = Shake256::try_new()?;
+fn j(z: &[u8], c: &[u8]) -> [u8; SECRET] {
+    let mut xof = Shake256::new();
     xof.update(z);
     xof.update(c);
     let mut out = [0u8; SECRET];
     xof.finalize_xof().squeeze(&mut out);
-    Ok(out)
+    out
 }
 
 /// An encapsulation key taken apart for use: `t` decoded, the matrix
@@ -578,21 +579,21 @@ struct Expanded<const K: usize> {
 }
 
 /// Takes apart an encapsulation key already checked well formed.
-fn expand<const K: usize>(ek: &[u8]) -> Result<Expanded<K>, Error> {
+fn expand<const K: usize>(ek: &[u8]) -> Expanded<K> {
     debug_assert_eq!(ek.len(), public_len(K));
     let mut rho = [0u8; 32];
     rho.copy_from_slice(&ek[384 * K..]);
     let mut a = [[Poly::ZERO; K]; K];
     for (i, row) in a.iter_mut().enumerate() {
         for (j, entry) in row.iter_mut().enumerate() {
-            *entry = Poly::sample_ntt(&rho, i as u8, j as u8)?;
+            *entry = Poly::sample_ntt(&rho, i as u8, j as u8);
         }
     }
     let mut t = [Poly::ZERO; K];
     for (i, t_i) in t.iter_mut().enumerate() {
         *t_i = Poly::decode(12, &ek[384 * i..384 * (i + 1)]);
     }
-    Ok(Expanded { t, a, hash: h(ek)? })
+    Expanded { t, a, hash: h(ek) }
 }
 
 /// `K-PKE.KeyGen` and the wrapping of algorithm 16: the encapsulation
@@ -603,21 +604,21 @@ fn key_gen<const K: usize>(
     seed: &[u8; SEED],
     ek: &mut [u8],
     dk: &mut [u8],
-) -> Result<Expanded<K>, Error> {
+) -> Expanded<K> {
     debug_assert_eq!(ek.len(), public_len(K));
     debug_assert_eq!(dk.len(), private_len(K));
     let (d, z) = seed.split_at(32);
-    let (rho, mut sigma) = g(&[d, &[K as u8]])?;
+    let (rho, mut sigma) = g(&[d, &[K as u8]]);
     let eta1 = params::<K>().eta1;
 
     let mut s = [Poly::ZERO; K];
     let mut e = [Poly::ZERO; K];
     for (i, s_i) in s.iter_mut().enumerate() {
-        *s_i = Poly::sample_noise(eta1, &sigma, i as u8)?;
+        *s_i = Poly::sample_noise(eta1, &sigma, i as u8);
         s_i.ntt();
     }
     for (i, e_i) in e.iter_mut().enumerate() {
-        *e_i = Poly::sample_noise(eta1, &sigma, (K + i) as u8)?;
+        *e_i = Poly::sample_noise(eta1, &sigma, (K + i) as u8);
         e_i.ntt();
     }
     sigma.zeroize();
@@ -627,7 +628,7 @@ fn key_gen<const K: usize>(
     let mut t = e;
     for (i, (row, t_i)) in a.iter_mut().zip(t.iter_mut()).enumerate() {
         for (j, (entry, s_j)) in row.iter_mut().zip(&s).enumerate() {
-            *entry = Poly::sample_ntt(&rho, i as u8, j as u8)?;
+            *entry = Poly::sample_ntt(&rho, i as u8, j as u8);
             t_i.add_assign(&entry.mul_ntt(s_j));
         }
         t_i.encode(12, &mut ek[384 * i..384 * (i + 1)]);
@@ -637,14 +638,14 @@ fn key_gen<const K: usize>(
     for (i, s_i) in s.iter().enumerate() {
         s_i.encode(12, &mut dk[384 * i..384 * (i + 1)]);
     }
-    let hash = h(ek)?;
+    let hash = h(ek);
     let rest = &mut dk[384 * K..];
     rest[..public_len(K)].copy_from_slice(ek);
     rest[public_len(K)..public_len(K) + 32].copy_from_slice(&hash);
     rest[public_len(K) + 32..].copy_from_slice(z);
     s.zeroize();
     e.zeroize();
-    Ok(Expanded { t, a, hash })
+    Expanded { t, a, hash }
 }
 
 /// `K-PKE.Encrypt`, algorithm 14: the message `m` under `ek`, taken
@@ -654,13 +655,13 @@ fn encrypt<const K: usize>(
     m: &[u8; 32],
     r: &[u8; 32],
     c: &mut [u8],
-) -> Result<(), Error> {
+) {
     let p = params::<K>();
     debug_assert_eq!(c.len(), ciphertext_len(K, p));
 
     let mut y = [Poly::ZERO; K];
     for (i, y_i) in y.iter_mut().enumerate() {
-        *y_i = Poly::sample_noise(p.eta1, r, i as u8)?;
+        *y_i = Poly::sample_noise(p.eta1, r, i as u8);
         y_i.ntt();
     }
     // u = A^T y + e1: the transpose, so A's row index is the inner
@@ -671,7 +672,7 @@ fn encrypt<const K: usize>(
             u.add_assign(&row[i].mul_ntt(y_j));
         }
         u.inverse_ntt();
-        let e1 = Poly::sample_noise(p.eta2, r, (K + i) as u8)?;
+        let e1 = Poly::sample_noise(p.eta2, r, (K + i) as u8);
         u.add_assign(&e1);
         u.compress(p.du)
             .encode(p.du, &mut c[32 * p.du * i..32 * p.du * (i + 1)]);
@@ -682,12 +683,11 @@ fn encrypt<const K: usize>(
         v.add_assign(&t_i.mul_ntt(y_i));
     }
     v.inverse_ntt();
-    let e2 = Poly::sample_noise(p.eta2, r, (2 * K) as u8)?;
+    let e2 = Poly::sample_noise(p.eta2, r, (2 * K) as u8);
     v.add_assign(&e2);
     v.add_assign(&Poly::decode(1, m).decompress(1));
     v.compress(p.dv).encode(p.dv, &mut c[32 * p.du * K..]);
     y.zeroize();
-    Ok(())
 }
 
 /// `K-PKE.Decrypt`, algorithm 15: the message from `c` under the
@@ -700,8 +700,11 @@ fn decrypt<const K: usize>(dk: &[u8], c: &[u8]) -> [u8; 32] {
         let mut u = Poly::decode(p.du, &c[32 * p.du * i..32 * p.du * (i + 1)])
             .decompress(p.du);
         u.ntt();
-        let s = Poly::decode(12, &dk[384 * i..384 * (i + 1)]);
+        let mut s = Poly::decode(12, &dk[384 * i..384 * (i + 1)]);
         w.add_assign(&s.mul_ntt(&u));
+        // A polynomial of the private key, copied out of it.
+        s.zeroize();
+        u.zeroize();
     }
     w.inverse_ntt();
     v.sub_assign(&w);
@@ -718,11 +721,11 @@ fn encapsulate<const K: usize>(
     ek: &Expanded<K>,
     m: &[u8; 32],
     c: &mut [u8],
-) -> Result<[u8; SECRET], Error> {
-    let (key, mut r) = g(&[m, &ek.hash])?;
-    encrypt::<K>(ek, m, &r, c)?;
+) -> [u8; SECRET] {
+    let (key, mut r) = g(&[m, &ek.hash]);
+    encrypt::<K>(ek, m, &r, c);
     r.zeroize();
-    Ok(key)
+    key
 }
 
 /// `ML-KEM.Decaps_internal`, algorithm 18, with the implicit
@@ -731,15 +734,15 @@ fn decapsulate<const K: usize>(
     dk: &[u8],
     ek: &Expanded<K>,
     c: &[u8],
-) -> Result<[u8; SECRET], Error> {
+) -> [u8; SECRET] {
     let hash = &dk[384 * K + public_len(K)..384 * K + public_len(K) + 32];
     let z = &dk[384 * K + public_len(K) + 32..];
     let mut m = decrypt::<K>(dk, c);
-    let (mut key, mut r) = g(&[&m, hash])?;
-    let rejected = j(z, c)?;
+    let (mut key, mut r) = g(&[&m, hash]);
+    let mut rejected = j(z, c);
     let mut again = [0u8; 1568];
     let again = &mut again[..c.len()];
-    encrypt::<K>(ek, &m, &r, again)?;
+    encrypt::<K>(ek, &m, &r, again);
     // Both secrets are in hand; the comparison picks one without
     // saying which, or when.
     let same = constant_time::equal(c, again);
@@ -750,7 +753,10 @@ fn decapsulate<const K: usize>(
     m.zeroize();
     r.zeroize();
     again.zeroize();
-    Ok(key)
+    // Derived from the long-term rejection secret `z`, so it outlives
+    // the message it was for unless it goes here.
+    rejected.zeroize();
+    key
 }
 
 /// The parameters of the set with rank `K`.
@@ -775,10 +781,10 @@ fn public_key_is_valid<const K: usize>(ek: &[u8]) -> bool {
 
 /// The decapsulation key check of algorithm 21: the hash inside
 /// matches the encapsulation key inside.
-fn private_key_is_valid<const K: usize>(dk: &[u8]) -> Result<bool, Error> {
+fn private_key_is_valid<const K: usize>(dk: &[u8]) -> bool {
     let ek = &dk[384 * K..384 * K + public_len(K)];
     let hash = &dk[384 * K + public_len(K)..384 * K + public_len(K) + 32];
-    Ok(h(ek)?[..] == hash[..])
+    h(ek)[..] == hash[..]
 }
 
 // Formats: the IETF LAMPS profile for ML-KEM keys, which puts the
@@ -886,21 +892,20 @@ macro_rules! parameter_set {
             pub fn generate<R: Random>(rng: &mut R) -> Result<Self, Error> {
                 let mut seed = [0u8; SEED_SIZE];
                 rng.fill(&mut seed)?;
-                let key = Self::try_from_seed(&seed);
+                let key = Self::from_seed(&seed);
                 seed.zeroize();
-                key
+                Ok(key)
             }
 
             /// The key a seed `d || z` expands to, by FIPS 203's
-            /// `ML-KEM.KeyGen_internal`. Any 64 bytes are a seed.
-            pub fn try_from_seed(
-                seed: &[u8; SEED_SIZE],
-            ) -> Result<Self, Error> {
+            /// `ML-KEM.KeyGen_internal`. Any 64 bytes are a seed,
+            /// so there is nothing to reject.
+            pub fn from_seed(seed: &[u8; SEED_SIZE]) -> Self {
                 let mut expanded = [0u8; KEY_SIZE];
                 let mut ek = [0u8; PUBLIC_KEY_SIZE];
                 let public =
-                    ml_kem::key_gen::<$k>(seed, &mut ek, &mut expanded)?;
-                Ok(Self::from_expanded(Some(*seed), expanded, public))
+                    ml_kem::key_gen::<$k>(seed, &mut ek, &mut expanded);
+                Self::from_expanded(Some(*seed), expanded, public)
             }
 
             /// A key from its expanded form, checked as FIPS 203
@@ -909,12 +914,12 @@ macro_rules! parameter_set {
             /// comes in this way has no seed to give back.
             pub fn try_new(expanded: &[u8; KEY_SIZE]) -> Result<Self, Error> {
                 let ek = &expanded[384 * $k..384 * $k + PUBLIC_KEY_SIZE];
-                if !ml_kem::private_key_is_valid::<$k>(expanded)?
+                if !ml_kem::private_key_is_valid::<$k>(expanded)
                     || !ml_kem::public_key_is_valid::<$k>(ek)
                 {
                     return Err(Error::InvalidPrivateKey);
                 }
-                let public = ml_kem::expand::<$k>(ek)?;
+                let public = ml_kem::expand::<$k>(ek);
                 Ok(Self::from_expanded(None, *expanded, public))
             }
 
@@ -948,14 +953,11 @@ macro_rules! parameter_set {
                 &self,
                 ciphertext: &[u8; CIPHERTEXT_SIZE],
             ) -> [u8; SHARED_SECRET_SIZE] {
-                // The hashes cannot fail once the key exists: the same
-                // ones ran to make it.
                 ml_kem::decapsulate::<$k>(
                     &self.expanded,
                     &self.public.expanded,
                     ciphertext,
                 )
-                .unwrap_or([0u8; SHARED_SECRET_SIZE])
             }
 
             /// A key from its DER PKCS#8 `PrivateKeyInfo`, the form
@@ -977,7 +979,7 @@ macro_rules! parameter_set {
                         let seed: &[u8; SEED_SIZE] = seed
                             .try_into()
                             .map_err(|_| Error::InvalidEncoding)?;
-                        let key = Self::try_from_seed(seed)?;
+                        let key = Self::from_seed(seed);
                         if expanded.is_some_and(|e| e[..] != key.expanded[..]) {
                             return Err(Error::InvalidEncoding);
                         }
@@ -1046,7 +1048,7 @@ macro_rules! parameter_set {
                 }
                 Ok(PublicKey {
                     bytes: *bytes,
-                    expanded: ml_kem::expand::<$k>(bytes)?,
+                    expanded: ml_kem::expand::<$k>(bytes),
                 })
             }
 
@@ -1071,7 +1073,7 @@ macro_rules! parameter_set {
                 let secret =
                     ml_kem::encapsulate::<$k>(&self.expanded, &m, &mut c);
                 m.zeroize();
-                Ok((c, secret?))
+                Ok((c, secret))
             }
 
             /// A key from its DER `SubjectPublicKeyInfo`, the form
@@ -1131,7 +1133,7 @@ pub mod ml_kem_1024 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::der;
+    use crate::{Error, der};
 
     /// The word-at-a-time sampler agrees with algorithm 8 read bit
     /// by bit, at both widths.
@@ -1234,9 +1236,7 @@ mod tests {
                 let key = PrivateKey::generate(&mut rng).unwrap();
                 let (c, k) = key.public_key().encapsulate(&mut rng).unwrap();
                 assert_eq!(key.decapsulate(&c), k);
-                let again =
-                    PrivateKey::try_from_seed(&key.seed_bytes().unwrap())
-                        .unwrap();
+                let again = PrivateKey::from_seed(&key.seed_bytes().unwrap());
                 assert_eq!(again.key_bytes(), key.key_bytes());
                 let expanded = PrivateKey::try_new(&key.key_bytes()).unwrap();
                 assert_eq!(expanded.decapsulate(&c), k);
@@ -1250,7 +1250,7 @@ mod tests {
                 let rejected = key.decapsulate(&bad);
                 assert_ne!(rejected, k);
                 let z = &key.key_bytes()[KEY_SIZE - 32..];
-                assert_eq!(rejected, j(z, &bad).unwrap());
+                assert_eq!(rejected, j(z, &bad));
 
                 // A public key with a coefficient at the modulus is
                 // refused; a private key with a wrong hash is refused.
@@ -1318,7 +1318,7 @@ mod tests {
     fn both_forms() {
         use ml_kem_768::*;
         let seed = [7u8; 64];
-        let key = PrivateKey::try_from_seed(&seed).unwrap();
+        let key = PrivateKey::from_seed(&seed);
         let expanded = key.key_bytes();
         let mut out = [0u8; 4096];
         let oid = [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x04, 0x02];

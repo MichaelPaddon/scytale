@@ -40,10 +40,10 @@ use core::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::Mac;
+use crate::KeyType;
 use crate::cipher::mode::cbc::MacEngine;
 use crate::cipher::mode::xor;
 use crate::cipher::{BlockCipher, OneBlock};
-use crate::{Error, KeyType};
 
 /// The block, and tag, length in bytes.
 const BLOCK: usize = 16;
@@ -148,8 +148,9 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Mac for Cmac<C> {
     type Tag = [u8; BLOCK];
 
     /// Never fails: every key the cipher takes is a CMAC key.
-    fn try_new(key: &Self::Key) -> Result<Self, Error> {
-        Ok(Self::new(key))
+    fn new(key: &Self::Key) -> Self {
+        // The inherent constructor, which resolution reaches first.
+        Self::with_engine(key, MacEngine::new())
     }
 
     fn reset(&mut self) {
@@ -232,6 +233,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> fmt::Debug for Cmac<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Error;
     use crate::Key;
     use crate::cipher::aes::{Aes128, Aes192, Aes256};
 
@@ -265,7 +267,7 @@ mod tests {
         for &(len, tag) in cases {
             let expected: [u8; 16] = unhex(tag);
             assert_eq!(Cmac::<C>::mac(key, &m[..len]), expected, "{len}");
-            let mut mac = Cmac::<C>::try_new(key).expect("key");
+            let mut mac = <Cmac<C> as Mac>::new(key);
             mac.update(&m[..len]);
             mac.verify(&expected).expect("verify");
         }

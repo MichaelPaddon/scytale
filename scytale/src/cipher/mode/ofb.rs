@@ -32,8 +32,8 @@
 //!
 //! // Any length, not just whole blocks.
 //! let mut data = [0u8; 21];
-//! ofb.encrypt(&iv, &mut data)?;
-//! ofb.decrypt(&iv, &mut data)?;
+//! ofb.encrypt(&iv, &mut data);
+//! ofb.decrypt(&iv, &mut data);
 //! assert_eq!(data, [0u8; 21]);
 //! # Ok(())
 //! # }
@@ -42,7 +42,6 @@
 use core::fmt;
 
 use super::xor;
-use crate::Error;
 use crate::KeyType;
 use crate::cipher::{BlockCipher, OneBlock};
 
@@ -65,6 +64,9 @@ pub struct Ofb<C: BlockCipher> {
 impl<C: BlockCipher> Ofb<C> {
     /// Takes the key the cipher runs under.
     pub fn new(key: &C::Key) -> Self {
+        // A cipher of the caller's own whose block is no bytes at
+        // all would leave the loop below with nothing to advance by.
+        const { assert!(size_of::<C::Block>() > 0) };
         Ofb {
             cipher: C::new(key),
         }
@@ -72,8 +74,8 @@ impl<C: BlockCipher> Ofb<C> {
 
     /// Encrypts `data` in place under `iv`. Any length of message is
     /// allowed.
-    pub fn encrypt(&self, iv: &C::Block, data: &mut [u8]) -> Result<(), Error> {
-        self.stream(iv).update(data)
+    pub fn encrypt(&self, iv: &C::Block, data: &mut [u8]) {
+        self.stream(iv).update(data);
     }
 
     /// Decrypts `data` in place under `iv`.
@@ -81,8 +83,8 @@ impl<C: BlockCipher> Ofb<C> {
     /// This is the same operation as [`encrypt`](Self::encrypt): the
     /// keystream does not depend on the message. Both names exist so
     /// that calling code reads the way it means.
-    pub fn decrypt(&self, iv: &C::Block, data: &mut [u8]) -> Result<(), Error> {
-        self.stream(iv).update(data)
+    pub fn decrypt(&self, iv: &C::Block, data: &mut [u8]) {
+        self.stream(iv).update(data);
     }
 
     /// Starts a message that arrives in pieces.
@@ -118,7 +120,7 @@ impl<C: BlockCipher> Stream<'_, C> {
     ///
     /// Each keystream block is the encryption of the one before it,
     /// so this cannot use the cipher's bulk path.
-    pub fn update(&mut self, mut data: &mut [u8]) -> Result<(), Error> {
+    pub fn update(&mut self, mut data: &mut [u8]) {
         let size = size_of::<C::Block>();
         while !data.is_empty() {
             if self.used == size {
@@ -131,7 +133,6 @@ impl<C: BlockCipher> Stream<'_, C> {
             self.used += take;
             data = rest;
         }
-        Ok(())
     }
 }
 
@@ -190,9 +191,9 @@ mod tests {
         let ofb = ofb(&key);
 
         let mut data = plain;
-        ofb.encrypt(&iv, &mut data).unwrap();
+        ofb.encrypt(&iv, &mut data);
         assert_eq!(data, cipher, "encrypt");
-        ofb.decrypt(&iv, &mut data).unwrap();
+        ofb.decrypt(&iv, &mut data);
         assert_eq!(data, plain, "decrypt");
     }
 
@@ -203,9 +204,9 @@ mod tests {
         let ofb = ofb(&[0x11; 16]);
         let iv = [0x22u8; 16];
         let mut data = [0x33u8; 21];
-        ofb.encrypt(&iv, &mut data).unwrap();
+        ofb.encrypt(&iv, &mut data);
         assert_ne!(data, [0x33u8; 21]);
-        ofb.encrypt(&iv, &mut data).unwrap();
+        ofb.encrypt(&iv, &mut data);
         assert_eq!(data, [0x33u8; 21]);
     }
 
@@ -221,11 +222,11 @@ mod tests {
         for n in [0, 1, 2, 15, 16, 17, 31, 33, 40] {
             let mut data = [0u8; MAX];
             data[..n].copy_from_slice(&plain[..n]);
-            ofb.encrypt(&iv, &mut data[..n]).unwrap();
+            ofb.encrypt(&iv, &mut data[..n]);
             if n > 0 {
                 assert_ne!(data[..n], plain[..n], "{n} bytes");
             }
-            ofb.decrypt(&iv, &mut data[..n]).unwrap();
+            ofb.decrypt(&iv, &mut data[..n]);
             assert_eq!(data[..n], plain[..n], "{n} bytes");
         }
     }
@@ -242,14 +243,14 @@ mod tests {
             *b = (i * 3) as u8;
         }
         let mut whole = plain;
-        ofb.encrypt(&iv, &mut whole).unwrap();
+        ofb.encrypt(&iv, &mut whole);
 
         for split in [1, 5, 15, 16, 17, 31] {
             let mut pieces = plain;
             let mut s = ofb.stream(&iv);
             let (a, b) = pieces.split_at_mut(split);
-            s.update(a).unwrap();
-            s.update(b).unwrap();
+            s.update(a);
+            s.update(b);
             assert_eq!(pieces, whole, "split at {split}");
         }
 
@@ -257,7 +258,7 @@ mod tests {
         let mut pieces = plain;
         let mut s = ofb.stream(&iv);
         for byte in pieces.iter_mut() {
-            s.update(core::slice::from_mut(byte)).unwrap();
+            s.update(core::slice::from_mut(byte));
         }
         assert_eq!(pieces, whole, "one byte at a time");
     }

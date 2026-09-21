@@ -92,11 +92,9 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
 
         let mut data = input;
         if encrypt {
-            ctr.encrypt(&block::<C>(&counter), &mut data)
-                .expect("any length");
+            ctr.encrypt(&block::<C>(&counter), &mut data);
         } else {
-            ctr.decrypt(&block::<C>(&counter), &mut data)
-                .expect("any length");
+            ctr.decrypt(&block::<C>(&counter), &mut data);
         }
 
         let mut expected = expected;

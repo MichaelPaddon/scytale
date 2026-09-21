@@ -57,7 +57,7 @@ macro_rules! curve {
                 } else {
                     $module::PublicKey::try_from_sec1(public).ok()?
                 };
-                Some(key.shared_secret(&peer).ok()?.to_vec())
+                Some(key.shared_secret(&peer).to_vec())
             }
         }
     };

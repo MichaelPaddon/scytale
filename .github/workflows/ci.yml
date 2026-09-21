@@ -11,6 +11,9 @@ env:
   # A CI build is built once and thrown away, so the incremental
   # artifacts are written and never read.
   CARGO_INCREMENTAL: 0
+  # The vectors are in the checkout. A suite that cannot find them
+  # skips and passes, so here not finding them is a failure.
+  SCYTALE_VECTORS: required
 
 jobs:
   # Every architecture runs its own tests natively: no emulation, so
@@ -79,6 +82,237 @@ jobs:
         run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+  # Every runner here and every machine anyone develops on is a recent
+  # processor, so which loop a lesser one is given is decided by code
+  # that never runs: on real hardware only one answer to each probe is
+  # ever seen. A probe that asks for less than its loop uses is then an
+  # illegal instruction on the older part and a passing build here.
+  # That happened: the narrow AES modes asked for AES-NI and were
+  # VEX-encoded, which Westmere and the Silvermont and Goldmont Atoms
+  # cannot run.
+  #
+  # So the library's tests run again under emulated processors, one
+  # for each set of features the probes tell apart. `features` is
+  # what that processor has, of the features any backend needs, and
+  # the inventory test holds every probe to it in both directions: a
+  # backend offered without its features fails, and so does one
+  # withheld from a processor that has them, which would otherwise
+  # pass in silence as a skipped test. It also checks the emulator
+  # offers what is written here, so a list cannot go stale.
+  #
+  # The container is for its QEMU: the runner's own is too old to
+  # report the RISC-V cryptography extensions, and it lacks some of
+  # the x86-64 ones.
+  emulated:
+    name: test (${{ matrix.arch }}, ${{ matrix.cpu }})
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # No AES-NI: everything portable but the SSSE3 loops.
+          - arch: x86_64
+            cpu: Nehalem
+            features: ssse3 sse4.1
+          # AES-NI without AVX.
+          - arch: x86_64
+            cpu: Westmere
+            features: ssse3 sse4.1 aes pclmulqdq
+          # AVX without AVX2 or BMI2.
+          - arch: x86_64
+            cpu: SandyBridge
+            features: ssse3 sse4.1 aes pclmulqdq avx
+          # AVX2 and BMI2 without ADX.
+          - arch: x86_64
+            cpu: Haswell
+            features: ssse3 sse4.1 aes pclmulqdq avx avx2 bmi2
+          # An Atom: the SHA extensions without AVX.
+          - arch: x86_64
+            cpu: Denverton
+            features: ssse3 sse4.1 aes pclmulqdq sha
+          # Everything QEMU emulates, which is VAES without
+          # VPCLMULQDQ: the wide AES modes without wide GCM.
+          - arch: x86_64
+            cpu: max
+            features: >-
+              ssse3 sse4.1 aes pclmulqdq avx avx2 bmi2 adx sha vaes
+          # ARMv8.0 with the cryptography extension.
+          - arch: aarch64
+            cpu: cortex-a53
+            features: aes pmull sha2
+          # SHA-512 and SHA-3 as well.
+          - arch: aarch64
+            cpu: neoverse-v1
+            features: aes pmull sha2 sha3
+          - arch: aarch64
+            cpu: max
+            features: aes pmull sha2 sha3
+          # The base profile, which QEMU gives Zbb: nothing but the
+          # portable code and the rotates.
+          - arch: riscv64
+            cpu: rv64
+            features: zbb
+          # The vector and scalar cryptography extensions, which no
+          # runner has.
+          - arch: riscv64
+            cpu: max
+            features: >-
+              v zbb zbkb zkne zknd zknh zvkned zvknha zvknhb zvbb
+              zvkb zvkg
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust, QEMU and the cross linker
+        run: |
+          # Debian names the architecture one way in the compiler's
+          # package and another in the C library's.
+          case ${{ matrix.arch }} in
+              x86_64) target=x86_64-unknown-linux-gnu; cross= ;;
+              aarch64)
+                  target=aarch64-unknown-linux-gnu
+                  cross="gcc-aarch64-linux-gnu libc6-dev-arm64-cross" ;;
+              riscv64)
+                  target=riscv64gc-unknown-linux-gnu
+                  cross="gcc-riscv64-linux-gnu libc6-dev-riscv64-cross" ;;
+          esac
+          apt-get update
+          apt-get install -y --no-install-recommends \
+              ca-certificates curl gcc libc6-dev qemu-user $cross
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal \
+                    --default-toolchain stable --target "$target"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "TARGET=$target" >> "$GITHUB_ENV"
+
+      - name: Test as ${{ matrix.cpu }}
+        # Cargo reads the linker and the runner from variables named
+        # for the target. The inventory goes first and alone so that
+        # its table is in the log.
+        run: |
+          arch=${{ matrix.arch }}
+          name=$(echo "$TARGET" | tr 'a-z-' 'A-Z_')
+          runner="qemu-$arch -cpu ${{ matrix.cpu }}"
+          if [ "$arch" != x86_64 ]; then
+              runner="$runner -L /usr/$arch-linux-gnu"
+              export "CARGO_TARGET_${name}_LINKER=$arch-linux-gnu-gcc"
+          fi
+          export "CARGO_TARGET_${name}_RUNNER=$runner"
+          cargo test --lib --target "$TARGET" -- --nocapture \
+              acvp::inventory
+          cargo test --lib --target "$TARGET"
+        env:
+          SCYTALE_CPU_FEATURES: ${{ matrix.features }}
+
+  # Targets the jobs above do not build. wasm32 is an architecture
+  # with no loops written out for it, which is a different shape of
+  # build: the engine enums have only their one generic variant, the
+  # helpers that only hardware backends call go unused, and `usize`
+  # is thirty-two bits. The other three have the same assembly as
+  # above but no operating system, so the probes that ask one and
+  # the entropy source take their bare-metal arms. Nothing here
+  # runs, because these have nowhere to run; building is what
+  # catches it.
+  other-targets:
+    name: build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - wasm32-unknown-unknown
+          - x86_64-unknown-none
+          - aarch64-unknown-none
+          - riscv64gc-unknown-none-elf
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          rustup update --no-self-update stable
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build -p scytale --target ${{ matrix.target }}
+        env:
+          RUSTFLAGS: -D warnings
+
+  # Thirty-two bits. Every target tested above has a sixty-four bit
+  # `usize`, and a length or a counter held in one behaves differently
+  # at half the width: the counter mode's room before its counter
+  # wraps was once computed in a `usize` and came out as zero here.
+  # Neither target has loops written out for it, so these are also the
+  # only runs of the build that has nothing but the portable code.
+  #
+  # The first is 32-bit x86, which the runner's processor executes
+  # itself. It is the musl target because that one brings its own C
+  # library and start-up files, and the linker is the one rustc
+  # ships, so nothing 32-bit has to be installed. The second is
+  # WebAssembly under a WASI runtime, which is compiled rather than
+  # interpreted and has a file system for the vectors. It leaves
+  # out the benchmark, having no thread clock.
+  narrow:
+    name: test (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86, 32-bit
+            target: i686-unknown-linux-musl
+          - name: wasm32, WASI
+            target: wasm32-wasip1
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          rustup update --no-self-update stable
+          rustup default stable
+          rustup component add clippy
+          rustup target add ${{ matrix.target }}
+
+      - name: Install Wasmtime
+        if: matrix.target == 'wasm32-wasip1'
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf \
+              https://wasmtime.dev/install.sh | bash
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+
+      - name: Test
+        # As `cargo test-extended`, which cannot take a target.
+        run: |
+          cargo test --workspace --target ${{ matrix.target }} \
+              -- --include-ignored --skip bench::speed
+        env:
+          # Per target, because a plain RUSTFLAGS would replace these
+          # rather than add to them and the linker flag would be lost.
+          CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+          CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS:
+            -D warnings -C linker-flavor=ld.lld
+          CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS: -D warnings
+          # The vectors are opened by their full path, so the
+          # checkout is mapped where it really is. Mapped anywhere
+          # else they are not found, and a suite that cannot find
+          # its vectors skips and passes. SCYTALE_VECTORS is what
+          # makes that a failure, and the sandbox hands on only the
+          # variables it is told to.
+          CARGO_TARGET_WASM32_WASIP1_RUNNER:
+            wasmtime --env SCYTALE_VECTORS
+            --dir=${{ github.workspace }}
+
+      - name: Clippy
+        # Some code is built only where there is no hardware backend,
+        # and the three targets above never show it to the lints.
+        run: |
+          cargo clippy --workspace --all-targets --profile test \
+              --target ${{ matrix.target }} -- -D warnings
+        env:
+          CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+          CARGO_TARGET_I686_UNKNOWN_LINUX_MUSL_RUSTFLAGS:
+            -C linker-flavor=ld.lld
 
   # Architecture-independent checks, so once is enough.
   style:

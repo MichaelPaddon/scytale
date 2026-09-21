@@ -30,8 +30,8 @@
 //! use scytale::sig::ed25519::PrivateKey;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let key = PrivateKey::try_new(&Key::from([0x42u8; 32]))?;
-//! let signature = key.sign(b"the message")?;
+//! let key = PrivateKey::new(&Key::from([0x42u8; 32]));
+//! let signature = key.sign(b"the message");
 //! key.public_key().verify(b"the message", &signature)?;
 //! assert!(key.public_key().verify(b"another", &signature).is_err());
 //! # Ok(())
@@ -82,23 +82,18 @@ pub const SIGNATURE_SIZE: usize = 64;
 ///
 /// Any 32 bytes are a valid secret key; take them from
 /// [`random`](crate::random).
-pub fn public_key(
-    secret: &[u8; KEY_SIZE],
-) -> Result<[u8; PUBLIC_KEY_SIZE], Error> {
-    let mut h = Sha512::digest(secret)?;
+pub fn public_key(secret: &[u8; KEY_SIZE]) -> [u8; PUBLIC_KEY_SIZE] {
+    let mut h = Sha512::digest(secret);
     let mut a = secret_scalar(&h);
     let public = Point::mul_base(&a).compress();
     h.zeroize();
     a.zeroize();
-    Ok(public)
+    public
 }
 
 /// Signs `message` with `secret`.
-pub fn sign(
-    secret: &[u8; KEY_SIZE],
-    message: &[u8],
-) -> Result<[u8; SIGNATURE_SIZE], Error> {
-    sign_with(secret, &public_key(secret)?, &[], message)
+pub fn sign(secret: &[u8; KEY_SIZE], message: &[u8]) -> [u8; SIGNATURE_SIZE] {
+    sign_with(secret, &public_key(secret), &[], message)
 }
 
 /// Checks that `signature` signs `message` under `public`.
@@ -131,7 +126,12 @@ pub fn sign_ctx(
     message: &[u8],
 ) -> Result<[u8; SIGNATURE_SIZE], Error> {
     let head = dom2(CTX, context)?;
-    sign_with(secret, &public_key(secret)?, &[&head, context], message)
+    Ok(sign_with(
+        secret,
+        &public_key(secret),
+        &[&head, context],
+        message,
+    ))
 }
 
 /// Checks that `signature` signs `message` under `context` and
@@ -162,12 +162,12 @@ pub fn verify_ctx(
 ///
 /// # fn main() -> Result<(), scytale::Error> {
 /// let secret = [0x42u8; 32];
-/// let mut hasher = Sha512::try_new()?;
+/// let mut hasher = Sha512::new();
 /// hasher.update(b"a message that ");
 /// hasher.update(b"arrives in parts");
 /// let prehash = hasher.finalize();
 /// let signature = ed25519::sign_ph(&secret, b"", &prehash)?;
-/// let public = ed25519::public_key(&secret)?;
+/// let public = ed25519::public_key(&secret);
 /// ed25519::verify_ph(&public, b"", &prehash, &signature)?;
 /// # Ok(())
 /// # }
@@ -178,7 +178,12 @@ pub fn sign_ph(
     prehash: &[u8; PREHASH_SIZE],
 ) -> Result<[u8; SIGNATURE_SIZE], Error> {
     let head = dom2(PH, context)?;
-    sign_with(secret, &public_key(secret)?, &[&head, context], prehash)
+    Ok(sign_with(
+        secret,
+        &public_key(secret),
+        &[&head, context],
+        prehash,
+    ))
 }
 
 /// Checks that `signature` signs the SHA-512 digest `prehash` under
@@ -227,13 +232,13 @@ fn sign_with(
     public: &[u8; PUBLIC_KEY_SIZE],
     dom: &[&[u8]],
     message: &[u8],
-) -> Result<[u8; SIGNATURE_SIZE], Error> {
-    let mut h = Sha512::digest(secret)?;
+) -> [u8; SIGNATURE_SIZE] {
+    let mut h = Sha512::digest(secret);
     let mut a = secret_scalar(&h);
 
     // The nonce: a hash of the secret prefix and the message, so it
     // is unique per message without consuming randomness.
-    let mut hasher = Sha512::try_new()?;
+    let mut hasher = Sha512::new();
     for part in dom {
         hasher.update(part);
     }
@@ -244,7 +249,7 @@ fn sign_with(
     let big_r = Point::mul_base(&r).compress();
 
     // The challenge binds R, the public key and the message.
-    let k = challenge(dom, &big_r, public, message)?;
+    let k = challenge(dom, &big_r, public, message);
 
     let s = k.mulmod(&a).addmod(&r);
     let mut signature = [0u8; SIGNATURE_SIZE];
@@ -255,7 +260,7 @@ fn sign_with(
     a.zeroize();
     wide.zeroize();
     r.zeroize();
-    Ok(signature)
+    signature
 }
 
 /// Verification under any of the three variants, `dom` as
@@ -279,7 +284,7 @@ fn verify_with(
 
     let mut big_r = [0u8; 32];
     big_r.copy_from_slice(&signature[..32]);
-    let k = challenge(dom, &big_r, public, message)?;
+    let k = challenge(dom, &big_r, public, message);
 
     // sB = R + kA, checked as R = sB - kA so R need never be
     // decompressed: its bytes are compared directly.
@@ -296,15 +301,15 @@ fn challenge(
     big_r: &[u8; 32],
     public: &[u8; PUBLIC_KEY_SIZE],
     message: &[u8],
-) -> Result<Scalar, Error> {
-    let mut hasher = Sha512::try_new()?;
+) -> Scalar {
+    let mut hasher = Sha512::new();
     for part in dom {
         hasher.update(part);
     }
     hasher.update(big_r);
     hasher.update(public);
     hasher.update(message);
-    Ok(Scalar::from_bytes_wide(&hasher.finalize()))
+    Scalar::from_bytes_wide(&hasher.finalize())
 }
 
 /// The length of a secret key's DER encoding, a PKCS#8
@@ -343,9 +348,9 @@ fn checked(
 ) -> Result<[u8; KEY_SIZE], Error> {
     if let Some(carried) = carried {
         let derived = public_key(&secret);
-        if derived != Ok(carried) {
+        if derived != carried {
             secret.zeroize();
-            return derived.and(Err(Error::InvalidEncoding));
+            return Err(Error::InvalidEncoding);
         }
     }
     Ok(secret)
@@ -449,20 +454,20 @@ impl PrivateKey {
     pub fn generate<R: Random>(rng: &mut R) -> Result<Self, Error> {
         let mut secret = Key::zeroed();
         rng.fill(secret.as_mut())?;
-        Self::try_new(&secret)
+        Ok(Self::new(&secret))
     }
 
     /// The key `secret` is the seed of.
     ///
-    /// Fails only where the hash it needs cannot be built.
-    pub fn try_new(secret: &Key<[u8; KEY_SIZE]>) -> Result<Self, Error> {
+    /// Every 32 bytes are a seed, so there is nothing to reject.
+    pub fn new(secret: &Key<[u8; KEY_SIZE]>) -> Self {
         let public = PublicKey {
-            bytes: public_key(secret.array())?,
+            bytes: public_key(secret.array()),
         };
-        Ok(PrivateKey {
+        PrivateKey {
             secret: secret.clone(),
             public,
-        })
+        }
     }
 
     /// The seed, to store or to hand to code that wants the bytes.
@@ -476,7 +481,7 @@ impl PrivateKey {
     }
 
     /// Signs `message`.
-    pub fn sign(&self, message: &[u8]) -> Result<[u8; SIGNATURE_SIZE], Error> {
+    pub fn sign(&self, message: &[u8]) -> [u8; SIGNATURE_SIZE] {
         sign_with(self.secret.array(), &self.public.bytes, &[], message)
     }
 
@@ -489,7 +494,12 @@ impl PrivateKey {
     ) -> Result<[u8; SIGNATURE_SIZE], Error> {
         let head = dom2(CTX, context)?;
         let dom: [&[u8]; 2] = [&head, context];
-        sign_with(self.secret.array(), &self.public.bytes, &dom, message)
+        Ok(sign_with(
+            self.secret.array(),
+            &self.public.bytes,
+            &dom,
+            message,
+        ))
     }
 
     /// Signs the SHA-512 digest `prehash` under `context`, by
@@ -501,7 +511,12 @@ impl PrivateKey {
     ) -> Result<[u8; SIGNATURE_SIZE], Error> {
         let head = dom2(PH, context)?;
         let dom: [&[u8]; 2] = [&head, context];
-        sign_with(self.secret.array(), &self.public.bytes, &dom, prehash)
+        Ok(sign_with(
+            self.secret.array(),
+            &self.public.bytes,
+            &dom,
+            prehash,
+        ))
     }
 
     /// A key from its DER `PrivateKeyInfo`, of either version; a
@@ -509,9 +524,9 @@ impl PrivateKey {
     /// secret's own, as [`secret_from_der`] describes.
     pub fn try_from_der(bytes: &[u8]) -> Result<Self, Error> {
         let mut secret = Key::from(secret_from_der(bytes)?);
-        let key = Self::try_new(&secret);
+        let key = Self::new(&secret);
         secret.zeroize();
-        key
+        Ok(key)
     }
 
     /// The key pair as a version 1 `PrivateKeyInfo`, which carries
@@ -533,9 +548,9 @@ impl PrivateKey {
     /// [`secret_from_pem`] reads one.
     pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
         let mut secret = Key::from(secret_from_pem(pem)?);
-        let key = Self::try_new(&secret);
+        let key = Self::new(&secret);
         secret.zeroize();
-        key
+        Ok(key)
     }
 
     /// The key pair as a `PRIVATE KEY` PEM block around
@@ -884,7 +899,7 @@ impl Point {
     /// is secret, so the read scans every entry and chooses by a
     /// mask.
     fn mul_base(scalar: &Scalar) -> Point {
-        let bytes = scalar.to_bytes();
+        let mut bytes = scalar.to_bytes();
         let mut acc = Point::IDENTITY;
         for t in (0..BLOCK).rev() {
             acc = acc.double();
@@ -909,6 +924,10 @@ impl Point {
             }
             acc = acc.add_niels(&chosen);
         }
+        // A copy of the scalar, which is the signing nonce on one
+        // call and the key's own scalar on the other; the callers
+        // wipe theirs, so this one goes too.
+        bytes.zeroize();
         acc
     }
 
@@ -1384,13 +1403,13 @@ mod tests {
     #[test]
     fn key_types_match_the_functions() {
         let seed = [0x9du8; KEY_SIZE];
-        let key = PrivateKey::try_new(&Key::from(seed)).expect("key");
+        let key = PrivateKey::new(&Key::from(seed));
         assert_eq!(key.secret_bytes(), seed);
-        assert_eq!(key.public_key().bytes(), public_key(&seed).unwrap());
+        assert_eq!(key.public_key().bytes(), public_key(&seed));
 
         let message = b"the message";
-        let signature = key.sign(message).expect("sign");
-        assert_eq!(signature, sign(&seed, message).unwrap());
+        let signature = key.sign(message);
+        assert_eq!(signature, sign(&seed, message));
         key.public_key()
             .verify(message, &signature)
             .expect("verify");
@@ -1436,10 +1455,7 @@ mod tests {
         let two = PrivateKey::generate(&mut rng).expect("two");
         assert_ne!(one.secret_bytes(), two.secret_bytes());
         assert_ne!(one.public_key(), two.public_key());
-        assert_eq!(
-            one.public_key().bytes(),
-            public_key(&one.secret_bytes()).unwrap()
-        );
+        assert_eq!(one.public_key().bytes(), public_key(&one.secret_bytes()));
     }
 
     #[test]
@@ -1451,8 +1467,8 @@ mod tests {
             let message = unhex(msg, &mut msg_buf);
             let expected_sig = unhex64(sig);
 
-            assert_eq!(public_key(&secret), Ok(expected_public));
-            let signature = sign(&secret, message).unwrap();
+            assert_eq!(public_key(&secret), expected_public);
+            let signature = sign(&secret, message);
             assert_eq!(signature, expected_sig);
             assert_eq!(verify(&expected_public, message, &signature), Ok(()),);
         }
@@ -1521,7 +1537,7 @@ mod tests {
             let message = unhex(msg, &mut message_buf);
             let context = unhex(ctx, &mut context_buf);
             let expected = unhex64(sig);
-            assert_eq!(public_key(&secret), Ok(public));
+            assert_eq!(public_key(&secret), public);
             assert_eq!(sign_ctx(&secret, context, message), Ok(expected));
             assert_eq!(
                 verify_ctx(&public, context, message, &expected),
@@ -1548,8 +1564,8 @@ mod tests {
              31f85042463c2a355a2003d062adf5aa\
              a10b8c61e636062aaad11c2a26083406",
         );
-        let prehash = Sha512::digest(b"abc").unwrap();
-        assert_eq!(public_key(&secret), Ok(public));
+        let prehash = Sha512::digest(b"abc");
+        assert_eq!(public_key(&secret), public);
         assert_eq!(sign_ph(&secret, b"", &prehash), Ok(expected));
         assert_eq!(verify_ph(&public, b"", &prehash, &expected), Ok(()));
     }
@@ -1559,7 +1575,7 @@ mod tests {
     #[test]
     fn context_lengths() {
         let secret = [0x5au8; KEY_SIZE];
-        let public = public_key(&secret).unwrap();
+        let public = public_key(&secret);
         let prehash = [0x17u8; PREHASH_SIZE];
         let long = [0x33u8; CONTEXT_MAX + 1];
         let signature = [0u8; SIGNATURE_SIZE];
@@ -1601,10 +1617,10 @@ mod tests {
     #[test]
     fn variants_and_contexts_are_separate() {
         let secret = [0x61u8; KEY_SIZE];
-        let public = public_key(&secret).unwrap();
+        let public = public_key(&secret);
         let bytes = [0x2cu8; PREHASH_SIZE];
 
-        let plain = sign(&secret, &bytes).unwrap();
+        let plain = sign(&secret, &bytes);
         let ctx = sign_ctx(&secret, b"foo", &bytes).unwrap();
         let ph_empty = sign_ph(&secret, b"", &bytes).unwrap();
         let ph_foo = sign_ph(&secret, b"foo", &bytes).unwrap();
@@ -1620,7 +1636,7 @@ mod tests {
         assert_eq!(verify_ctx(&public, b"foo", &bytes, &ph_foo), bad);
 
         // Ed25519ph signs the digest it is given, not a hash of it.
-        let hashed = Sha512::digest(&bytes).unwrap();
+        let hashed = Sha512::digest(&bytes);
         assert_eq!(verify_ph(&public, b"", &hashed, &ph_empty), bad);
     }
 
@@ -1629,7 +1645,7 @@ mod tests {
     #[test]
     fn key_types_match_the_variant_functions() {
         let seed = [0x4eu8; KEY_SIZE];
-        let key = PrivateKey::try_new(&Key::from(seed)).unwrap();
+        let key = PrivateKey::new(&Key::from(seed));
         let prehash = [0x09u8; PREHASH_SIZE];
 
         let ctx = key.sign_ctx(b"use", b"message").unwrap();
@@ -1655,7 +1671,7 @@ mod tests {
         let secret = unhex32(sk);
         let public = unhex32(pk);
         let message = *b"af82 is not this message";
-        let signature = sign(&secret, &message).unwrap();
+        let signature = sign(&secret, &message);
         assert_eq!(verify(&public, &message, &signature), Ok(()));
 
         let mut wrong = message;
@@ -1684,7 +1700,7 @@ mod tests {
         let public = unhex32(pk);
         let mut msg_buf = [0u8; 4];
         let message = unhex(msg, &mut msg_buf);
-        let mut signature = sign(&secret, message).unwrap();
+        let mut signature = sign(&secret, message);
         let l_bytes = {
             let mut out = [0u8; 32];
             for (chunk, word) in out.chunks_exact_mut(8).zip(L) {
@@ -1980,7 +1996,7 @@ mod tests {
         );
         assert_eq!(secret_from_pem(v1), Ok(secret));
         let pk = public_key_from_pem(public).unwrap();
-        assert_eq!(public_key(&secret), Ok(pk));
+        assert_eq!(public_key(&secret), pk);
         assert_eq!(secret_pem(&secret)[..], v0[..]);
         assert_eq!(public_key_pem(&pk)[..], public[..]);
 
@@ -2013,7 +2029,7 @@ mod tests {
         );
         let secret = secret_from_der(secret_der_bytes).unwrap();
         let public = public_key_from_der(public_der_bytes).unwrap();
-        assert_eq!(public_key(&secret), Ok(public));
+        assert_eq!(public_key(&secret), public);
         assert_eq!(secret_der(&secret)[..], secret_der_bytes[..]);
         assert_eq!(public_key_der(&public)[..], public_der_bytes[..]);
         assert_eq!(secret_from_pem(&secret_pem(&secret)), Ok(secret));

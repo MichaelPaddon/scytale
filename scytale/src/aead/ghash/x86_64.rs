@@ -115,7 +115,12 @@ impl Multiply {
         powers: &[[u64; 2]; super::MAX_GROUP],
         blocks: &[u8],
     ) {
-        // SAFETY: as for `multiply`, and the length is the caller's.
+        // The loop below walks exactly `GROUP` blocks from the
+        // pointer, so a shorter slice reads past the end. The check
+        // is here rather than a `debug_assert` inside the unsafe
+        // function, which a release build removes.
+        assert_eq!(blocks.len(), GROUP * super::BLOCK);
+        // SAFETY: as for `multiply`, and the length was just checked.
         unsafe { multiply_group(value, powers, blocks) }
     }
 }

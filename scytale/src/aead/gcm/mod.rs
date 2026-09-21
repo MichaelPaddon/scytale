@@ -94,6 +94,7 @@ pub(crate) use self::riscv64 as native;
 pub(crate) use self::x86_64 as native;
 
 use core::fmt;
+use core::marker::PhantomData;
 
 use super::ghash::{BLOCK, Ghash};
 use crate::aead::Aead;
@@ -102,6 +103,7 @@ use crate::cipher::{BlockCipher, OneBlock};
 use crate::constant_time;
 use crate::implementation::Implementation;
 use crate::{Error, KeyType};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// The most message bytes GCM may protect under one key and nonce:
 /// 2^39 - 256 bits, the limit at which counter mode would repeat.
@@ -153,7 +155,11 @@ enum Engine<C: BlockCipher<Block = [u8; BLOCK]>> {
     Native(native::Engine<C>),
     /// The counter loop over the cipher's own bulk encrypt, with the
     /// hash run separately.
-    Generic,
+    /// `PhantomData` because on an architecture with no loop
+    /// written out for it this is the only variant, and `C` would
+    /// then be a parameter the type never mentions, which does not
+    /// compile. It costs nothing at run time.
+    Generic(PhantomData<C>),
 }
 
 /// By hand rather than derived: an engine holds no cipher, only a
@@ -167,7 +173,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Clone for Engine<C> {
                 target_arch = "x86_64"
             ))]
             Engine::Native(engine) => Engine::Native(engine.clone()),
-            Engine::Generic => Engine::Generic,
+            Engine::Generic(_) => Engine::Generic(PhantomData),
         }
     }
 }
@@ -199,7 +205,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
                 return engine;
             }
         }
-        Engine::Generic
+        Engine::Generic(PhantomData)
     }
 
     /// The engine `implementation` names, or `None` where this processor or
@@ -207,7 +213,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
     fn with(h: &[u8; BLOCK], implementation: Implementation) -> Option<Self> {
         let _ = h;
         match implementation {
-            Implementation::Portable => Some(Engine::Generic),
+            Implementation::Portable => Some(Engine::Generic(PhantomData)),
             #[cfg(any(
                 target_arch = "aarch64",
                 target_arch = "riscv64",
@@ -249,7 +255,7 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Hash<'a, C> {
                 target_arch = "x86_64"
             ))]
             Engine::Native(engine) => Hash::Native(native::Hasher::new(engine)),
-            Engine::Generic => Hash::Generic {
+            Engine::Generic(_) => Hash::Generic {
                 hash: Ghash::new(&gcm.h),
                 engine: core::marker::PhantomData,
             },
@@ -339,6 +345,19 @@ pub struct Gcm<C: BlockCipher<Block = [u8; BLOCK]>> {
     /// built, along with whatever that way of doing it works out once
     /// for the key.
     engine: Engine<C>,
+}
+
+// The hash subkey is enough to forge a tag under this key, so it
+// goes when the mode does. The cipher wipes its own schedule.
+impl<C: BlockCipher<Block = [u8; BLOCK]>> Drop for Gcm<C> {
+    fn drop(&mut self) {
+        self.h.zeroize();
+    }
+}
+
+impl<C: BlockCipher<Block = [u8; BLOCK]> + ZeroizeOnDrop> ZeroizeOnDrop
+    for Gcm<C>
+{
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> fmt::Debug for Gcm<C> {
@@ -435,7 +454,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Aead for Gcm<C> {
         let mut state = self.encryptor(nonce)?;
         state.aad(aad)?;
         state.update(data)?;
-        *tag = state.finalize()?;
+        *tag = state.finalize();
         Ok(())
     }
 
@@ -520,6 +539,16 @@ struct Core<'a, C: BlockCipher<Block = [u8; BLOCK]>> {
     /// Whether the additional data is finished. It must all arrive
     /// before any of the message.
     started: bool,
+}
+
+// The mask is what stands between the hash and the tag, and the
+// keystream block is this message's; neither outlives the message.
+impl<C: BlockCipher<Block = [u8; BLOCK]>> Drop for Core<'_, C> {
+    fn drop(&mut self) {
+        self.counter.zeroize();
+        self.keystream.zeroize();
+        self.mask.zeroize();
+    }
 }
 
 impl<C: BlockCipher<Block = [u8; BLOCK]>> Core<'_, C> {
@@ -636,7 +665,7 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
     }
 
     /// The full-length tag.
-    fn tag(&mut self) -> Result<[u8; BLOCK], Error> {
+    fn tag(&mut self) -> [u8; BLOCK] {
         if !self.started {
             self.engine.pad();
             self.started = true;
@@ -645,16 +674,18 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Core<'a, C> {
 
         let mut lengths = [0u8; BLOCK];
         lengths[..8].copy_from_slice(&self.aad_bits.to_be_bytes());
-        let message_bits = self
-            .message_bytes
-            .checked_mul(8)
-            .ok_or(Error::MessageTooLong)?;
+        // `begin` refuses a message past `MAX_MESSAGE`, which is
+        // under 2^36 bytes, so the bit count cannot pass 2^39 and
+        // the multiply cannot overflow a `u64`.
+        let Some(message_bits) = self.message_bytes.checked_mul(8) else {
+            unreachable!("the message passed MAX_MESSAGE");
+        };
         lengths[8..].copy_from_slice(&message_bits.to_be_bytes());
         self.engine.hash(&lengths);
 
         let mut tag = self.engine.finish();
         xor(&mut tag, &self.mask);
-        Ok(tag)
+        tag
     }
 }
 
@@ -690,7 +721,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Encryptor<'_, C> {
     /// Finishes, returning the tag. A protocol that carries a shorter
     /// tag keeps the first bytes of this one; the receiver then checks
     /// it with [`Decryptor::verify_truncated`].
-    pub fn finalize(mut self) -> Result<[u8; TAG], Error> {
+    pub fn finalize(mut self) -> [u8; TAG] {
         self.core.tag()
     }
 }
@@ -749,11 +780,23 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Decryptor<'_, C> {
     /// [`Error::InvalidTagLength`]
     /// outside the range and [`Error::AuthenticationFailed`] for a
     /// wrong tag.
+    ///
+    /// # The length is the protocol's, never the message's
+    ///
+    /// The length checked is `tag`'s own, and a GCM tag cut short is
+    /// simply the first bytes of the full one: nothing binds the
+    /// length to the key, the nonce or the message, as CCM's does by
+    /// folding it into the first block. So a caller that takes the
+    /// length from the wire and passes a slice of that length has
+    /// let an attacker choose it, and a sixteen-byte tag replaced by
+    /// a four-byte one is forged at one in 2^32 rather than one in
+    /// 2^128. Compare `tag.len()` against the constant the protocol
+    /// fixed before calling, or slice to that constant.
     pub fn verify_truncated(mut self, tag: &[u8]) -> Result<(), Error> {
         if !(MIN_TAG..=TAG).contains(&tag.len()) {
             return Err(Error::InvalidTagLength(tag.len()));
         }
-        let full = self.core.tag()?;
+        let full = self.core.tag();
         if constant_time::equal(&full[..tag.len()], tag) {
             Ok(())
         } else {
@@ -912,7 +955,7 @@ mod tests {
                 let mut state = gcm.encryptor(nonce).unwrap();
                 state.aad(aad).unwrap();
                 state.update(data).unwrap();
-                got = state.finalize().unwrap();
+                got = state.finalize();
             }
         }
         assert_eq!(data, cipher, "case {i} ciphertext");
@@ -1069,11 +1112,7 @@ mod tests {
             let (a, b) = pieces.split_at_mut(split);
             e.update(a).unwrap();
             e.update(b).unwrap();
-            assert_eq!(
-                e.finalize().unwrap(),
-                tag,
-                "encrypt tag, split {split}"
-            );
+            assert_eq!(e.finalize(), tag, "encrypt tag, split {split}");
             assert_eq!(pieces, whole, "encrypt, split {split}");
 
             let mut d = gcm.decryptor(&nonce).unwrap();
@@ -1095,7 +1134,7 @@ mod tests {
         for byte in pieces.iter_mut() {
             e.update(core::slice::from_mut(byte)).unwrap();
         }
-        assert_eq!(e.finalize().unwrap(), tag, "encrypt tag, byte at a time");
+        assert_eq!(e.finalize(), tag, "encrypt tag, byte at a time");
         assert_eq!(pieces, whole, "encrypt, byte at a time");
     }
 
@@ -1144,12 +1183,12 @@ mod tests {
             let (mut ta, mut tb) = ([0u8; TAG], [0u8; TAG]);
             generic
                 .encrypt(&nonce, &aad, &mut b[..len], &mut tb)
-                .unwrap();
+                .expect("encrypt");
             for (i, native) in all.iter().enumerate() {
                 a[..len].copy_from_slice(&message[..len]);
                 native
                     .encrypt(&nonce, &aad, &mut a[..len], &mut ta)
-                    .unwrap();
+                    .expect("encrypt");
                 assert_eq!(a[..len], b[..len], "ciphertext, {len}, {i}");
                 assert_eq!(ta, tb, "tag, {len} bytes, {i}");
                 native.decrypt(&nonce, &aad, &mut a[..len], &ta).unwrap();
@@ -1169,7 +1208,7 @@ mod tests {
                 for part in c[..len].chunks_mut(piece) {
                     e.update(part).unwrap();
                 }
-                assert_eq!(e.finalize().unwrap(), tb, "tag, {len} in {piece}");
+                assert_eq!(e.finalize(), tb, "tag, {len} in {piece}");
                 assert_eq!(c[..len], b[..len], "{len} bytes in {piece}");
 
                 let mut d = native.decryptor(&nonce).unwrap();
@@ -1194,7 +1233,7 @@ mod tests {
         let mut state = gcm.encryptor(nonce).unwrap();
         state.aad(b"x").unwrap();
         state.update(data).unwrap();
-        *tag = state.finalize().unwrap();
+        *tag = state.finalize();
     }
 
     /// A nonce that is not ninety-six bits is hashed down to a
@@ -1233,7 +1272,7 @@ mod tests {
             // And the portable cipher, whose schedule those
             // instructions cannot read, does not.
             let other = Gcm::<portable::bitsliced::Aes<16>>::new(&key);
-            assert!(matches!(other.engine, Engine::Generic));
+            assert!(matches!(other.engine, Engine::Generic(_)));
 
             // The portable one is always to be had, and on x86-64 the
             // AES-NI one is too wherever this test runs at all, so

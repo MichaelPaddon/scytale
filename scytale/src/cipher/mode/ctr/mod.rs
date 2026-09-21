@@ -41,16 +41,13 @@
 //! use scytale::cipher::aes::Aes128;
 //! use scytale::cipher::mode::Ctr;
 //!
-//! # fn main() -> Result<(), scytale::Error> {
 //! let ctr = Ctr::<Aes128>::new(&Key::from([0u8; 16]));
 //! let counter = [0u8; 16];
 //!
 //! let mut data = [0u8; 21];
-//! ctr.encrypt(&counter, &mut data)?;
-//! ctr.decrypt(&counter, &mut data)?;
+//! ctr.encrypt(&counter, &mut data);
+//! ctr.decrypt(&counter, &mut data);
 //! assert_eq!(data, [0u8; 21]);
-//! # Ok(())
-//! # }
 //! ```
 
 #[cfg(target_arch = "aarch64")]
@@ -68,12 +65,13 @@ use self::riscv64 as native;
 use self::x86_64 as native;
 
 use core::fmt;
+use core::marker::PhantomData;
 
 use super::{ByteOrder, counter_blocks, xor};
+use crate::ByteArray;
 use crate::KeyType;
 use crate::cipher::{BlockCipher, OneBlock};
 use crate::implementation::Implementation;
-use crate::{ByteArray, Error};
 
 /// What does the work, settled when the mode is built, because it is
 /// the processor that decides and the processor does not change.
@@ -91,7 +89,11 @@ enum Engine<C: BlockCipher> {
     Native(native::Engine<C>),
     /// The construction over the cipher's own bulk encrypt, which
     /// needs nothing of its own: the cipher comes in with the data.
-    Generic,
+    /// `PhantomData` because on an architecture with no loop
+    /// written out for it this is the only variant, and `C` would
+    /// then be a parameter the type never mentions, which does not
+    /// compile. It costs nothing at run time.
+    Generic(PhantomData<C>),
 }
 
 /// By hand rather than derived: an engine holds no cipher, only a
@@ -105,7 +107,7 @@ impl<C: BlockCipher> Clone for Engine<C> {
                 target_arch = "x86_64"
             ))]
             Engine::Native(engine) => Engine::Native(engine.clone()),
-            Engine::Generic => Engine::Generic,
+            Engine::Generic(_) => Engine::Generic(PhantomData),
         }
     }
 }
@@ -136,14 +138,14 @@ impl<C: BlockCipher> Engine<C> {
                 return engine;
             }
         }
-        Engine::Generic
+        Engine::Generic(PhantomData)
     }
 
     /// The engine `implementation` names, or `None` where this processor or
     /// this cipher has no such thing.
     fn with(implementation: Implementation) -> Option<Self> {
         match implementation {
-            Implementation::Portable => Some(Engine::Generic),
+            Implementation::Portable => Some(Engine::Generic(PhantomData)),
             #[cfg(any(
                 target_arch = "aarch64",
                 target_arch = "riscv64",
@@ -172,10 +174,12 @@ impl<C: BlockCipher> Engine<C> {
                     Ok(counter) => {
                         engine.xor_counter_blocks(cipher, counter, data)
                     }
-                    Err(_) => debug_assert!(false, "block is not a block"),
+                    // Falling through quietly would skip the XOR
+                    // and leave `data` as plaintext.
+                    Err(_) => unreachable!("block is not a block"),
                 }
             }
-            Engine::Generic => {
+            Engine::Generic(_) => {
                 counter_blocks(cipher, counter, ByteOrder::Big, data)
             }
         }
@@ -206,6 +210,11 @@ where
 {
     /// Takes the key the cipher runs under.
     pub fn new(key: &C::Key) -> Self {
+        // The counter is the last four bytes of the block, so a
+        // cipher of the caller's own with a narrower block has no
+        // counter to run. Said when the mode is built for it, rather
+        // than found out by an index past the front of the block.
+        const { assert!(size_of::<C::Block>() >= 4) };
         Ctr {
             cipher: C::new(key),
             engine: Engine::new(),
@@ -231,12 +240,8 @@ where
 
     /// Encrypts `data` in place, starting from `counter`. Any length
     /// of message is allowed.
-    pub fn encrypt(
-        &self,
-        counter: &C::Block,
-        data: &mut [u8],
-    ) -> Result<(), Error> {
-        self.stream(counter).update(data)
+    pub fn encrypt(&self, counter: &C::Block, data: &mut [u8]) {
+        self.stream(counter).update(data);
     }
 
     /// Decrypts `data` in place, starting from `counter`.
@@ -244,12 +249,8 @@ where
     /// This is the same operation as [`encrypt`](Self::encrypt): the
     /// keystream does not depend on the message. Both names exist so
     /// that calling code reads the way it means.
-    pub fn decrypt(
-        &self,
-        counter: &C::Block,
-        data: &mut [u8],
-    ) -> Result<(), Error> {
-        self.stream(counter).update(data)
+    pub fn decrypt(&self, counter: &C::Block, data: &mut [u8]) {
+        self.stream(counter).update(data);
     }
 
     /// The cipher under the mode's key, for a construction that needs
@@ -344,10 +345,19 @@ fn run_blocks<C: BlockCipher>(
     debug_assert!(data.len().is_multiple_of(size));
     let mut done = 0;
     while done < data.len() {
-        let room = (u32::MAX - low32(counter.as_ref())) as usize + 1;
-        let take = (data.len() - done).min(room.saturating_mul(size));
+        // How far the low four bytes can go before they carry, in
+        // bytes. Counted in `u64` rather than `usize`: the block
+        // count alone reaches 2^32, which is one past what a 32-bit
+        // `usize` holds, and wrapping there would leave `take` at
+        // zero and this loop turning for ever.
+        let blocks = u64::from(u32::MAX - low32(counter.as_ref())) + 1;
+        let room = blocks.saturating_mul(size as u64);
+        let left = (data.len() - done) as u64;
+        // At least one block, since the loop ran: `left` is nonzero
+        // and `room` is at least one block's worth.
+        let take = left.min(room) as usize;
         engine.blocks(cipher, counter, &mut data[done..done + take]);
-        if take == room.saturating_mul(size) {
+        if take as u64 == room {
             carry_out_of_low32(counter);
         }
         done += take;
@@ -376,7 +386,7 @@ where
     C::Block: ByteArray,
 {
     /// Applies the keystream to the next piece of the message.
-    pub fn update(&mut self, mut data: &mut [u8]) -> Result<(), Error> {
+    pub fn update(&mut self, mut data: &mut [u8]) {
         let size = size_of::<C::Block>();
 
         // Finish the block a previous piece stopped inside.
@@ -409,7 +419,6 @@ where
             xor(tail, self.keystream.as_ref());
             self.used = tail.len();
         }
-        Ok(())
     }
 }
 
@@ -474,7 +483,7 @@ mod tests {
 
         for n in 0..=N {
             let mut got = [0u8; N];
-            ctr(&key).encrypt(&start, &mut got[..n]).unwrap();
+            ctr(&key).encrypt(&start, &mut got[..n]);
             assert_eq!(got[..n], want[..n], "{n} bytes");
         }
     }
@@ -512,7 +521,7 @@ mod tests {
             engines += 1;
             for n in 0..=N {
                 let mut got = [0u8; N];
-                ctr.encrypt(&start, &mut got[..n]).unwrap();
+                ctr.encrypt(&start, &mut got[..n]);
                 assert_eq!(
                     got[..n],
                     want[..n],
@@ -555,7 +564,7 @@ mod tests {
             }
 
             let mut got = [0u8; N];
-            ctr(&key).encrypt(&start, &mut got).unwrap();
+            ctr(&key).encrypt(&start, &mut got);
             assert_eq!(got, want, "counter ending {last}");
 
             // And in pieces, so a run starts at every offset within
@@ -565,7 +574,7 @@ mod tests {
                 let mode = ctr(&key);
                 let mut stream = mode.stream(&start);
                 for part in got.chunks_mut(piece) {
-                    stream.update(part).unwrap();
+                    stream.update(part);
                 }
                 assert_eq!(
                     got, want,
@@ -598,7 +607,7 @@ mod tests {
         }
 
         let mut got = [0u8; N * 16];
-        ctr(&key).encrypt(&start, &mut got).unwrap();
+        ctr(&key).encrypt(&start, &mut got);
         assert_eq!(got, want);
     }
 
@@ -622,9 +631,9 @@ mod tests {
         let ctr = ctr(&key);
 
         let mut data = plain;
-        ctr.encrypt(&counter, &mut data).unwrap();
+        ctr.encrypt(&counter, &mut data);
         assert_eq!(data, cipher, "encrypt");
-        ctr.decrypt(&counter, &mut data).unwrap();
+        ctr.decrypt(&counter, &mut data);
         assert_eq!(data, plain, "decrypt");
     }
 
@@ -658,7 +667,7 @@ mod tests {
         // Two blocks in, this counter carries into its third byte.
         let start: [u8; 16] = unhex("000000000000000000000000ffffffff");
         let mut together = [0u8; 48];
-        ctr.encrypt(&start, &mut together).unwrap();
+        ctr.encrypt(&start, &mut together);
 
         // The same three blocks, each with the counter written out.
         let mut apart = [0u8; 48];
@@ -667,7 +676,7 @@ mod tests {
             for _ in 0..i {
                 increment(&mut counter);
             }
-            ctr.encrypt(&counter, block).unwrap();
+            ctr.encrypt(&counter, block);
         }
         assert_eq!(together, apart);
     }
@@ -684,11 +693,11 @@ mod tests {
         for n in [0, 1, 15, 16, 17, 127, 128, 129, 255, MAX] {
             let mut data = [0u8; MAX];
             data[..n].copy_from_slice(&plain[..n]);
-            ctr.encrypt(&counter, &mut data[..n]).unwrap();
+            ctr.encrypt(&counter, &mut data[..n]);
             if n > 0 {
                 assert_ne!(data[..n], plain[..n], "{n} bytes");
             }
-            ctr.decrypt(&counter, &mut data[..n]).unwrap();
+            ctr.decrypt(&counter, &mut data[..n]);
             assert_eq!(data[..n], plain[..n], "{n} bytes");
         }
     }
@@ -704,14 +713,14 @@ mod tests {
             *b = (i * 3) as u8;
         }
         let mut whole = plain;
-        ctr.encrypt(&counter, &mut whole).unwrap();
+        ctr.encrypt(&counter, &mut whole);
 
         for split in [1, 15, 16, 17, 128, 129] {
             let mut pieces = plain;
             let mut s = ctr.stream(&counter);
             let (a, b) = pieces.split_at_mut(split);
-            s.update(a).unwrap();
-            s.update(b).unwrap();
+            s.update(a);
+            s.update(b);
             assert_eq!(pieces, whole, "split at {split}");
         }
 
@@ -719,7 +728,7 @@ mod tests {
         let mut pieces = plain;
         let mut s = ctr.stream(&counter);
         for byte in pieces.iter_mut() {
-            s.update(core::slice::from_mut(byte)).unwrap();
+            s.update(core::slice::from_mut(byte));
         }
         assert_eq!(pieces, whole, "one byte at a time");
     }

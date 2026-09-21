@@ -327,29 +327,42 @@ fn report(options: &Options) -> bool {
     // SHA-256 and SHA-512 and are not measured separately.
     #[cfg(target_arch = "x86_64")]
     {
-        ran |= hash_section::<sha2::x86_64::Sha256, sha2::portable::Sha512>(
-            "shani", options,
+        ran |= hash_section(
+            "shani",
+            options,
+            sha2::x86_64::Sha256::try_new,
+            sha2::portable::Sha512::try_new,
         );
     }
     #[cfg(target_arch = "aarch64")]
     {
-        ran |= hash_section::<sha2::aarch64::Sha256, sha2::aarch64::Sha512>(
-            "armv8", options,
+        ran |= hash_section(
+            "armv8",
+            options,
+            sha2::aarch64::Sha256::try_new,
+            sha2::aarch64::Sha512::try_new,
         );
     }
     #[cfg(target_arch = "riscv64")]
     {
-        ran |= hash_section::<
-            sha2::riscv64::zvknh::Sha256,
-            sha2::riscv64::zvknh::Sha512,
-        >("zvknh", options);
-        ran |= hash_section::<
-            sha2::riscv64::zknh::Sha256,
-            sha2::riscv64::zknh::Sha512,
-        >("zknh", options);
+        ran |= hash_section(
+            "zvknh",
+            options,
+            sha2::riscv64::zvknh::Sha256::try_new,
+            sha2::riscv64::zvknh::Sha512::try_new,
+        );
+        ran |= hash_section(
+            "zknh",
+            options,
+            sha2::riscv64::zknh::Sha256::try_new,
+            sha2::riscv64::zknh::Sha512::try_new,
+        );
     }
-    ran |= hash_section::<sha2::portable::Sha256, sha2::portable::Sha512>(
-        "portable", options,
+    ran |= hash_section(
+        "portable",
+        options,
+        sha2::portable::Sha256::try_new,
+        sha2::portable::Sha512::try_new,
     );
 
     // ChaCha20, one section per way of computing the keystream.
@@ -375,19 +388,27 @@ fn report(options: &Options) -> bool {
     // section, and only AArch64 has the instructions.
     #[cfg(target_arch = "aarch64")]
     {
-        ran |= sha3_section::<
-            sha3::aarch64::Sha3_256,
-            sha3::aarch64::Sha3_512,
-            sha3::aarch64::Shake128,
-            sha3::aarch64::Shake256,
-        >("armv8", options);
+        ran |= sha3_section(
+            "armv8",
+            options,
+            (
+                sha3::aarch64::Sha3_256::try_new,
+                sha3::aarch64::Sha3_512::try_new,
+                sha3::aarch64::Shake128::try_new,
+                sha3::aarch64::Shake256::try_new,
+            ),
+        );
     }
-    ran |= sha3_section::<
-        sha3::portable::Sha3_256,
-        sha3::portable::Sha3_512,
-        sha3::portable::Shake128,
-        sha3::portable::Shake256,
-    >("portable", options);
+    ran |= sha3_section(
+        "portable",
+        options,
+        (
+            sha3::portable::Sha3_256::try_new,
+            sha3::portable::Sha3_512::try_new,
+            sha3::portable::Shake128::try_new,
+            sha3::portable::Shake256::try_new,
+        ),
+    );
     ran |= single_section(options);
 
     ran |= kdf_ops(options);
@@ -514,7 +535,12 @@ const HASHES: [&str; 4] =
 /// run is left out, as with the ciphers; on x86-64 the SHA-NI
 /// section pairs its SHA-256 with the portable SHA-512, there being
 /// no instruction for the latter.
-fn hash_section<S256, S512>(implementation: &str, options: &Options) -> bool
+fn hash_section<S256, S512>(
+    implementation: &str,
+    options: &Options,
+    start256: fn() -> Result<S256, Error>,
+    start512: fn() -> Result<S512, Error>,
+) -> bool
 where
     S256: Hash<Output = [u8; 32]> + Clone + BlockType,
     S512: Hash<Output = [u8; 64]> + Clone + BlockType,
@@ -527,7 +553,7 @@ where
     if wanted.is_empty() {
         return false;
     }
-    let (mut sha256, mut sha512) = match (S256::try_new(), S512::try_new()) {
+    let (mut sha256, mut sha512) = match (start256(), start512()) {
         (Ok(a), Ok(b)) => (a, b),
         (Err(Error::NotSupported), _) | (_, Err(Error::NotSupported)) => {
             return false;
@@ -537,9 +563,10 @@ where
             return false;
         }
     };
-    // The hashes exist, so keying cannot fail.
-    let mut hmac256 = Hmac::<S256>::try_new(&KEY128).expect("hmac");
-    let mut hmac512 = Hmac::<S512>::try_new(&KEY128).expect("hmac");
+    // Keyed from a fresh hash of the same implementation, so the
+    // HMAC rows measure the backend this section names.
+    let mut hmac256 = Hmac::with(sha256.clone(), &KEY128);
+    let mut hmac512 = Hmac::with(sha512.clone(), &KEY128);
     let mut tasks: Vec<Task<'_>> = vec![
         (
             "sha-256",
@@ -560,17 +587,17 @@ where
         (
             "hmac-sha-256",
             Box::new(|d: &mut [u8]| {
-                hmac256.reset();
-                hmac256.update(d);
-                black_box(hmac256.finalize());
+                hmac256.restart();
+                hmac256.append(d);
+                black_box(hmac256.tag());
             }),
         ),
         (
             "hmac-sha-512",
             Box::new(|d: &mut [u8]| {
-                hmac512.reset();
-                hmac512.update(d);
-                black_box(hmac512.finalize());
+                hmac512.restart();
+                hmac512.append(d);
+                black_box(hmac512.tag());
             }),
         ),
     ];
@@ -674,9 +701,16 @@ const SHA3: [&str; 4] = ["sha3-256", "sha3-512", "shake128", "shake256"];
 
 /// Measures one implementation of SHA-3, returning whether it ran
 /// anything; an implementation the processor cannot run is left out.
+#[allow(clippy::type_complexity)]
 fn sha3_section<D256, D512, X128, X256>(
     implementation: &str,
     options: &Options,
+    starts: (
+        fn() -> Result<D256, Error>,
+        fn() -> Result<D512, Error>,
+        fn() -> Result<X128, Error>,
+        fn() -> Result<X256, Error>,
+    ),
 ) -> bool
 where
     D256: Hash<Output = [u8; 32]>,
@@ -692,12 +726,7 @@ where
     if wanted.is_empty() {
         return false;
     }
-    let states = (
-        D256::try_new(),
-        D512::try_new(),
-        X128::try_new(),
-        X256::try_new(),
-    );
+    let states = (starts.0(), starts.1(), starts.2(), starts.3());
     let (mut d256, mut d512, mut x128, mut x256) = match states {
         (Ok(a), Ok(b), Ok(c), Ok(d)) => (a, b, c, d),
         (Err(Error::NotSupported), _, _, _)
@@ -783,9 +812,7 @@ fn single_section(options: &Options) -> bool {
     if wanted.is_empty() {
         return false;
     }
-    let Ok(mut sha1) = Sha1::try_new() else {
-        return false;
-    };
+    let mut sha1 = Sha1::new();
     // Seeded rather than drawn, so a run repeats and no entropy
     // source is needed for a measurement.
     let Ok(mut rng) = CtrDrbg::from_seed(&[0x5au8; 64]) else {
@@ -793,7 +820,7 @@ fn single_section(options: &Options) -> bool {
     };
     // Neither of these can fail to build: the key is the right width
     // and the automatic ChaCha20 always exists.
-    let mut mac = Poly1305::try_new(&Key::from(KEY256)).expect("poly1305");
+    let mut mac = Poly1305::new(&Key::from(KEY256));
     let aead = ChaCha20Poly1305::new(&Key::from(KEY256));
     let mut kmac = Kmac128::new(&KEY256, b"");
     let mut tags = [[0u8; 16]; 2];
@@ -1096,7 +1123,7 @@ fn kex_ops(options: &Options) -> bool {
         (
             "ecdh-p256-agree",
             Box::new(|| {
-                black_box(p256.shared_secret(p256_public)).ok();
+                black_box(p256.shared_secret(p256_public));
             }),
         ),
         (
@@ -1108,7 +1135,7 @@ fn kex_ops(options: &Options) -> bool {
         (
             "ecdh-p384-agree",
             Box::new(|| {
-                black_box(p384.shared_secret(p384_public)).ok();
+                black_box(p384.shared_secret(p384_public));
             }),
         ),
     ];
@@ -1142,13 +1169,9 @@ fn sig_ops(options: &Options) -> bool {
         return false;
     };
     let ed_secret = KEY256;
-    let Ok(ed_key) = ed25519::PrivateKey::try_new(&Key::from(ed_secret)) else {
-        return false;
-    };
+    let ed_key = ed25519::PrivateKey::new(&Key::from(ed_secret));
     let ed_public = ed_key.public_key().bytes();
-    let Ok(ed_signature) = ed_key.sign(MESSAGE) else {
-        return false;
-    };
+    let ed_signature = ed_key.sign(MESSAGE);
     let (Ok(p256), Ok(p384)) = (
         ecdsa::p256::PrivateKey::generate(&mut build),
         ecdsa::p384::PrivateKey::generate(&mut build),
@@ -1173,13 +1196,13 @@ fn sig_ops(options: &Options) -> bool {
         (
             "ed25519-keygen",
             Box::new(|| {
-                black_box(ed25519::public_key(&ed_secret)).ok();
+                black_box(ed25519::public_key(&ed_secret));
             }) as Once<'_>,
         ),
         (
             "ed25519-sign",
             Box::new(|| {
-                black_box(ed_key.sign(MESSAGE)).ok();
+                black_box(ed_key.sign(MESSAGE));
             }),
         ),
         (
@@ -1812,7 +1835,7 @@ where
         tasks.push((
             "aes-128-cfb8-enc",
             Box::new(|d: &mut [u8]| {
-                let _ = cfb8.encrypt(&IV, d);
+                cfb8.encrypt(&IV, d);
             }),
         ));
         tasks.push((
@@ -1824,14 +1847,14 @@ where
         tasks.push((
             "aes-128-ofb",
             Box::new(|d: &mut [u8]| {
-                let _ = ofb.encrypt(&IV, d);
+                ofb.encrypt(&IV, d);
             }),
         ));
         if let Some(ctr) = ctr {
             tasks.push((
                 "aes-128-ctr",
                 Box::new(|d: &mut [u8]| {
-                    let _ = ctr.encrypt(&IV, d);
+                    ctr.encrypt(&IV, d);
                 }),
             ));
         }
@@ -1839,7 +1862,7 @@ where
             tasks.push((
                 "aes-256-ctr",
                 Box::new(|d: &mut [u8]| {
-                    let _ = ctr256.encrypt(&IV, d);
+                    ctr256.encrypt(&IV, d);
                 }),
             ));
         }

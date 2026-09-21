@@ -29,41 +29,53 @@ impl Family {
 
 /// Runs the one-shot (AFT) groups against `H`; a no-op without the
 /// vendored vectors.
-pub fn run_aft<H: BitHash>(file: &str, algorithm: &str, family: Family)
-where
+pub fn run_aft<H: BitHash>(
+    file: &str,
+    algorithm: &str,
+    family: Family,
+    start: fn() -> H,
+) where
     H::Output: AsRef<[u8]>,
 {
     let Some(groups) = groups(file, algorithm, family, "AFT") else {
         return;
     };
-    let count: usize = groups.iter().map(|g| aft::<H>(g, family)).sum();
+    let count: usize = groups.iter().map(|g| aft(g, family, start)).sum();
     // Guard against a truncated or wrong file passing vacuously.
     assert!(count >= 500, "only {count} AFT cases");
 }
 
 /// Runs the Monte Carlo (MCT) groups against `H`; a no-op without the
 /// vendored vectors. Slow: 100,000 hashes per group.
-pub fn run_mct<H: BitHash>(file: &str, algorithm: &str, family: Family)
-where
+pub fn run_mct<H: BitHash>(
+    file: &str,
+    algorithm: &str,
+    family: Family,
+    start: fn() -> H,
+) where
     H::Output: AsRef<[u8]>,
 {
     let Some(groups) = groups(file, algorithm, family, "MCT") else {
         return;
     };
-    let count: usize = groups.iter().map(|g| mct::<H>(g, family)).sum();
+    let count: usize = groups.iter().map(|g| mct(g, family, start)).sum();
     assert!(count >= 100, "only {count} MCT steps");
 }
 
 /// Runs the large data (LDT) groups against `H`, each of which
 /// hashes several gigabytes; a no-op without the vendored vectors.
-pub fn run_ldt<H: Hash>(file: &str, algorithm: &str, family: Family)
-where
+pub fn run_ldt<H: Hash>(
+    file: &str,
+    algorithm: &str,
+    family: Family,
+    start: fn() -> H,
+) where
     H::Output: AsRef<[u8]>,
 {
     let Some(groups) = groups(file, algorithm, family, "LDT") else {
         return;
     };
-    let count: usize = groups.iter().map(ldt::<H>).sum();
+    let count: usize = groups.iter().map(|g| ldt(g, start)).sum();
     assert!(count >= 1, "only {count} LDT cases");
 }
 
@@ -133,13 +145,13 @@ impl Message {
 }
 
 /// Algorithm Functional Test: one message, one digest.
-fn aft<H: BitHash>(group: &Value, family: Family) -> usize
+fn aft<H: BitHash>(group: &Value, family: Family, start: fn() -> H) -> usize
 where
     H::Output: AsRef<[u8]>,
 {
     let mut count = 0;
     for t in group["tests"].as_array().expect("tests") {
-        let digest = Message::of(t).digest(H::try_new().expect("hash"), family);
+        let digest = Message::of(t).digest(start(), family);
         assert_eq!(
             digest.as_ref(),
             hex(&t["md"]),
@@ -156,7 +168,7 @@ where
 /// the previous three digests each time, in the standard version as
 /// they are and in the alternate one cut or padded with zeros to the
 /// length of the seed; SHA-3 hashes just the previous digest.
-fn mct<H: BitHash>(group: &Value, family: Family) -> usize
+fn mct<H: BitHash>(group: &Value, family: Family, start: fn() -> H) -> usize
 where
     H::Output: AsRef<[u8]>,
 {
@@ -171,7 +183,7 @@ where
         assert_eq!(seed.bits % 8, 0, "tcId {}: bit seed", t["tcId"]);
         let seed = seed.bytes;
         let steps = t["resultsArray"].as_array().expect("resultsArray");
-        let mut hash = H::try_new().expect("hash");
+        let mut hash = start();
         let mut md: Vec<u8> = seed.clone();
         for (i, step) in steps.iter().enumerate() {
             md = match family {
@@ -240,7 +252,7 @@ where
 
 /// Large Data Test: a short piece repeated to gigabytes, hashed as
 /// it is generated.
-fn ldt<H: Hash>(group: &Value) -> usize
+fn ldt<H: Hash>(group: &Value, start: fn() -> H) -> usize
 where
     H::Output: AsRef<[u8]>,
 {
@@ -257,7 +269,7 @@ where
         // Feed in chunks of many pieces to keep the call count sane.
         let per_chunk = (1 << 20) / piece.len().max(1);
         let chunk: Vec<u8> = piece.repeat(per_chunk);
-        let mut hash = H::try_new().expect("hash");
+        let mut hash = start();
         let mut left = repeats;
         while left > 0 {
             let n = left.min(per_chunk as u64) as usize;

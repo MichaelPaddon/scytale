@@ -104,8 +104,12 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
     ) {
         debug_assert_eq!(data.len() % BLOCK, 0);
         let Some(schedule) = (self.keys)(cipher, !encrypt) else {
-            debug_assert!(false, "the cipher changed under the mode");
-            return;
+            // The engine is built for one cipher type, and only
+            // where the probe found these instructions, so that
+            // cipher's own backend is this one and the lookup
+            // cannot miss. Returning quietly would leave `data`
+            // exactly as it came in: plaintext, with nothing said.
+            unreachable!("the cipher changed under the mode");
         };
         let (rk, rounds) = (schedule.keys(), schedule.rounds());
         let bodies = if encrypt { &ENCRYPT } else { &DECRYPT };

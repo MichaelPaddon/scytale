@@ -29,7 +29,7 @@ use core::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::Mac;
-use crate::{Error, Key, KeyType};
+use crate::{Key, KeyType};
 
 /// The key length in bytes: `r` then `s`.
 pub const KEY_SIZE: usize = 32;
@@ -158,22 +158,6 @@ impl Poly1305 {
         self.h = [h0, h1, h2];
     }
 
-    /// The powers of `r`, where this processor can use them. What
-    /// the processor has was settled when the authenticator was made;
-    /// only the powers are left until a run arrives that is worth
-    /// them.
-    #[cfg(target_arch = "x86_64")]
-    fn ready(&mut self) -> Option<x86_64::Powers> {
-        if !self.fast {
-            return None;
-        }
-        Some(
-            *self
-                .powers
-                .get_or_insert_with(|| x86_64::Powers::new(&self.r)),
-        )
-    }
-
     /// Fully reduces the accumulator, adds `s`, and returns the tag.
     fn tag(&self) -> [u8; BLOCK] {
         let [mut h0, mut h1, mut h2] = self.h;
@@ -228,8 +212,8 @@ impl KeyType for Poly1305 {
 impl Mac for Poly1305 {
     type Tag = [u8; BLOCK];
 
-    fn try_new(key: &Self::Key) -> Result<Self, Error> {
-        Ok(Poly1305::new(key))
+    fn new(key: &Self::Key) -> Self {
+        Poly1305::new(key)
     }
 
     fn reset(&mut self) {
@@ -257,13 +241,19 @@ impl Mac for Poly1305 {
 
         // Whole groups through the loop written out for this
         // processor, where there is one, and the odd blocks after.
+        // What the processor has was settled when the authenticator
+        // was made; only the powers of `r` are left until a run
+        // arrives that is worth them. They are borrowed where they
+        // lie, field by field, so that no copy of them is made for
+        // the `Drop` to miss.
         #[cfg(target_arch = "x86_64")]
-        if data.len() >= x86_64::SPAN
-            && let Some(powers) = self.ready()
-        {
+        if self.fast && data.len() >= x86_64::SPAN {
+            let r = &self.r;
+            let powers =
+                self.powers.get_or_insert_with(|| x86_64::Powers::new(r));
             let groups = data.len() / x86_64::SPAN;
             let (whole, rest) = data.split_at(groups * x86_64::SPAN);
-            x86_64::bulk(&mut self.h, &powers, whole);
+            x86_64::bulk(&mut self.h, powers, whole);
             data = rest;
         }
 
@@ -302,7 +292,7 @@ impl Clone for Poly1305 {
             #[cfg(target_arch = "x86_64")]
             fast: self.fast,
             #[cfg(target_arch = "x86_64")]
-            powers: self.powers,
+            powers: self.powers.clone(),
         }
     }
 }
@@ -333,6 +323,7 @@ impl fmt::Debug for Poly1305 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Error;
 
     /// Decodes hex into a fixed buffer, returning the used prefix.
     fn hex(s: &str) -> ([u8; 512], usize) {

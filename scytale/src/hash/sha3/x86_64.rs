@@ -47,6 +47,12 @@ fn has_bmi() -> bool {
 static BMI: Probe = Probe::new();
 
 fn ask_bmi() -> bool {
+    // A processor whose highest leaf is below seven answers this one
+    // with the data of its highest, not with zeros, so the bits
+    // would be whatever that leaf happens to hold.
+    if core::arch::x86_64::__cpuid(0).eax < 7 {
+        return false;
+    }
     let wanted = (1 << 3) | (1 << 8);
     __cpuid_count(7, 0).ebx & wanted == wanted
 }

@@ -93,7 +93,7 @@ fn aft<C: BlockCipher<Block = [u8; 16]>>(
                     let mut state = gcm.encryptor(&nonce).expect("encryptor");
                     state.aad(&aad).expect("aad");
                     state.update(&mut data).expect("update");
-                    got = state.finalize().expect("finalize");
+                    got = state.finalize();
                 }
             }
             assert_eq!(data, hex(&t["ct"]), "{tag} ciphertext");

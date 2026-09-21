@@ -51,6 +51,7 @@ use crate::cipher::aes::x86_64::{Schedule, has_aesni};
 use crate::cipher::mode::{ByteOrder, add_counter};
 use crate::implementation::Implementation;
 use crate::probe::Probe;
+use zeroize::Zeroize;
 
 /// Blocks the loop takes at once, which is also how many powers of
 /// the subkey it keeps.
@@ -217,7 +218,9 @@ fn prepare(h: &[u64; 2]) -> [u64; 2] {
 /// [`Gcm::new`](super::Gcm::new).
 ///
 /// # Safety
-/// Requires `pclmulqdq` and SSSE3.
+/// Requires `pclmulqdq` and AVX with the operating system saving
+/// its state: the body is VEX-encoded throughout. [`supported`] is
+/// the probe that says so.
 unsafe fn powers_of(h: &[u64; 2]) -> Powers {
     let mut powers = At16([[0u64; 2]; 2 * GROUP]);
     let mut power = [1u64 << 63, 0];
@@ -346,7 +349,7 @@ pub(crate) struct Engine<C> {
 /// Held apart from the cipher because the same arithmetic serves
 /// POLYVAL, which has no cipher of its own and differs only in the
 /// order it reads a block's bytes.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct Subkey {
     /// The powers of the subkey, `H` first. A run of one block meets
     /// the first of them, so there is no separate single multiply.
@@ -355,6 +358,31 @@ pub(crate) struct Subkey {
     /// where this processor has the wider instructions and the caller
     /// wants them.
     wide: Option<WidePowers>,
+}
+
+// `H` is the first power: all of this is the hash's key, and enough
+// to forge a tag, so it goes when whatever holds it does. Not
+// `Copy`, so that there is one of these to wipe and not a copy left
+// wherever one was handed on; the loops reach it by pointer.
+impl Drop for Subkey {
+    fn drop(&mut self) {
+        for power in self.powers.0.iter_mut() {
+            power.zeroize();
+        }
+        if let Some(wide) = self.wide.as_mut() {
+            for power in wide.0.iter_mut() {
+                power.zeroize();
+            }
+        }
+    }
+}
+
+impl Drop for Digest {
+    fn drop(&mut self) {
+        self.y.zeroize();
+        self.block.zeroize();
+        self.used.zeroize();
+    }
 }
 
 impl Subkey {
@@ -404,7 +432,7 @@ impl<C> Clone for Engine<C> {
     fn clone(&self) -> Self {
         Engine {
             keys: self.keys,
-            subkey: self.subkey,
+            subkey: self.subkey.clone(),
         }
     }
 }
@@ -508,8 +536,11 @@ impl Digest {
         debug_assert_eq!(data.len(), WIDE_AGGREGATE_SPAN);
         debug_assert!(self.reverse, "no wider loop for POLYVAL");
         let Some(wide) = subkey.wide.as_ref() else {
-            debug_assert!(false, "no wider powers");
-            return;
+            // Only a subkey holding the wider powers reaches this
+            // loop, and `absorb` picks the loop from that. Returning
+            // quietly would drop a whole run of blocks out of the
+            // hash and leave the tag wrong but well formed.
+            unreachable!("no wider powers");
         };
         // The first register of the run meets the highest pair of
         // powers, and the table is walked backwards from there.
@@ -776,8 +807,12 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Hasher<'a, C> {
     ) {
         debug_assert_eq!(data.len() % BLOCK, 0);
         let Some(schedule) = (self.engine.keys)(cipher) else {
-            debug_assert!(false, "the cipher changed under the mode");
-            return;
+            // The engine is built for one cipher type, and only
+            // where the probe found these instructions, so that
+            // cipher's own backend is this one and the lookup
+            // cannot miss. Returning quietly would leave `data` as
+            // plaintext and the tag taken over nothing.
+            unreachable!("the cipher changed under the mode");
         };
         // The loops add to the last byte of the block and do not
         // carry out of it, so a run stops where that byte would
@@ -1620,7 +1655,9 @@ macro_rules! epilogue {
 /// not come in runs.
 ///
 /// # Safety
-/// Requires `pclmulqdq` and SSSE3.
+/// Requires `pclmulqdq` and AVX with the operating system saving
+/// its state: the body is VEX-encoded throughout. [`supported`] is
+/// the probe that says so.
 unsafe fn multiply(value: &mut [u64; 2], h: &[u64; 2]) {
     unsafe {
         core::arch::asm!(

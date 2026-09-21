@@ -69,7 +69,7 @@ macro_rules! set {
         impl Set for $name {
             fn key_gen(seed: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
                 let seed: [u8; 64] = seed.try_into().ok()?;
-                let key = $module::PrivateKey::try_from_seed(&seed).ok()?;
+                let key = $module::PrivateKey::from_seed(&seed);
                 let ek = key.public_key().bytes().to_vec();
                 Some((ek, key.key_bytes().to_vec()))
             }
@@ -87,7 +87,7 @@ macro_rules! set {
             }
             fn decapsulate_seed(seed: &[u8], c: &[u8]) -> Option<Vec<u8>> {
                 let seed: [u8; 64] = seed.try_into().ok()?;
-                let key = $module::PrivateKey::try_from_seed(&seed).ok()?;
+                let key = $module::PrivateKey::from_seed(&seed);
                 let c: [u8; $module::CIPHERTEXT_SIZE] = c.try_into().ok()?;
                 Some(key.decapsulate(&c).to_vec())
             }

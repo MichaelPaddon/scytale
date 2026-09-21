@@ -69,6 +69,7 @@ use crate::cipher::BlockCipher;
 pub(crate) use crate::cipher::aes::riscv64::{Keys, keys};
 use crate::cipher::aes::riscv64::{Schedule, has_vrev8, has_zvkned};
 use crate::implementation::Implementation;
+use zeroize::Zeroize;
 
 /// Blocks the loop takes at once, which is also how many powers of
 /// the subkey it holds.
@@ -93,13 +94,26 @@ pub(crate) fn supported() -> bool {
 }
 
 /// Everything the hash works out from the subkey and never changes.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct Subkey {
     /// The subkey prepared for the multiply, for a block at a time.
     h: [u64; 2],
     /// Its first [`GROUP`] powers, highest first, which is the order
     /// the blocks of a pass meet them in.
     powers: [[u64; 2]; GROUP],
+}
+
+// All of it is the hash's key, and enough to forge a tag, so it goes
+// when the engine holding it does. Not `Copy`, so that there is one
+// of these to wipe and not a copy left wherever one was handed on;
+// the loops reach it by pointer.
+impl Drop for Subkey {
+    fn drop(&mut self) {
+        self.h.zeroize();
+        for power in self.powers.iter_mut() {
+            power.zeroize();
+        }
+    }
 }
 
 impl Subkey {
@@ -140,7 +154,7 @@ impl<C> Clone for Engine<C> {
     fn clone(&self) -> Self {
         Engine {
             keys: self.keys,
-            subkey: self.subkey,
+            subkey: self.subkey.clone(),
         }
     }
 }
@@ -163,6 +177,16 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Engine<C> {
             keys: keys::<C>()?,
             subkey: Subkey::new(h)?,
         })
+    }
+}
+
+// The running hash is a function of the subkey and the message, and
+// the buffered block is the caller's data.
+impl<C> Drop for Hasher<'_, C> {
+    fn drop(&mut self) {
+        self.y.zeroize();
+        self.block.zeroize();
+        self.used.zeroize();
     }
 }
 
@@ -261,8 +285,12 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Hasher<'a, C> {
     ) {
         debug_assert_eq!(data.len() % BLOCK, 0);
         let Some(schedule) = (self.engine.keys)(cipher) else {
-            debug_assert!(false, "the cipher changed under the mode");
-            return;
+            // The engine is built for one cipher type, and only
+            // where the probe found these instructions, so that
+            // cipher's own backend is this one and the lookup
+            // cannot miss. Returning quietly would leave `data` as
+            // plaintext and the tag taken over nothing.
+            unreachable!("the cipher changed under the mode");
         };
         let groups = data.len() / SPAN;
         let (whole, rest) = data.split_at_mut(groups * SPAN);

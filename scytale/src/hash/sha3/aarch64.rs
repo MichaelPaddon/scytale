@@ -257,7 +257,6 @@ unsafe fn keccak_f1600(state: *mut u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hash::Hash;
     use crate::hash::sha3::portable::{self, keccak_f1600 as reference};
     use crate::hash::sha3::tests::{
         check_known_answers, check_matches_portable,
@@ -266,26 +265,30 @@ mod tests {
     #[test]
     fn known_answers() {
         if has_sha3() {
-            check_known_answers::<
-                Sha3_224,
-                Sha3_256,
-                Sha3_384,
-                Sha3_512,
-                Shake128,
-                Shake256,
-            >();
+            check_known_answers(
+                (
+                    || Sha3_224::try_new().expect("supported"),
+                    || Sha3_256::try_new().expect("supported"),
+                    || Sha3_384::try_new().expect("supported"),
+                    || Sha3_512::try_new().expect("supported"),
+                ),
+                (
+                    || Shake128::try_new().expect("supported"),
+                    || Shake256::try_new().expect("supported"),
+                ),
+            );
         }
     }
 
     #[test]
     fn matches_portable() {
         if has_sha3() {
-            check_matches_portable::<
-                Sha3_256,
-                portable::Sha3_256,
-                Shake128,
-                portable::Shake128,
-            >();
+            check_matches_portable(
+                || Sha3_256::try_new().expect("supported"),
+                || portable::Sha3_256::try_new().expect("portable"),
+                || Shake128::try_new().expect("supported"),
+                || portable::Shake128::try_new().expect("portable"),
+            );
         }
     }
 

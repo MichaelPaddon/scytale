@@ -609,6 +609,14 @@ pub(crate) mod tests {
 
     /// Checks one implementation against the portable one over many
     /// lengths, counters and chunkings.
+    #[cfg_attr(
+        not(any(
+            target_arch = "aarch64",
+            target_arch = "riscv64",
+            target_arch = "x86_64"
+        )),
+        allow(dead_code)
+    )]
     pub(crate) fn check_matches_portable<B: Backend>() {
         let cipher = Cipher::<B>::try_new(&Key::from(KEY)).unwrap();
         let reference =

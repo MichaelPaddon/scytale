@@ -71,6 +71,7 @@ use self::none as arch;
 use self::riscv64 as arch;
 #[cfg(target_arch = "x86_64")]
 use self::x86_64 as arch;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Divides the subkey by `x` and puts its halves in the order a
 /// vector register wants them, least significant first.
@@ -115,6 +116,28 @@ pub(crate) struct Ghash {
     /// up, so that short messages never pay for it.
     powers: Option<[[u64; 2]; MAX_GROUP]>,
 }
+
+// The subkey is the key of the hash: anyone holding it can forge a
+// tag under the cipher key it came from, so it goes when the hash
+// does, along with everything prepared from it.
+impl Drop for Ghash {
+    fn drop(&mut self) {
+        self.h.zeroize();
+        self.y.zeroize();
+        self.block.zeroize();
+        self.used.zeroize();
+        if let Some((_, prepared)) = self.fast.as_mut() {
+            prepared.zeroize();
+        }
+        if let Some(powers) = self.powers.as_mut() {
+            for power in powers.iter_mut() {
+                power.zeroize();
+            }
+        }
+    }
+}
+
+impl ZeroizeOnDrop for Ghash {}
 
 impl Ghash {
     /// Starts a hash under subkey `h`, which is one block.
@@ -186,19 +209,23 @@ impl Ghash {
     /// returns what is left over. Does nothing where the architecture
     /// has no group multiply.
     fn absorb_groups<'a>(&mut self, data: &'a [u8]) -> &'a [u8] {
-        let Some((fast, h)) = self.fast else {
+        let Some((fast, h)) = self.fast.as_ref() else {
             return data;
         };
+        let fast = *fast;
         let group = fast.group();
         if group == 1 || data.len() < group * BLOCK {
             return data;
         }
         let span = group * BLOCK;
-        // A copy, so that the loop below can borrow the hash itself.
-        let powers = *self.powers.get_or_insert_with(|| powers_of(fast, &h));
+        // Borrowed where they lie, field by field, so that no copy of
+        // the subkey or its powers is left on this frame for the
+        // `Drop` below to miss.
+        let powers = self.powers.get_or_insert_with(|| powers_of(fast, h));
+        let y = &mut self.y;
         let mut groups = data.chunks_exact(span);
         for group in &mut groups {
-            fast.multiply_group(&mut self.y, &powers, group);
+            fast.multiply_group(y, powers, group);
         }
         groups.remainder()
     }
@@ -232,6 +259,8 @@ pub(crate) fn powers_of(
         fast.multiply(&mut power, h);
         *slot = fast.prepare(&power);
     }
+    // The highest power of the subkey, left on this frame otherwise.
+    power.zeroize();
     powers
 }
 

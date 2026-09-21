@@ -100,7 +100,13 @@ impl<C: BlockCipher> Engine<C> {
             counter[14],
             counter[15],
         ]);
-        if blocks == 0 || (u32::MAX - low) as usize + 1 < blocks {
+        // Counted in `u64`: the room is a counter-space quantity
+        // bounded by 2^32 by the standard, not a length of memory,
+        // and 2^32 does not fit a 32-bit `usize`. These files are
+        // built only for 64-bit architectures, so the cast was safe
+        // where it stood, but the shape is the one that bites.
+        let room = u64::from(u32::MAX - low) + 1;
+        if blocks == 0 || room < blocks as u64 {
             return false;
         }
         let run = if encrypt { seal } else { open };

@@ -26,7 +26,7 @@ use core::marker::PhantomData;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::hash::{BitHash, Hash};
-use crate::{BlockType, Error};
+use crate::{BlockType, ByteArray, Error};
 
 /// Keeps the traits here to this crate's own implementations.
 mod sealed {
@@ -75,7 +75,7 @@ pub trait Variant32: Clone + Sealed {
     /// The initial hash value.
     const IV: [u32; 8];
     /// The digest, a prefix of the final state.
-    type Output: Copy + AsRef<[u8]> + AsMut<[u8]>;
+    type Output: ByteArray;
     /// A digest of zeros, for the engine to fill.
     fn zero_output() -> Self::Output;
 }
@@ -85,7 +85,7 @@ pub trait Variant64: Clone + Sealed {
     /// The initial hash value.
     const IV: [u64; 8];
     /// The digest, a prefix of the final state.
-    type Output: Copy + AsRef<[u8]> + AsMut<[u8]>;
+    type Output: ByteArray;
     /// A digest of zeros, for the engine to fill.
     fn zero_output() -> Self::Output;
 }
@@ -135,6 +135,20 @@ macro_rules! engine {
             /// from the probe.
             pub(crate) fn with(compress: C) -> Self {
                 Self::from_state(compress, V::IV)
+            }
+
+            /// Asks the probe itself, for a backend named rather
+            /// than chosen.
+            ///
+            /// This is the one construction in the module that can
+            /// fail, and why it is not in [`Hash`]: naming a backend
+            /// the processor has not got is a real error, where the
+            /// dispatching types always have portable code to fall
+            /// back on. Only the benchmark and the vector suites
+            /// name one, so it exists only for them.
+            #[cfg(test)]
+            pub(crate) fn try_new() -> Result<Self, Error> {
+                C::probe().map(Self::with).ok_or(Error::NotSupported)
             }
 
             /// Starts from `iv` instead of the variant's own value,
@@ -231,10 +245,6 @@ macro_rules! engine {
 
         impl<C: $compress, V: $variant> Hash for $name<C, V> {
             type Output = V::Output;
-
-            fn try_new() -> Result<Self, Error> {
-                C::probe().map(Self::with).ok_or(Error::NotSupported)
-            }
 
             fn reset(&mut self) {
                 self.state = V::IV;

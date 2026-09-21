@@ -368,7 +368,7 @@ impl<'a> PublicKeyRef<'a> {
 
     /// Checks a PKCS#1 v1.5 signature; see
     /// [`PublicKey::verify_pkcs1`].
-    pub fn verify_pkcs1<H: DigestInfo>(
+    pub fn verify_pkcs1<H: DigestInfo + Default>(
         &self,
         message: &[u8],
         signature: &[u8],
@@ -388,7 +388,7 @@ impl<'a> PublicKeyRef<'a> {
 
     /// Checks a PSS signature made with a salt of the digest's
     /// length; see [`PublicKey::verify_pss`].
-    pub fn verify_pss<H: Hash>(
+    pub fn verify_pss<H: Hash + Default>(
         &self,
         message: &[u8],
         signature: &[u8],
@@ -402,7 +402,7 @@ impl<'a> PublicKeyRef<'a> {
 
     /// Checks a PSS signature made with a salt of `salt_len` bytes;
     /// see [`PublicKey::verify_pss_with_salt_len`].
-    pub fn verify_pss_with_salt_len<H: Hash>(
+    pub fn verify_pss_with_salt_len<H: Hash + Default>(
         &self,
         message: &[u8],
         signature: &[u8],
@@ -414,18 +414,35 @@ impl<'a> PublicKeyRef<'a> {
         let em = &mut em[..len];
         self.verify_primitive(signature, em, scratch)?;
         let h_len = size_of::<H::Output>();
-        if len < h_len + salt_len + 2 {
+        // The encoding is one bit narrower than the modulus (RFC
+        // 8017 section 8.1.2), so it is `emBits` long and takes
+        // `emLen` bytes. For a modulus of 8k + 1 bits that is a byte
+        // fewer than the modulus takes: the integer's top byte is
+        // then no part of the encoding and has to be zero, and the
+        // mask is laid over what follows it, not over it.
+        let em_bits = self.bits() - 1;
+        let em_len = em_bits.div_ceil(8);
+        let (lead, em) = em.split_at_mut(len - em_len);
+        if lead.iter().any(|&b| b != 0) {
             return Err(Error::InvalidSignature);
         }
-        // EM = maskedDB || H || 0xbc, with the top bit clear because
-        // the encoding is one bit narrower than the modulus. A
-        // modulus whose bits are not a multiple of eight has more
-        // than one spare bit at the top, and all of them are clear.
-        let spare = 8 * len - (self.bits() - 1);
-        if em[len - 1] != 0xbc || em[0] >> (8 - spare) != 0 {
+        // `salt_len` is the caller's and may be anything, so the sum
+        // is checked: wrapped, it would pass this test and index
+        // past the end below.
+        let needed = salt_len
+            .checked_add(h_len + 2)
+            .ok_or(Error::InvalidSignature)?;
+        if em_len < needed {
             return Err(Error::InvalidSignature);
         }
-        let db_len = len - h_len - 1;
+        // EM = maskedDB || H || 0xbc, with the bits above `emBits`
+        // clear: none when it fills its bytes, up to seven when the
+        // modulus does not fill its top one.
+        let mask = 0xffu8 >> (8 * em_len - em_bits);
+        if em[em_len - 1] != 0xbc || em[0] & !mask != 0 {
+            return Err(Error::InvalidSignature);
+        }
+        let db_len = em_len - h_len - 1;
         let (masked_db, rest) = em.split_at_mut(db_len);
         let h = &rest[..h_len];
 
@@ -433,7 +450,7 @@ impl<'a> PublicKeyRef<'a> {
         let db = &mut db[..db_len];
         db.copy_from_slice(masked_db);
         mgf1_xor::<H>(h, db)?;
-        db[0] &= 0xffu8 >> spare;
+        db[0] &= mask;
 
         // DB = zeros || 0x01 || salt, with the salt exactly where
         // the fixed length puts it.
@@ -443,9 +460,9 @@ impl<'a> PublicKeyRef<'a> {
         }
         let salt = &db[separator + 1..];
 
-        let mut hasher = H::try_new()?;
+        let mut hasher = H::default();
         hasher.update(&[0u8; 8]);
-        hasher.update(H::digest(message)?.as_ref());
+        hasher.update(H::digest(message).as_ref());
         hasher.update(salt);
         if hasher.finalize().as_ref() == h {
             Ok(())
@@ -611,7 +628,7 @@ impl<'a> PrivateKeyRef<'a> {
     }
 
     /// Signs with PKCS#1 v1.5 padding; see [`PrivateKey::sign_pkcs1`].
-    pub fn sign_pkcs1<H: DigestInfo>(
+    pub fn sign_pkcs1<H: DigestInfo + Default>(
         &self,
         message: &[u8],
         scratch: &mut [u64],
@@ -626,7 +643,7 @@ impl<'a> PrivateKeyRef<'a> {
 
     /// Signs with PSS and a fresh salt of the digest's length drawn
     /// from `rng`; see [`PrivateKey::sign_pss`].
-    pub fn sign_pss<H: Hash, R: Random>(
+    pub fn sign_pss<H: Hash + Default, R: Random>(
         &self,
         rng: &mut R,
         message: &[u8],
@@ -634,7 +651,7 @@ impl<'a> PrivateKeyRef<'a> {
     ) -> Result<Signature, Error> {
         // A digest is the only value of the salt's length generic
         // code can make; what it held is overwritten.
-        let mut salt = H::digest(&[])?;
+        let mut salt = H::digest(&[]);
         rng.fill(salt.as_mut())?;
         let signature =
             self.sign_pss_with_salt::<H>(message, salt.as_ref(), scratch);
@@ -644,7 +661,7 @@ impl<'a> PrivateKeyRef<'a> {
 
     /// Signs with PSS and the given salt; see
     /// [`PrivateKey::sign_pss_with_salt`].
-    pub fn sign_pss_with_salt<H: Hash>(
+    pub fn sign_pss_with_salt<H: Hash + Default>(
         &self,
         message: &[u8],
         salt: &[u8],
@@ -652,17 +669,23 @@ impl<'a> PrivateKeyRef<'a> {
     ) -> Result<Signature, Error> {
         let len = self.modulus_len();
         let h_len = size_of::<H::Output>();
-        if len < h_len + salt.len() + 2 {
+        // As in verification: `emBits` is one less than the modulus,
+        // and for a modulus of 8k + 1 bits the encoding is a byte
+        // shorter than the modulus, behind a zero byte.
+        let em_bits = self.bits() - 1;
+        let em_len = em_bits.div_ceil(8);
+        if em_len < h_len + salt.len() + 2 {
             return Err(Error::InvalidLength(salt.len()));
         }
-        let mut em = [0u8; MAX_LEN];
-        let em = &mut em[..len];
-        let db_len = len - h_len - 1;
+        let mut whole = [0u8; MAX_LEN];
+        let whole = &mut whole[..len];
+        let (_, em) = whole.split_at_mut(len - em_len);
+        let db_len = em_len - h_len - 1;
 
         // H = hash(eight zeros || mHash || salt).
-        let mut hasher = H::try_new()?;
+        let mut hasher = H::default();
         hasher.update(&[0u8; 8]);
-        hasher.update(H::digest(message)?.as_ref());
+        hasher.update(H::digest(message).as_ref());
         hasher.update(salt);
         let h = hasher.finalize();
 
@@ -673,14 +696,13 @@ impl<'a> PrivateKeyRef<'a> {
             let (db, _) = em.split_at_mut(db_len);
             mgf1_xor::<H>(h.as_ref(), db)?;
         }
-        // One bit narrower than the modulus, and every spare bit of
-        // a modulus that does not fill its top byte is cleared too.
-        let spare = 8 * len - (self.bits() - 1);
-        em[0] &= 0xffu8 >> spare;
-        em[db_len..len - 1].copy_from_slice(h.as_ref());
-        em[len - 1] = 0xbc;
+        // The bits above `emBits` are cleared: none when it fills
+        // its bytes, up to seven when it does not.
+        em[0] &= 0xffu8 >> (8 * em_len - em_bits);
+        em[db_len..em_len - 1].copy_from_slice(h.as_ref());
+        em[em_len - 1] = 0xbc;
         let mut signature = Signature::zeroed(len);
-        self.raw.apply(em, signature.as_mut(), scratch)?;
+        self.raw.apply(whole, signature.as_mut(), scratch)?;
         Ok(signature)
     }
 
@@ -840,7 +862,7 @@ impl PublicKey {
     }
 
     /// Checks a PKCS#1 v1.5 signature over `message`.
-    pub fn verify_pkcs1<H: DigestInfo>(
+    pub fn verify_pkcs1<H: DigestInfo + Default>(
         &self,
         message: &[u8],
         signature: &[u8],
@@ -855,7 +877,7 @@ impl PublicKey {
     /// what most protocols fix the length at.
     ///
     /// [`sign_pss`]: PrivateKey::sign_pss
-    pub fn verify_pss<H: Hash>(
+    pub fn verify_pss<H: Hash + Default>(
         &self,
         message: &[u8],
         signature: &[u8],
@@ -872,7 +894,7 @@ impl PublicKey {
     /// signature: RFC 8017 verifies against a fixed value, and a
     /// verifier that accepts whatever length the padding claims
     /// lets a signature swap parameter sets.
-    pub fn verify_pss_with_salt_len<H: Hash>(
+    pub fn verify_pss_with_salt_len<H: Hash + Default>(
         &self,
         message: &[u8],
         signature: &[u8],
@@ -1091,7 +1113,7 @@ impl PrivateKey {
     }
 
     /// Signs `message` with PKCS#1 v1.5 padding.
-    pub fn sign_pkcs1<H: DigestInfo>(
+    pub fn sign_pkcs1<H: DigestInfo + Default>(
         &self,
         message: &[u8],
     ) -> Result<Signature, Error> {
@@ -1102,7 +1124,7 @@ impl PrivateKey {
     /// Signs `message` with PSS and a fresh salt of the digest's
     /// length, drawn from `rng`, which is what nearly every caller
     /// wants and what [`verify_pss`](PublicKey::verify_pss) expects.
-    pub fn sign_pss<H: Hash, R: Random>(
+    pub fn sign_pss<H: Hash + Default, R: Random>(
         &self,
         rng: &mut R,
         message: &[u8],
@@ -1116,7 +1138,7 @@ impl PrivateKey {
     /// a known answer. It must leave room in the key's length for
     /// the digest and two framing bytes, or the call is
     /// [`Error::InvalidLength`] with the salt's length.
-    pub fn sign_pss_with_salt<H: Hash>(
+    pub fn sign_pss_with_salt<H: Hash + Default>(
         &self,
         message: &[u8],
         salt: &[u8],
@@ -1253,12 +1275,12 @@ impl Drop for Scratch {
 
 /// EMSA-PKCS1-v1_5: `0x00 0x01 0xff.. 0x00 DigestInfo`, filling `em`
 /// exactly.
-fn encode_pkcs1<H: DigestInfo>(
+fn encode_pkcs1<H: DigestInfo + Default>(
     message: &[u8],
     em: &mut [u8],
 ) -> Result<(), Error> {
     let len = em.len();
-    let digest = H::digest(message)?;
+    let digest = H::digest(message);
     let t_len = H::PREFIX.len() + size_of::<H::Output>();
     if len < t_len + 11 {
         // The key is too narrow for this digest.
@@ -1570,6 +1592,105 @@ mod tests {
         padded[3..].copy_from_slice(&n);
         let key = PublicKey::try_new(&padded, &[1, 0, 1]).expect("key");
         assert_eq!(key.bits(), 2049);
+    }
+
+    /// A modulus of 8k + 1 bits, where RFC 8017 makes the PSS
+    /// encoding a byte shorter than the modulus: the signature is
+    /// OpenSSL's, over a 1025-bit key it generated, so this is the
+    /// standard's reading and not this crate's own. The mask has to
+    /// be laid over the encoding and not over the zero byte ahead of
+    /// it, which every length that fills its bytes cannot tell
+    /// apart.
+    #[test]
+    fn pss_over_a_modulus_of_one_bit_past_the_byte() {
+        let spki: [u8; 162] = unhex(
+            "30819f300d06092a864886f70d010101050003818d00308189028181017d\
+             46c9aab477b5033499e88980158ef0982e074241d54c28642d09d8bd7835\
+             15b99f7f55b351576673de4d12bbd46715a3b017491a60e2f89d2bf66e46\
+             c3d10ce25925ca1cd170dc057665c7b641375eb9cb2e8ef127cf1dcaf591\
+             48f65587a88ed897e68c4e0d6091fece54d2965f6a444a68a4f38ec0dcef\
+             6b801d29dd17ed0203010001",
+        );
+        let pkcs8: [u8; 637] = unhex(
+            "30820279020100300d06092a864886f70d0101010500048202633082025f\
+             020100028181017d46c9aab477b5033499e88980158ef0982e074241d54c\
+             28642d09d8bd783515b99f7f55b351576673de4d12bbd46715a3b017491a\
+             60e2f89d2bf66e46c3d10ce25925ca1cd170dc057665c7b641375eb9cb2e\
+             8ef127cf1dcaf59148f65587a88ed897e68c4e0d6091fece54d2965f6a44\
+             4a68a4f38ec0dcef6b801d29dd17ed020301000102818100a23bb2a7ce2e\
+             797929b2ab7d8660a5f7bde927f18b6da50032cfef36a83833ee50938b6c\
+             fde6089871890fa67f01bbf33b393c4f40c8250bc064ea70b5efb04d01f5\
+             11c1157305ba9302d163b6c11c132878370474fd82d04dba2b2e09c9734d\
+             2321f13a7cec53922ab0bf943a06a0894d12ca47a1779425f12ee196ccf7\
+             9049024101ac47d64dbf25e2f8b8745f4a365e1869e7614268fd5aaa80d4\
+             5d56dc8d4e3142f58f557218d41d4354892015d9ee770e19341301108e20\
+             cbce968acbbaa21aa7024100e3e760b99192fed85e9a525e817a1c1ba639\
+             d29efc06f18debcb5a921d21953d4673c2c0fe960b14cab77b6a4e3e9aef\
+             41f1f7e7f83c01acf0fa182b50248f4b024100bc81ca13e2649ca87917cf\
+             b16c88b21a3b1b960d7c266211de674f0a38b00802beeedddf208a8c6ecc\
+             50a6ecb745bce559b68ffed1f89cfad7ed6f1e0901bcd5024100957654b4\
+             de87aca271c87b64873d71d9a03623af2851d570e1c6c76b33b7a68c3cfc\
+             062953cd4b0f23b319392a7f5c54b4c6df723e15fc7352c671bb561fe3e9\
+             024100bc85b163bf81dc395dfc5715152da6ca801e11c87c275cefc860c7\
+             6b73707791013cdba15bc85d40180e8b9faf5825e4bca9f8989ce19dd25e\
+             96d4ef1d7e6135",
+        );
+        let signature_theirs: [u8; 129] = unhex(
+            "007142fba28d1c89ea8d99b5a0ae20d3aa51c8761bdda3b3efec9eb79b48\
+             689b15d12aac16f555b57a4dc9d9618ff06249d90297d2bf6bfba0e1cbfc\
+             19eecf04aaa16913fbe7d9a040d70c8832273aeaefb17014b3e820e5c08e\
+             15d276bbac78734de323bfaf325607b40fb5c02a2f8415e06c799bf3cc63\
+             9cc0b713ad292c244e",
+        );
+        let message = b"an odd length of modulus";
+        let public = PublicKey::try_from_der(&spki).expect("spki");
+        assert_eq!(public.bits(), 1025);
+        public
+            .verify_pss::<Sha256>(message, &signature_theirs)
+            .expect("OpenSSL's signature");
+
+        // And the other way: what this signs, it verifies, and the
+        // top byte of the encoding's integer stayed clear, which is
+        // what lets anyone else verify it too.
+        let private = PrivateKey::try_from_der(&pkcs8).expect("pkcs8");
+        let signature = private
+            .sign_pss_with_salt::<Sha256>(message, &[0x5a; 32])
+            .expect("sign");
+        public
+            .verify_pss::<Sha256>(message, signature.as_ref())
+            .expect("own signature");
+        // With the salt fixed the signature is too, and OpenSSL
+        // verified this one when the test was written.
+        let expected: [u8; 129] = unhex(
+            "000f25b17999c97f0cd8cdc7b3de0cfa9cd08c7754296031b5a8c26f92b5\
+             d05ee95bd56aaac42fc6aca6018cc55d3d8dc386eae01939451a7c45d24d\
+             5b4275718b8575dcd35524a0506b16af401faea234f48a01b1f5225f8f1d\
+             adf7606e97fab3012bac53a2e9064721c07623029ceaa53339f3c66f16c9\
+             7713a3c0443b52157c",
+        );
+        assert_eq!(signature.as_ref(), expected);
+
+        // A salt length no encoding could hold is refused, not
+        // added to until it wraps: `usize::MAX` used to pass the
+        // length test and index past the end.
+        for salt_len in [usize::MAX, usize::MAX - 33, usize::MAX / 2, 96] {
+            assert_eq!(
+                public.verify_pss_with_salt_len::<Sha256>(
+                    message,
+                    &signature_theirs,
+                    salt_len
+                ),
+                Err(Error::InvalidSignature),
+                "{salt_len}"
+            );
+        }
+
+        let mut wrong = signature_theirs;
+        wrong[64] ^= 1;
+        assert_eq!(
+            public.verify_pss::<Sha256>(message, &wrong),
+            Err(Error::InvalidSignature)
+        );
     }
 
     #[test]

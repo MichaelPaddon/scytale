@@ -46,7 +46,7 @@ pub fn run_aft<C: BlockCipher<Block = [u8; 16]>>() {
                         let mut state =
                             gcm.encryptor(&nonce).expect("encryptor");
                         state.aad(&aad).expect("aad");
-                        got = state.finalize().expect("finalize");
+                        got = state.finalize();
                     }
                 }
                 assert_eq!(got[..tag_len], expected, "{tag}");

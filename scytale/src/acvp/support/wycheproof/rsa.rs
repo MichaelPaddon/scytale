@@ -99,7 +99,7 @@ fn check_public_formats(group: &Value, key: &PublicKey) {
     assert_eq!(&out[..m], pem.as_bytes(), "PEM");
 }
 
-fn pkcs1<H: DigestInfo>(file: &str, counts: &mut Counts) {
+fn pkcs1<H: DigestInfo + Default>(file: &str, counts: &mut Counts) {
     let Some(doc) = load(file, "RSASSA-PKCS1-v1_5") else {
         return;
     };
@@ -117,7 +117,7 @@ fn pkcs1<H: DigestInfo>(file: &str, counts: &mut Counts) {
     }
 }
 
-fn pss<H: Hash>(file: &str, counts: &mut Counts) {
+fn pss<H: Hash + Default>(file: &str, counts: &mut Counts) {
     let Some(doc) = load(file, "RSASSA-PSS") else {
         return;
     };
@@ -138,7 +138,7 @@ fn pss<H: Hash>(file: &str, counts: &mut Counts) {
     }
 }
 
-fn oaep<H: Hash>(file: &str, counts: &mut Counts) {
+fn oaep<H: Hash + Default>(file: &str, counts: &mut Counts) {
     let Some(doc) = load(file, "RSAES-OAEP") else {
         return;
     };

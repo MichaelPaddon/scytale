@@ -33,7 +33,7 @@
 use super::super::{ByteOrder, add_counter};
 use crate::align::At16;
 use crate::cipher::BlockCipher;
-use crate::cipher::aes::x86_64::{Keys, has_aesni, keys};
+use crate::cipher::aes::x86_64::{Keys, has_aesni_avx, keys};
 use crate::implementation::Implementation;
 use crate::probe::Probe;
 
@@ -123,7 +123,7 @@ impl<C: BlockCipher> Engine<C> {
     pub(crate) fn of(implementation: Implementation) -> Option<Self> {
         let wide = match implementation {
             Implementation::Vaes if has_vaes() => true,
-            Implementation::Aesni if has_aesni() => false,
+            Implementation::Aesni if has_aesni_avx() => false,
             _ => return None,
         };
         Some(Engine {
@@ -146,8 +146,13 @@ impl<C: BlockCipher> Engine<C> {
     ) {
         debug_assert_eq!(data.len() % BLOCK, 0);
         let Some(schedule) = (self.keys)(cipher) else {
-            debug_assert!(false, "the cipher changed under the mode");
-            return;
+            // The engine is built for one cipher type, and only
+            // where the probe found these instructions, so that
+            // cipher's own backend is this one and the lookup
+            // cannot miss. Returning quietly would skip the XOR and
+            // leave `data` exactly as it came in: plaintext, with
+            // nothing said.
+            unreachable!("the cipher changed under the mode");
         };
         let (rk, rounds) = (schedule.keys(), schedule.rounds());
 
@@ -243,6 +248,13 @@ static PROBED: Probe = Probe::new();
 
 fn ask_vaes() -> bool {
     use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
+    // The wider loop finishes with the narrower one, and the cipher
+    // keeps a schedule these can read only where it took the AES
+    // instructions itself. A machine reporting VAES without AES-NI,
+    // which a hypervisor's mask can produce, has neither.
+    if !has_aesni_avx() {
+        return false;
+    }
     let leaf1 = __cpuid(1);
     let wanted = (1 << 27) | (1 << 28);
     if leaf1.ecx & wanted != wanted {

@@ -96,7 +96,7 @@ macro_rules! set {
                 message: &[u8],
             ) -> Option<Vec<u8>> {
                 let seed: [u8; 32] = seed.try_into().ok()?;
-                let key = $module::PrivateKey::try_from_seed(&seed).ok()?;
+                let key = $module::PrivateKey::from_seed(&seed);
                 // The PKCS#8, where the group has one, names the same
                 // key, and the key writes it back byte for byte.
                 if let Some(pkcs8) = pkcs8 {
@@ -120,7 +120,7 @@ macro_rules! set {
                 else {
                     return false;
                 };
-                let key = $module::PublicKey::try_new(&pk).expect("pk");
+                let key = $module::PublicKey::new(&pk);
                 let from_der = $module::PublicKey::try_from_der(der)
                     .expect("publicKeyDer");
                 assert_eq!(from_der.bytes(), pk);

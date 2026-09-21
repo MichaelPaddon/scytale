@@ -148,6 +148,14 @@ pub struct GcmSiv<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> {
     native: Option<Keys<C>>,
     /// Which one that is, so that the counter loop is told rather
     /// than asking the processor again per message.
+    #[cfg_attr(
+        not(any(
+            target_arch = "aarch64",
+            target_arch = "riscv64",
+            target_arch = "x86_64"
+        )),
+        allow(dead_code)
+    )]
     implementation: Implementation,
 }
 
@@ -219,10 +227,14 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> Aead for GcmSiv<C> {
         tag: &mut Self::Tag,
     ) -> Result<(), Error> {
         check(aad, data.len())?;
-        let (hash_key, cipher) = self.derive(nonce);
+        let (mut hash_key, cipher) = self.derive(nonce);
 
-        // The tag covers the plaintext, so it is computed first.
-        let full = authenticate(&hash_key, &cipher, nonce, aad, data)?;
+        // The tag covers the plaintext, so it is computed first. The
+        // key is wiped before the result is looked at, so that a
+        // refusal does not leave it behind.
+        let full = authenticate(&hash_key, &cipher, nonce, aad, data);
+        hash_key.zeroize();
+        let full = full?;
         let mut counter = full;
         counter[BLOCK - 1] |= 0x80;
         self.apply(&cipher, &mut counter, data);
@@ -239,7 +251,7 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> Aead for GcmSiv<C> {
         tag: &Self::Tag,
     ) -> Result<(), Error> {
         check(aad, data.len())?;
-        let (hash_key, cipher) = self.derive(nonce);
+        let (mut hash_key, cipher) = self.derive(nonce);
 
         // The counter comes from the tag, so the message can be
         // decrypted before the tag is known to be right; then the tag
@@ -253,8 +265,13 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> Aead for GcmSiv<C> {
             aad,
             &mut counter,
             data,
-        )?;
-        if constant_time::equal(&full, tag) {
+        );
+        // This message's authentication key, derived from the nonce;
+        // wiped before the result is looked at, so that a refusal
+        // does not leave it behind.
+        hash_key.zeroize();
+        let ok = constant_time::equal(&full?, tag);
+        if ok {
             Ok(())
         } else {
             data.fill(0);
@@ -402,6 +419,8 @@ impl<C: BlockCipher<Block = [u8; BLOCK], Key: SivKey>> GcmSiv<C> {
             block[4..BLOCK].copy_from_slice(nonce);
             self.cipher.encrypt_one(&mut block);
             material[i * 8..(i + 1) * 8].copy_from_slice(&block[..8]);
+            // Its first half is derived key material.
+            block.zeroize();
         }
         let mut hash_key = [0u8; BLOCK];
         hash_key.copy_from_slice(&material[..BLOCK]);
@@ -736,7 +755,7 @@ mod tests {
             let mut wanted_tag = [0u8; TAG];
             generic
                 .encrypt(&nonce, &aad, &mut want[..len], &mut wanted_tag)
-                .unwrap();
+                .expect("encrypt");
 
             for &implementation in CHOICES {
                 let Some(siv) =

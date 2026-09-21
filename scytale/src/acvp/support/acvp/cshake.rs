@@ -19,7 +19,7 @@ use serde_json::Value;
 
 /// Runs the one-shot groups against the sponge `X`; a no-op without
 /// the vendored vectors.
-pub fn run_aft<X: SuffixXof>(file: &str, algorithm: &str) {
+pub fn run_aft<X: SuffixXof>(file: &str, algorithm: &str, start: fn() -> X) {
     let Some(doc) = load(file, algorithm, "1.0") else {
         return;
     };
@@ -32,7 +32,7 @@ pub fn run_aft<X: SuffixXof>(file: &str, algorithm: &str) {
             let bits = t["outLen"].as_u64().expect("outLen") as usize;
             let name = text(&t["functionName"]);
             let custom = customization(group, t);
-            let out = squeeze::<X>(&Message::of(t), &name, &custom, bits);
+            let out = squeeze(&Message::of(t), &name, &custom, bits, start);
             assert_eq!(
                 out,
                 hex(&t["md"]),
@@ -48,14 +48,14 @@ pub fn run_aft<X: SuffixXof>(file: &str, algorithm: &str) {
 
 /// Runs the Monte Carlo groups against `X`; a no-op without the
 /// vendored vectors.
-pub fn run_mct<X: SuffixXof>(file: &str, algorithm: &str) {
+pub fn run_mct<X: SuffixXof>(file: &str, algorithm: &str, start: fn() -> X) {
     let Some(doc) = load(file, algorithm, "1.0") else {
         return;
     };
     let mut count = 0;
     for group in doc["testGroups"].as_array().expect("testGroups") {
         if group["testType"] == "MCT" {
-            count += mct::<X>(group);
+            count += mct(group, start);
         }
     }
     assert!(count >= 3, "only {count} MCT steps");
@@ -82,8 +82,9 @@ fn squeeze<X: SuffixXof>(
     name: &[u8],
     custom: &[u8],
     bits: usize,
+    start: fn() -> X,
 ) -> Vec<u8> {
-    let sponge = X::try_new().expect("sponge");
+    let sponge = start();
     let mut xof = Core::with(sponge, name, custom);
     let (whole, tail) = message.split(Family::Sha3);
     xof.update(whole);
@@ -110,7 +111,7 @@ pub fn to_top(out: &mut [u8], bits: usize) {
 /// hashing the first 128 bits of the last output, with the next
 /// output length and customization taken from the last 16 bits of
 /// the output and the input.
-fn mct<X: SuffixXof>(group: &Value) -> usize {
+fn mct<X: SuffixXof>(group: &Value, start: fn() -> X) -> usize {
     let min_bits = group["minOutLen"].as_u64().expect("minOutLen") as usize;
     let max_bits = group["maxOutLen"].as_u64().expect("maxOutLen") as usize;
     let increment =
@@ -132,7 +133,7 @@ fn mct<X: SuffixXof>(group: &Value) -> usize {
                     bytes: inner.clone(),
                     bits: 128,
                 };
-                output = squeeze::<X>(&message, b"", &custom, out_bits);
+                output = squeeze(&message, b"", &custom, out_bits, start);
                 let right = rightmost_16(&output, out_bits);
                 out_bits =
                     min_bits + (right as usize % range) / increment * increment;

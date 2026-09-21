@@ -373,7 +373,6 @@ impl Compress64 for Zvknh {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hash::Hash;
     use crate::hash::sha2::portable;
     use crate::hash::sha2::tests::{
         check_known_answers, check_matches_portable,
@@ -382,21 +381,44 @@ mod tests {
     #[test]
     fn known_answers() {
         if has_sha256() && has_sha512() {
-            check_known_answers::<Sha224, Sha256, Sha384, Sha512>();
+            check_known_answers(
+                || Sha224::try_new().expect("supported"),
+                || Sha256::try_new().expect("supported"),
+                || Sha384::try_new().expect("supported"),
+                || Sha512::try_new().expect("supported"),
+            );
         }
     }
 
     #[test]
     fn matches_portable() {
         if has_sha256() {
-            check_matches_portable::<Sha224, portable::Sha224>();
-            check_matches_portable::<Sha256, portable::Sha256>();
+            check_matches_portable(
+                || Sha224::try_new().expect("supported"),
+                || portable::Sha224::try_new().expect("portable"),
+            );
+            check_matches_portable(
+                || Sha256::try_new().expect("supported"),
+                || portable::Sha256::try_new().expect("portable"),
+            );
         }
         if has_sha512() {
-            check_matches_portable::<Sha384, portable::Sha384>();
-            check_matches_portable::<Sha512, portable::Sha512>();
-            check_matches_portable::<Sha512_224, portable::Sha512_224>();
-            check_matches_portable::<Sha512_256, portable::Sha512_256>();
+            check_matches_portable(
+                || Sha384::try_new().expect("supported"),
+                || portable::Sha384::try_new().expect("portable"),
+            );
+            check_matches_portable(
+                || Sha512::try_new().expect("supported"),
+                || portable::Sha512::try_new().expect("portable"),
+            );
+            check_matches_portable(
+                || Sha512_224::try_new().expect("supported"),
+                || portable::Sha512_224::try_new().expect("portable"),
+            );
+            check_matches_portable(
+                || Sha512_256::try_new().expect("supported"),
+                || portable::Sha512_256::try_new().expect("portable"),
+            );
         }
     }
 

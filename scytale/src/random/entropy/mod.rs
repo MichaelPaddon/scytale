@@ -10,8 +10,14 @@
 //! | Source | What it asks |
 //! | --- | --- |
 //! | [`System`] | whoever on this machine is best placed to know |
-//! | [`Processor`] | the processor's own generator, health tested |
 //! | yours | whatever you implement [`Entropy`] over |
+//!
+//! [`System`] is one name with one shape on every target, so code
+//! written over it builds for all of them. With an operating system
+//! it asks that. With none it reads the processor's own generator,
+//! health tested, and that is the only place the processor is asked:
+//! an operating system already mixes that generator in with
+//! everything else it has, and asking past it gains nothing.
 //!
 //! A board with a generator of its own implements
 //! [`Entropy`] over it and is served as well
@@ -33,13 +39,9 @@
 //! let mut key = [0u8; 32];
 //! rng.fill(&mut key)?;
 //!
-//! // The processor's own generator, asked for by name, where the
-//! // processor has one: not every architecture offers it to user
-//! // space, so this is the shape such a call has to take.
-//! if let Ok(source) = entropy::Processor::try_new() {
-//!     let mut own = CtrDrbg::try_new(source)?;
-//!     own.fill(&mut key)?;
-//! }
+//! // The same, with the source named.
+//! let mut named = CtrDrbg::try_new(entropy::System::try_new()?)?;
+//! named.fill(&mut key)?;
 //!
 //! // Hardware of your own: a noise source on a bus, read however
 //! // the board reads it. The generator conditions what it gets and
@@ -80,12 +82,18 @@
 //! samples to seed a generator with, watched for signs the hardware
 //! has failed.
 
+// The processor's generator is what `System` is where there is no
+// operating system, and is built nowhere else but the tests, which
+// keep its sampling and its health testing run on real processors.
+#[cfg(any(target_os = "none", test))]
 mod bare;
 
 use crate::Error;
 use crate::random::Entropy;
+#[cfg(any(target_os = "none", test))]
 use crate::random::health::{Health, STARTUP};
 
+#[cfg(any(target_os = "none", test))]
 use bare::Sampler;
 
 /// The processor's own generator, watched as it is used.
@@ -95,19 +103,18 @@ use bare::Sampler;
 /// at all rather than one that hands out its output. Every sample
 /// drawn afterwards is examined too.
 ///
-/// Available where the processor has an instruction for it and an
-/// ordinary program may use it: `rdseed` or `rdrand` on x86-64,
-/// `rndr` on AArch64, and RISC-V's `seed` register on bare metal
-/// only, since under an operating system reading it raises an illegal
-/// instruction rather than declining. Elsewhere
-/// [`try_new`](Processor::try_new) returns [`Error::NotSupported`],
-/// and [`System`] is the way to reach the machine's own source.
+/// `rdseed` or `rdrand` on x86-64, `rndr` on AArch64 and the `seed`
+/// register on RISC-V. Not a name of its own in the interface: it is
+/// what [`System`] is where there is no operating system, so that a
+/// caller writes one thing for every target.
+#[cfg(any(target_os = "none", test))]
 #[derive(Clone, Debug)]
-pub struct Processor {
+struct Processor {
     sampler: Sampler,
     health: Health,
 }
 
+#[cfg(any(target_os = "none", test))]
 impl Processor {
     /// Finds the processor's generator and satisfies itself that it
     /// is working.
@@ -132,6 +139,7 @@ impl Processor {
     }
 }
 
+#[cfg(any(target_os = "none", test))]
 impl Entropy for Processor {
     fn fill(&mut self, out: &mut [u8]) -> Result<(), Error> {
         for piece in out.chunks_mut(8) {
@@ -149,7 +157,12 @@ impl Entropy for Processor {
 /// more than a library can reach, it is told when a virtual machine
 /// has been cloned, and it already mixes in the processor's generator
 /// along with everything else. Where there is no operating system,
-/// the processor itself, by way of [`Processor`].
+/// the processor itself: `rdseed` or `rdrand` on x86-64, `rndr` on
+/// AArch64 and the `seed` register on RISC-V, health tested in the
+/// manner of SP 800-90B at construction and on every sample after.
+///
+/// The name and its shape are the same on every target, so nothing
+/// written over it has to say where it runs.
 #[derive(Clone, Debug)]
 pub struct System(Inner);
 
@@ -158,9 +171,10 @@ impl System {
     ///
     /// # Errors
     ///
-    /// Where there is no operating system and the processor has no
-    /// generator either, the same errors as [`Processor::try_new`].
-    /// Where there is an operating system, this does not fail.
+    /// Where there is an operating system, this does not fail. Where
+    /// there is none, [`Error::NotSupported`] if the processor has no
+    /// generator and [`Error::EntropyUnavailable`] if it has one
+    /// that is not working.
     pub fn try_new() -> Result<Self, Error> {
         Inner::try_new().map(System)
     }

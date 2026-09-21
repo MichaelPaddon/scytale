@@ -43,13 +43,14 @@ use crate::hash::Hash;
 use crate::mac::Mac;
 use crate::mac::hmac::Hmac;
 use crate::{BlockType, Error};
+use zeroize::Zeroize;
 
 /// Fills `key` from `password` and `salt` with `iterations` rounds.
 ///
 /// Returns [`Error::InvalidIterations`] for zero iterations, and
 /// [`Error::InvalidLength`] if `key` is longer than the construction
 /// can number, which no real key is.
-pub fn pbkdf2<H: Hash + Clone + BlockType>(
+pub fn pbkdf2<H: Hash + Clone + BlockType + Default>(
     password: &[u8],
     salt: &[u8],
     iterations: u32,
@@ -63,7 +64,7 @@ pub fn pbkdf2<H: Hash + Clone + BlockType>(
     }
     // The password is the HMAC key, processed once here rather than
     // once per iteration.
-    let mut mac = Hmac::<H>::try_new(password)?;
+    let mut mac = Hmac::<H>::new(password);
     for (i, chunk) in key.chunks_mut(size_of::<H::Output>()).enumerate() {
         // U_1 = PRF(P, S || INT(i)), then U_j = PRF(P, U_{j-1}).
         mac.update(salt);
@@ -78,6 +79,9 @@ pub fn pbkdf2<H: Hash + Clone + BlockType>(
             }
         }
         chunk.copy_from_slice(&t.as_ref()[..chunk.len()]);
+        // Both are output key material the caller already has.
+        u.as_mut().zeroize();
+        t.as_mut().zeroize();
     }
     Ok(())
 }

@@ -36,7 +36,7 @@
 //! let key = PrivateKey::generate(&mut rng)?;
 //! let signature = key.sign(&mut rng, b"", b"release v1.2")?;
 //!
-//! let public = PublicKey::try_new(&key.public_key().bytes())?;
+//! let public = PublicKey::new(&key.public_key().bytes());
 //! public.verify(b"", b"release v1.2", &signature)?;
 //! assert!(public.verify(b"", b"release v1.3", &signature).is_err());
 //! # Ok(())
@@ -273,7 +273,7 @@ trait Family {
 struct Shake;
 
 fn shake(parts: &[&[u8]], out: &mut [u8]) -> Result<(), Error> {
-    let mut xof = Shake256::try_new()?;
+    let mut xof = Shake256::new();
     for part in parts {
         xof.update(part);
     }
@@ -305,7 +305,7 @@ impl Family for Shake {
         message: &[&[u8]],
         out: &mut [u8],
     ) -> Result<(), Error> {
-        let mut xof = Shake256::try_new()?;
+        let mut xof = Shake256::new();
         xof.update(r);
         xof.update(pk_seed);
         xof.update(pk_root);
@@ -334,7 +334,7 @@ impl Family for Shake {
         message: &[&[u8]],
         out: &mut [u8],
     ) -> Result<(), Error> {
-        let mut xof = Shake256::try_new()?;
+        let mut xof = Shake256::new();
         xof.update(sk_prf);
         xof.update(opt_rand);
         for part in message {
@@ -361,7 +361,7 @@ impl Family for Shake {
         parts: &[&[u8]],
         out: &mut [u8],
     ) -> Result<(), Error> {
-        let mut xof = Shake256::try_new()?;
+        let mut xof = Shake256::new();
         xof.update(&seeded.seed[..seeded.n]);
         xof.update(&adrs.0);
         for part in parts {
@@ -380,8 +380,11 @@ struct Sha2;
 
 /// A hash that has taken the public seed padded to its block, so the
 /// seed's compression is done once for a key.
-fn sha2_seeded<H: Hash>(block: usize, pk_seed: &[u8]) -> Result<H, Error> {
-    let mut hash = H::try_new()?;
+fn sha2_seeded<H: Hash + Default>(
+    block: usize,
+    pk_seed: &[u8],
+) -> Result<H, Error> {
+    let mut hash = H::default();
     hash.update(pk_seed);
     hash.update(&[0u8; 128][..block - pk_seed.len()]);
     Ok(hash)
@@ -389,7 +392,7 @@ fn sha2_seeded<H: Hash>(block: usize, pk_seed: &[u8]) -> Result<H, Error> {
 
 /// `Trunc_n` of a hash over the parts, from `seeded`, which has taken
 /// the padded seed already.
-fn sha2_tweaked<H: Hash + Clone>(
+fn sha2_tweaked<H: Hash + Clone + Default>(
     seeded: &H,
     adrs: &Adrs,
     parts: &[&[u8]],
@@ -406,10 +409,13 @@ fn sha2_tweaked<H: Hash + Clone>(
 }
 
 /// MGF1 over `seed`, `out.len()` bytes.
-fn mgf1<H: Hash>(seed: &[&[u8]], out: &mut [u8]) -> Result<(), Error> {
+fn mgf1<H: Hash + Default>(
+    seed: &[&[u8]],
+    out: &mut [u8],
+) -> Result<(), Error> {
     let size = size_of::<H::Output>();
     for (counter, chunk) in out.chunks_mut(size).enumerate() {
-        let mut hash = H::try_new()?;
+        let mut hash = H::default();
         for part in seed {
             hash.update(part);
         }
@@ -422,14 +428,14 @@ fn mgf1<H: Hash>(seed: &[&[u8]], out: &mut [u8]) -> Result<(), Error> {
 
 /// `H_msg` for the SHA2 family with hash `H`: MGF1 over the
 /// randomiser, the seed and a digest of everything.
-fn sha2_h_msg<H: Hash>(
+fn sha2_h_msg<H: Hash + Default>(
     r: &[u8],
     pk_seed: &[u8],
     pk_root: &[u8],
     message: &[&[u8]],
     out: &mut [u8],
 ) -> Result<(), Error> {
-    let mut hash = H::try_new()?;
+    let mut hash = H::default();
     hash.update(r);
     hash.update(pk_seed);
     hash.update(pk_root);
@@ -441,13 +447,13 @@ fn sha2_h_msg<H: Hash>(
 }
 
 /// `PRF_msg` for the SHA2 family: truncated HMAC.
-fn sha2_prf_msg<H: Hash + Clone + BlockType>(
+fn sha2_prf_msg<H: Hash + Clone + BlockType + Default>(
     sk_prf: &[u8],
     opt_rand: &[u8],
     message: &[&[u8]],
     out: &mut [u8],
 ) -> Result<(), Error> {
-    let mut mac = Hmac::<H>::try_new(sk_prf)?;
+    let mut mac = Hmac::<H>::new(sk_prf);
     mac.update(opt_rand);
     for part in message {
         mac.update(part);
@@ -1228,8 +1234,8 @@ macro_rules! parameter_set {
             /// recomputing the root would cost a signature's worth of
             /// hashing, so they are taken as given: a wrong root makes
             /// signatures that do not verify, and nothing worse.
-            pub fn try_new(bytes: &[u8; KEY_SIZE]) -> Result<Self, Error> {
-                Ok(Self::from_bytes(*bytes))
+            pub fn new(bytes: &[u8; KEY_SIZE]) -> Self {
+                Self::from_bytes(*bytes)
             }
 
             /// The key's bytes. The caller holds a secret now, and
@@ -1311,7 +1317,7 @@ macro_rules! parameter_set {
                 inner.end()?;
                 let bytes: &[u8; KEY_SIZE] =
                     bytes.try_into().map_err(|_| Error::InvalidEncoding)?;
-                Self::try_new(bytes)
+                Ok(Self::new(bytes))
             }
 
             /// Writes the key as a `PrivateKeyInfo` into the front of
@@ -1351,11 +1357,10 @@ macro_rules! parameter_set {
 
         impl PublicKey {
             /// A public key from its bytes, `PK.seed || PK.root`. Any
-            /// bytes of the length are a key.
-            pub fn try_new(
-                bytes: &[u8; PUBLIC_KEY_SIZE],
-            ) -> Result<Self, Error> {
-                Ok(PublicKey { bytes: *bytes })
+            /// bytes of the length are a key, so there is nothing to
+            /// report.
+            pub fn new(bytes: &[u8; PUBLIC_KEY_SIZE]) -> Self {
+                PublicKey { bytes: *bytes }
             }
 
             /// The key's bytes.
@@ -1388,7 +1393,7 @@ macro_rules! parameter_set {
                 }
                 let key: &[u8; PUBLIC_KEY_SIZE] =
                     key.try_into().map_err(|_| Error::InvalidEncoding)?;
-                Self::try_new(key)
+                Ok(Self::new(key))
             }
 
             /// Writes the key as a `SubjectPublicKeyInfo` into the
@@ -1521,7 +1526,7 @@ mod tests {
                     key.sign(&mut rng, &[0u8; 256], b"m").err(),
                     Some(Error::InvalidLength(256))
                 );
-                let again = PrivateKey::try_new(&key.key_bytes()).unwrap();
+                let again = PrivateKey::new(&key.key_bytes());
                 assert_eq!(again.public_key().bytes(), public.bytes());
 
                 let mut out = [0u8; 1024];

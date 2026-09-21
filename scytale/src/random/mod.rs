@@ -26,10 +26,11 @@
 //! ```
 //!
 //! [`from_system`](CtrDrbg::from_system) asks this machine for the
-//! seed. To choose the source yourself, name it:
-//! [`CtrDrbg::try_new(entropy::Processor::try_new()?)`](CtrDrbg::try_new).
-//! For entropy you gather some other way, implement [`Entropy`] over
-//! it and hand that to [`try_new`](CtrDrbg::try_new); there is no
+//! seed, on every target alike;
+//! [`CtrDrbg::try_new(entropy::System::try_new()?)`](CtrDrbg::try_new)
+//! is the same thing written out. For entropy you gather some other
+//! way, implement [`Entropy`] over it and hand that to
+//! [`try_new`](CtrDrbg::try_new); there is no
 //! way to build a generator from a seed you hold, on purpose, and the
 //! [rule below](#fork-snapshots-and-clones-the-rule) is why.
 //!
@@ -128,7 +129,6 @@
 //! | Source | What it asks |
 //! | --- | --- |
 //! | [`entropy::System`] | the system, or the processor if there is none |
-//! | [`entropy::Processor`] | the processor's own, health tested |
 //! | yours | whatever you implement [`Entropy`] over |
 //!
 //! A board with a generator of its own on a bus, or a ring
@@ -197,6 +197,9 @@
 //! known faults in them.
 
 pub mod entropy;
+// Only the processor's generator is health tested here, and it is
+// built only where `entropy` says: an operating system tests its own.
+#[cfg(any(target_os = "none", test))]
 pub(crate) mod health;
 
 use core::fmt;
@@ -747,6 +750,16 @@ struct Chain<'a> {
     chain: [u8; BLOCK_SIZE],
     block: [u8; BLOCK_SIZE],
     used: usize,
+}
+
+// The chain runs over the raw entropy, so each block of it is
+// conditioned seed material.
+impl Drop for Chain<'_> {
+    fn drop(&mut self) {
+        self.chain.zeroize();
+        self.block.zeroize();
+        self.used.zeroize();
+    }
 }
 
 impl<'a> Chain<'a> {

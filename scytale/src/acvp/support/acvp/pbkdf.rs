@@ -14,7 +14,7 @@ const FILE: &str = "ACVP-PBKDF-1.0/internalProjection.json";
 
 /// Runs the groups whose `hmacAlg` is `hmac_alg` against `H`; a
 /// no-op without the vendored vectors.
-pub fn run_aft<H: Hash + Clone + BlockType>(hmac_alg: &str) {
+pub fn run_aft<H: Hash + Clone + BlockType + Default>(hmac_alg: &str) {
     let Some(doc) = load(FILE, "PBKDF", "1.0") else {
         return;
     };

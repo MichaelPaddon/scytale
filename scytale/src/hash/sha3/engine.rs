@@ -75,7 +75,7 @@ pub trait Variant: Clone + Sealed {
 /// A fixed-length digest: SHA3-224 to SHA3-512.
 pub trait DigestVariant: Variant {
     /// The digest.
-    type Output: Copy + AsRef<[u8]> + AsMut<[u8]>;
+    type Output: ByteArray;
     /// A digest of zeros, for the sponge to fill.
     fn zero_output() -> Self::Output;
 }
@@ -243,7 +243,16 @@ impl<P: Permutation, V: Variant> Sponge<P, V> {
         }
     }
 
-    fn try_new() -> Result<Self, Error> {
+    /// Asks the probe itself, for a permutation named rather than
+    /// chosen.
+    ///
+    /// This is the one construction in the module that can fail, and
+    /// why it is not in [`Xof`]: naming a backend the processor has
+    /// not got is a real error, where the dispatching types always
+    /// have portable code to fall back on. Only the benchmark and
+    /// the vector suites name one, so it exists only for them.
+    #[cfg(test)]
+    pub(crate) fn try_new() -> Result<Self, Error> {
         P::probe().map(Self::with).ok_or(Error::NotSupported)
     }
 
@@ -285,10 +294,6 @@ impl<P: Permutation, V: Variant> BlockType for Sponge<P, V> {
 
 impl<P: Permutation, V: DigestVariant> Hash for Sponge<P, V> {
     type Output = V::Output;
-
-    fn try_new() -> Result<Self, Error> {
-        Sponge::try_new()
-    }
 
     fn reset(&mut self) {
         Sponge::reset(self)
@@ -348,10 +353,6 @@ impl<P: Permutation, V: XofVariant> fmt::Debug for Reader<P, V> {
 
 impl<P: Permutation, V: XofVariant> Xof for Sponge<P, V> {
     type Reader = Reader<P, V>;
-
-    fn try_new() -> Result<Self, Error> {
-        Sponge::try_new()
-    }
 
     fn reset(&mut self) {
         Sponge::reset(self)

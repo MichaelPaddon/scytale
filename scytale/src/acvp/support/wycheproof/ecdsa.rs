@@ -47,7 +47,11 @@ trait Curve {
     type Public;
     fn public(group: &Value) -> Self::Public;
     fn from_der(der: &[u8]) -> Option<Vec<u8>>;
-    fn verify<H: Hash>(key: &Self::Public, msg: &[u8], sig: &[u8]) -> bool;
+    fn verify<H: Hash + Default>(
+        key: &Self::Public,
+        msg: &[u8],
+        sig: &[u8],
+    ) -> bool;
 }
 
 macro_rules! curve {
@@ -84,7 +88,7 @@ macro_rules! curve {
                 $module::signature_from_der(der).ok().map(|s| s.to_vec())
             }
 
-            fn verify<H: Hash>(
+            fn verify<H: Hash + Default>(
                 key: &Self::Public,
                 msg: &[u8],
                 sig: &[u8],
@@ -101,7 +105,7 @@ macro_rules! curve {
 curve!(P256, p256, 32);
 curve!(P384, p384, 48);
 
-fn der<C: Curve, H: Hash>(file: &str, counts: &mut Counts) {
+fn der<C: Curve, H: Hash + Default>(file: &str, counts: &mut Counts) {
     let Some(doc) = load(file, "ECDSA") else {
         return;
     };
@@ -119,7 +123,7 @@ fn der<C: Curve, H: Hash>(file: &str, counts: &mut Counts) {
     }
 }
 
-fn fixed<C: Curve, H: Hash>(file: &str, counts: &mut Counts) {
+fn fixed<C: Curve, H: Hash + Default>(file: &str, counts: &mut Counts) {
     let Some(doc) = load(file, "ECDSA") else {
         return;
     };

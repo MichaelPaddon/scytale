@@ -77,10 +77,15 @@ impl Avx2 {
         digit: u64,
     ) -> (Uint<L>, Uint<L>) {
         debug_assert_eq!(L, 4);
+        // The loop is a do-while: a count of zero walks 2^64 entries
+        // rather than none. The AArch64 dispatch checks this where it
+        // calls; checking here covers both.
+        assert!(!table.is_empty());
         let mut out = [Uint::<L>::ZERO; 2];
         // SAFETY: `self` came from `probe`, so the instructions are
         // there; the entries are four limbs, which is what the caller
-        // holding one stands for, and the count is the table's own.
+        // holding one stands for, and the count is the table's own,
+        // which was just confirmed nonzero.
         unsafe {
             select(
                 table.as_ptr().cast::<u64>(),

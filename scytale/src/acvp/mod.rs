@@ -65,6 +65,14 @@ macro_rules! suites {
 
 /// As `hardware_suites!`, for a block cipher, which says whether the
 /// processor can run it rather than failing to be built.
+#[cfg_attr(
+    not(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    )),
+    allow(unused_macros)
+)]
 macro_rules! cipher_hardware_suites {
     ($name:ident, $ty:ty, $suite:ident, $what:literal, $kind:ident) => {
         mod $name {
@@ -114,6 +122,14 @@ macro_rules! hardware_suites {
 }
 
 /// The test bodies inside a hardware implementation's module.
+#[cfg_attr(
+    not(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    )),
+    allow(unused_macros)
+)]
 macro_rules! hardware_tests {
     ($ty:ty, $suite:ident, both) => {
         #[test]
@@ -154,6 +170,14 @@ macro_rules! widths {
 }
 
 /// As `widths!`, for a hardware implementation.
+#[cfg_attr(
+    not(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    )),
+    allow(unused_macros)
+)]
 macro_rules! hardware_widths {
     ($n128:ident, $n192:ident, $n256:ident, $($p:ident)::+,
      $suite:ident, $what:literal, $kind:ident) => {
@@ -421,7 +445,6 @@ macro_rules! sha2_suites {
         mod $name {
             use super::*;
             use crate::Error;
-            use crate::hash::Hash;
 
             /// Whether to run, reporting a skip when the processor
             /// cannot. A silent skip would look like a pass.
@@ -439,7 +462,9 @@ macro_rules! sha2_suites {
             #[test]
             fn acvp_aft() {
                 if supported() {
-                    sha_vectors::run_aft::<$ty>($file, $algorithm, $family);
+                    sha_vectors::run_aft($file, $algorithm, $family, || {
+                        <$ty>::try_new().expect("supported")
+                    });
                 }
             }
 
@@ -448,7 +473,9 @@ macro_rules! sha2_suites {
             #[ignore]
             fn acvp_mct() {
                 if supported() {
-                    sha_vectors::run_mct::<$ty>($file, $algorithm, $family);
+                    sha_vectors::run_mct($file, $algorithm, $family, || {
+                        <$ty>::try_new().expect("supported")
+                    });
                 }
             }
         }
@@ -652,7 +679,6 @@ macro_rules! shake_suites {
         mod $name {
             use super::*;
             use crate::Error;
-            use crate::hash::Xof;
 
             fn supported() -> bool {
                 match <$ty>::try_new() {
@@ -668,7 +694,9 @@ macro_rules! shake_suites {
             #[test]
             fn acvp_aft() {
                 if supported() {
-                    $run::run_aft::<$ty>($file, $algorithm);
+                    $run::run_aft($file, $algorithm, || {
+                        <$ty>::try_new().expect("supported")
+                    });
                 }
             }
 
@@ -677,7 +705,9 @@ macro_rules! shake_suites {
             #[ignore]
             fn acvp_mct() {
                 if supported() {
-                    $run::run_mct::<$ty>($file, $algorithm);
+                    $run::run_mct($file, $algorithm, || {
+                        <$ty>::try_new().expect("supported")
+                    });
                 }
             }
         }
@@ -795,10 +825,11 @@ mod sha_ldt {
     #[test]
     #[ignore]
     fn sha256() {
-        sha_vectors::run_ldt::<sha2::Sha256>(
+        sha_vectors::run_ldt(
             "ACVP-SHA2-256-1.0/internalProjection.json",
             "SHA2-256",
             Family::Sha2,
+            sha2::Sha256::new,
         );
     }
 
@@ -806,10 +837,11 @@ mod sha_ldt {
     #[test]
     #[ignore]
     fn sha512() {
-        sha_vectors::run_ldt::<sha2::Sha512>(
+        sha_vectors::run_ldt(
             "ACVP-SHA2-512-1.0/internalProjection.json",
             "SHA2-512",
             Family::Sha2,
+            sha2::Sha512::new,
         );
     }
 
@@ -818,10 +850,11 @@ mod sha_ldt {
     #[test]
     #[ignore]
     fn sha3_256() {
-        sha_vectors::run_ldt::<sha3::Sha3_256>(
+        sha_vectors::run_ldt(
             "ACVP-SHA3-256-2.0/internalProjection.json",
             "SHA3-256",
             Family::Sha3,
+            sha3::Sha3_256::new,
         );
     }
 }
@@ -829,29 +862,15 @@ mod sha_ldt {
 /// Defines the HMAC suite for one hash. HMAC's own work does not
 /// vary with the hash beneath it, and each hash has its own suites
 /// above, so this runs on the dispatching type: the fastest the
-/// processor has, and a check that the dispatch is sound. It skips,
-/// saying so, where a hash has no implementation at all.
+/// processor has, and a check that the dispatch is sound. There is
+/// nothing to skip: every processor can build a dispatching hash.
 macro_rules! hmac_suite {
     ($name:ident, $hash:ty, $file:literal, $algorithm:literal) => {
-        hmac_suite!($name, $hash, $file, $algorithm, "portable code");
-    };
-    ($name:ident, $hash:ty, $file:literal, $algorithm:literal,
-     $what:literal) => {
         mod $name {
             use super::*;
-            use crate::Error;
-            use crate::mac::hmac::Hmac;
 
             #[test]
             fn acvp_aft() {
-                match Hmac::<$hash>::try_new(&[0u8; 16]) {
-                    Ok(_) => {}
-                    Err(Error::NotSupported) => {
-                        eprintln!(concat!($what, " not available; skipping"));
-                        return;
-                    }
-                    Err(e) => panic!("{e}"),
-                }
                 hmac_vectors::run_aft::<$hash>($file, $algorithm);
             }
         }
@@ -1263,26 +1282,266 @@ mod hkdf {
     }
 }
 
-/// Every implementation this build holds, and whether this processor
-/// can run it. A suite whose implementation is absent skips, and a
-/// skip reads as a pass, so this is where a log says what was
-/// actually exercised:
+/// Every implementation this build holds, whether this processor
+/// can run it, and whether that is the right answer.
+///
+/// A suite whose implementation is absent skips, and a skip reads as
+/// a pass, so this is where a log says what was actually exercised:
 ///
 /// ```text
 /// cargo test --lib acvp::inventory -- --nocapture
 /// ```
+///
+/// It is also where the probes are held to account. Each row says
+/// which processor features its implementation needs, in the names
+/// the standard library detects them by, and the row has to be
+/// available exactly when the processor has them all. That fails in
+/// both directions: a probe that asks for less than its loop uses is
+/// caught on the first processor that has the one and not the other,
+/// before the loop is run there; and a probe that has started saying
+/// no everywhere, which would otherwise leave its implementation
+/// untested behind a run of passing skips, is caught on any machine
+/// that has the features. Emulated processors are what make the
+/// first of those happen: see the jobs in `ci.yml`.
+///
+/// A job that emulates a processor says what it expects of it in
+/// `SCYTALE_CPU_FEATURES`, a list separated by spaces. The list is
+/// checked against what the processor reports, so that an emulator
+/// too old to offer an extension fails the job rather than quietly
+/// testing nothing; and on RISC-V, where the standard library cannot
+/// yet be asked, the list is all the rows have to be checked against.
 mod inventory {
+    use std::cell::RefCell;
+    use std::string::String;
+    use std::vec::Vec;
     #[allow(unused_imports)]
-    use std::println;
+    use std::{format, println};
 
     use crate::Error;
     use crate::cipher::chacha20::Backend;
     use crate::cipher::{aes, chacha20};
-    use crate::hash::{Hash, sha2, sha3};
+    use crate::hash::{sha2, sha3};
+
+    /// Where an emulating job declares the processor's features.
+    const DECLARED: &str = "SCYTALE_CPU_FEATURES";
+
+    /// Every feature a row below is written in terms of.
+    #[cfg(target_arch = "x86_64")]
+    const FEATURES: &[&str] = &[
+        "aes",
+        "ssse3",
+        "sse4.1",
+        "avx",
+        "avx2",
+        "vaes",
+        "pclmulqdq",
+        "vpclmulqdq",
+        "sha",
+        "adx",
+        "bmi2",
+    ];
+    #[cfg(target_arch = "aarch64")]
+    const FEATURES: &[&str] = &["aes", "pmull", "sha2", "sha3"];
+    #[cfg(target_arch = "riscv64")]
+    const FEATURES: &[&str] = &[
+        "v", "zbb", "zbkb", "zkne", "zknd", "zknh", "zvkned", "zvknha",
+        "zvknhb", "zvbb", "zvkb", "zvkg",
+    ];
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    )))]
+    const FEATURES: &[&str] = &[];
+
+    /// What the standard library makes of `feature`, which is an
+    /// answer reached without any of this crate's probes; `None`
+    /// where it has no stable way to be asked.
+    #[allow(unused_variables)]
+    fn detected(feature: &str) -> Option<bool> {
+        #[cfg(target_arch = "x86_64")]
+        {
+            use std::arch::is_x86_feature_detected as has;
+            return Some(match feature {
+                "aes" => has!("aes"),
+                "ssse3" => has!("ssse3"),
+                "sse4.1" => has!("sse4.1"),
+                "avx" => has!("avx"),
+                "avx2" => has!("avx2"),
+                "vaes" => has!("vaes"),
+                "pclmulqdq" => has!("pclmulqdq"),
+                "vpclmulqdq" => has!("vpclmulqdq"),
+                "sha" => has!("sha"),
+                "adx" => has!("adx"),
+                "bmi2" => has!("bmi2"),
+                _ => return None,
+            });
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            use std::arch::is_aarch64_feature_detected as has;
+            return Some(match feature {
+                "aes" => has!("aes"),
+                "pmull" => has!("pmull"),
+                "sha2" => has!("sha2"),
+                "sha3" => has!("sha3"),
+                _ => return None,
+            });
+        }
+        #[allow(unreachable_code)]
+        None
+    }
+
+    /// The table as it is printed, and what was wrong with it.
+    struct Audit {
+        /// What the job said the processor has, if it said.
+        declared: Option<Vec<String>>,
+        wrong: RefCell<Vec<String>>,
+    }
+
+    impl Audit {
+        fn new() -> Self {
+            let declared = std::env::var(DECLARED).ok().map(|list| {
+                list.split_whitespace()
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+            });
+            let audit = Audit {
+                declared,
+                wrong: RefCell::new(Vec::new()),
+            };
+            let Some(declared) = &audit.declared else {
+                return audit;
+            };
+            for feature in declared {
+                assert!(
+                    FEATURES.contains(&feature.as_str()),
+                    "{DECLARED} names {feature}, which no row knows"
+                );
+            }
+            // The emulator has to be offering what the job thinks it
+            // is, or the job is not testing what it says.
+            for &feature in FEATURES {
+                let said = declared.iter().any(|d| d == feature);
+                if let Some(found) = detected(feature)
+                    && found != said
+                {
+                    audit.wrong.borrow_mut().push(format!(
+                        "{feature}: the processor reports {found}, \
+                         {DECLARED} says {said}"
+                    ));
+                }
+            }
+            audit
+        }
+
+        /// Whether the processor has `feature`, by the job's word
+        /// where it gave one and the standard library's otherwise.
+        fn has(&self, feature: &str) -> Option<bool> {
+            match &self.declared {
+                Some(declared) => Some(declared.iter().any(|d| d == feature)),
+                None => detected(feature),
+            }
+        }
+
+        /// Whether an implementation needing `requires` should be
+        /// available. Every entry is needed; an entry `a|b` is met
+        /// by either. `None` where there is nothing to ask.
+        fn expects(&self, requires: &[&str]) -> Option<bool> {
+            let mut all = true;
+            for entry in requires {
+                let mut any = false;
+                for feature in entry.split('|') {
+                    any |= self.has(feature)?;
+                }
+                all &= any;
+            }
+            Some(all)
+        }
+
+        fn report(&self, name: &str, available: bool, requires: &[&str]) {
+            self.row("", name, available, requires);
+        }
+
+        /// One row, under the heading `suite` where it has one: the
+        /// modes all call their implementations by the same names.
+        fn row(
+            &self,
+            suite: &str,
+            name: &str,
+            available: bool,
+            requires: &[&str],
+        ) {
+            let state = if available { "run" } else { "not available" };
+            println!("  {name:<32} {state}");
+            if let Some(expected) = self.expects(requires)
+                && expected != available
+            {
+                self.wrong.borrow_mut().push(format!(
+                    "{suite} {name}: {state}, but it needs {requires:?} \
+                     and the processor {} them",
+                    if expected { "has" } else { "lacks one of" }
+                ));
+            }
+        }
+
+        fn finish(self) {
+            let source = match (&self.declared, FEATURES.first()) {
+                (Some(_), _) => DECLARED,
+                (None, Some(&first)) if detected(first).is_some() => {
+                    "the standard library's detection"
+                }
+                _ => "nothing: there is no way to ask here",
+            };
+            println!("checked against {source}\n");
+            let wrong = self.wrong.into_inner();
+            assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+        }
+    }
+
+    /// What a mode's implementation needs. The counter, chaining and
+    /// tweak loops need what the cipher's own instructions need, in
+    /// the encoding they are written in; the two with a hash in the
+    /// loop need its multiply as well.
+    fn mode_requires(suite: &str, name: &str) -> Vec<&'static str> {
+        let hashes = matches!(suite, "AES-GCM" | "AES-GCM-SIV");
+        let mut needs: Vec<&'static str> = Vec::new();
+        match name {
+            // Written in the VEX encodings, so AES-NI is not enough.
+            "aesni" => {
+                needs.extend(["aes", "ssse3", "avx"]);
+                if hashes {
+                    needs.push("pclmulqdq");
+                }
+            }
+            "vaes" => {
+                needs.extend(["aes", "ssse3", "avx", "avx2", "vaes"]);
+                if hashes {
+                    needs.extend(["pclmulqdq", "vpclmulqdq"]);
+                }
+            }
+            "armv8" => {
+                needs.push("aes");
+                if hashes {
+                    needs.push("pmull");
+                }
+            }
+            // The counters are reversed with `vrev8`, which either
+            // of two extensions brings.
+            "zvkned" => {
+                needs.extend(["v", "zvkned", "zvbb|zvkb"]);
+                if hashes {
+                    needs.push("zvkg");
+                }
+            }
+            _ => {}
+        }
+        needs
+    }
 
     /// Every implementation of every mode that has more than one,
     /// under the cipher `C`.
-    fn modes<C>()
+    fn modes<C>(audit: &Audit)
     where
         C: crate::cipher::BlockCipher<
                 Block = [u8; 16],
@@ -1300,7 +1559,8 @@ mod inventory {
                    has: &dyn Fn(Implementation) -> bool| {
             println!("{suite}");
             for &i in all {
-                report(i.name(), has(i));
+                let needs = mode_requires(suite, i.name());
+                audit.row(suite, i.name(), has(i), &needs);
             }
         };
         one("AES-CBC", cbc::CHOICES, &|i| {
@@ -1323,9 +1583,11 @@ mod inventory {
         });
     }
 
-    /// Whether a hash can be built on this processor.
-    fn hash<H: Hash>() -> bool {
-        available(H::try_new().map(|_| ()))
+    /// Whether a hash can be built on this processor. The named
+    /// backends ask the probe, which is what can answer no; the
+    /// dispatching types pass their own infallible constructor.
+    fn hash<H>(start: fn() -> Result<H, Error>) -> bool {
+        available(start().map(|_| ()))
     }
 
     /// `NotSupported` is the absence of instructions; anything else
@@ -1338,125 +1600,181 @@ mod inventory {
         }
     }
 
-    fn report(name: &str, available: bool) {
-        let state = if available { "run" } else { "not available" };
-        println!("  {name:<32} {state}");
-    }
-
     #[test]
     fn implementations() {
+        let audit = Audit::new();
         println!("\nAES");
-        report("aes::Aes", true);
-        report(
+        audit.report("aes::Aes", true, &[]);
+        audit.report(
             "aes::portable::bitsliced::Aes",
             aes::portable::bitsliced::Aes::<16>::supported(),
+            &[],
         );
-        report(
+        audit.report(
             "aes::portable::ttable::Aes",
             aes::portable::ttable::Aes::<16>::supported(),
+            &[],
         );
         #[cfg(target_arch = "x86_64")]
         {
-            report(
+            // The cipher alone is in the legacy encodings; it is the
+            // loops over it, below, that are not.
+            audit.report(
                 "aes::x86_64::aesni::Aes",
                 aes::x86_64::aesni::Aes::<16>::supported(),
+                &["aes", "ssse3"],
             );
-            report(
+            audit.report(
                 "aes::x86_64::vaes::Aes",
                 aes::x86_64::vaes::Aes::<16>::supported(),
+                &["aes", "ssse3", "avx", "avx2", "vaes"],
             );
         }
         #[cfg(target_arch = "aarch64")]
-        report(
+        audit.report(
             "aes::aarch64::armv8::Aes",
             aes::aarch64::armv8::Aes::<16>::supported(),
+            &["aes"],
         );
         #[cfg(target_arch = "riscv64")]
         {
-            report(
+            audit.report(
                 "aes::riscv64::zkn::Aes",
                 aes::riscv64::zkn::Aes::<16>::supported(),
+                &["zkne", "zknd"],
             );
-            report(
+            audit.report(
                 "aes::riscv64::zvkned::Aes",
                 aes::riscv64::zvkned::Aes::<16>::supported(),
+                &["v", "zvkned"],
             );
         }
 
         // The modes and AEADs written out for particular
         // instructions, which are implementations in their own right
         // and validated by name like the ciphers above.
-        modes::<aes::Aes128>();
+        modes::<aes::Aes128>(&audit);
 
         // SHA-256 and SHA-512 are listed apart: they are different
         // instructions, and a processor can have one without the
         // other.
         println!("SHA-2");
-        report("sha2::Sha256", hash::<sha2::Sha256>());
-        report("sha2::Sha512", hash::<sha2::Sha512>());
-        report("sha2::portable::Sha256", hash::<sha2::portable::Sha256>());
-        report("sha2::portable::Sha512", hash::<sha2::portable::Sha512>());
+        audit.report("sha2::Sha256", hash(|| Ok(sha2::Sha256::new())), &[]);
+        audit.report("sha2::Sha512", hash(|| Ok(sha2::Sha512::new())), &[]);
+        audit.report(
+            "sha2::portable::Sha256",
+            hash(sha2::portable::Sha256::try_new),
+            &[],
+        );
+        audit.report(
+            "sha2::portable::Sha512",
+            hash(sha2::portable::Sha512::try_new),
+            &[],
+        );
+        // The rounds are the SHA instructions, and around them the
+        // loop shuffles bytes and inserts and blends words.
         #[cfg(target_arch = "x86_64")]
-        report("sha2::x86_64::Sha256", hash::<sha2::x86_64::Sha256>());
+        audit.report(
+            "sha2::x86_64::Sha256",
+            hash(sha2::x86_64::Sha256::try_new),
+            &["sha", "ssse3", "sse4.1"],
+        );
         #[cfg(target_arch = "aarch64")]
         {
-            report("sha2::aarch64::Sha256", hash::<sha2::aarch64::Sha256>());
-            report("sha2::aarch64::Sha512", hash::<sha2::aarch64::Sha512>());
+            audit.report(
+                "sha2::aarch64::Sha256",
+                hash(sha2::aarch64::Sha256::try_new),
+                &["sha2"],
+            );
+            // The standard library reports SHA-512 and SHA-3
+            // together, as one feature, which is how they arrive.
+            audit.report(
+                "sha2::aarch64::Sha512",
+                hash(sha2::aarch64::Sha512::try_new),
+                &["sha3"],
+            );
         }
         #[cfg(target_arch = "riscv64")]
         {
-            report(
+            audit.report(
                 "sha2::riscv64::zknh::Sha256",
-                hash::<sha2::riscv64::zknh::Sha256>(),
+                hash(sha2::riscv64::zknh::Sha256::try_new),
+                &["zknh"],
             );
-            report(
+            audit.report(
                 "sha2::riscv64::zknh::Sha512",
-                hash::<sha2::riscv64::zknh::Sha512>(),
+                hash(sha2::riscv64::zknh::Sha512::try_new),
+                &["zknh"],
             );
-            report(
+            audit.report(
                 "sha2::riscv64::zvknh::Sha256",
-                hash::<sha2::riscv64::zvknh::Sha256>(),
+                hash(sha2::riscv64::zvknh::Sha256::try_new),
+                &["v", "zvknha|zvknhb", "zvbb|zvkb"],
             );
-            report(
+            audit.report(
                 "sha2::riscv64::zvknh::Sha512",
-                hash::<sha2::riscv64::zvknh::Sha512>(),
+                hash(sha2::riscv64::zvknh::Sha512::try_new),
+                &["v", "zvknhb", "zvbb|zvkb"],
             );
         }
 
         println!("SHA-3");
-        report("sha3::Sha3_256", hash::<sha3::Sha3_256>());
-        report(
+        audit.report("sha3::Sha3_256", hash(|| Ok(sha3::Sha3_256::new())), &[]);
+        audit.report(
             "sha3::portable::Sha3_256",
-            hash::<sha3::portable::Sha3_256>(),
+            hash(sha3::portable::Sha3_256::try_new),
+            &[],
         );
         #[cfg(target_arch = "aarch64")]
-        report("sha3::aarch64::Sha3_256", hash::<sha3::aarch64::Sha3_256>());
+        audit.report(
+            "sha3::aarch64::Sha3_256",
+            hash(sha3::aarch64::Sha3_256::try_new),
+            &["sha3"],
+        );
 
         println!("ChaCha20");
-        report(
+        audit.report(
             "chacha20::portable::Portable",
             chacha20::portable::Portable::supported(),
+            &[],
         );
         #[cfg(target_arch = "x86_64")]
-        report(
+        audit.report(
             "chacha20::x86_64::Avx2",
             chacha20::x86_64::Avx2::supported(),
+            &["avx2"],
         );
         #[cfg(target_arch = "aarch64")]
-        report(
+        audit.report(
             "chacha20::aarch64::Neon",
             chacha20::aarch64::Neon::supported(),
+            &[],
         );
         #[cfg(target_arch = "riscv64")]
-        report(
+        audit.report(
             "chacha20::riscv64::Zvkb",
             chacha20::riscv64::Zvkb::supported(),
+            &["v", "zvbb|zvkb"],
         );
         #[cfg(target_arch = "riscv64")]
-        report(
+        audit.report(
             "chacha20::riscv64::Zbb",
             chacha20::riscv64::Zbb::supported(),
+            &["zbb|zbkb"],
         );
-        println!();
+
+        // The arithmetic behind the curves, RSA and the MACs, which
+        // has no suite of its own to skip and so no other place to
+        // say whether its written-out path was the one that ran.
+        #[cfg(target_arch = "x86_64")]
+        {
+            println!("Arithmetic");
+            audit.report(
+                "montgomery::x86_64::Adx",
+                crate::math::montgomery::x86_64::probe().is_some(),
+                &["adx", "bmi2"],
+            );
+        }
+        audit.finish();
     }
 }

@@ -32,7 +32,7 @@
 //! // A mode carries that over a message of any length.
 //! let ctr = Ctr::<Aes128>::new(&Key::from([0u8; 16]));
 //! let mut message = *b"a message of any length";
-//! ctr.encrypt(&[1u8; 16], &mut message)?;
+//! ctr.encrypt(&[1u8; 16], &mut message);
 //! # Ok(())
 //! # }
 //! ```
@@ -123,6 +123,16 @@ impl<C: BlockCipher + ?Sized> OneBlock for C {}
 /// it was asked for is one it has a hand-written implementation of
 /// the pair for. `C` is a type parameter, so the answer is a
 /// constant in each instantiation.
+// Only a mode with a loop written out for a named cipher asks, and
+// those exist only on the architectures below.
+#[cfg_attr(
+    not(any(
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "x86_64"
+    )),
+    allow(dead_code)
+)]
 pub(crate) fn is<T: BlockCipher, C: BlockCipher>() -> bool {
     TypeId::of::<T>() == TypeId::of::<C>()
 }

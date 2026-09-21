@@ -305,6 +305,11 @@ mod tests {
 
     #[test]
     fn known_answers() {
-        check_known_answers::<Sha224, Sha256, Sha384, Sha512>();
+        check_known_answers(
+            || Sha224::try_new().expect("portable"),
+            || Sha256::try_new().expect("portable"),
+            || Sha384::try_new().expect("portable"),
+            || Sha512::try_new().expect("portable"),
+        );
     }
 }

@@ -12,17 +12,15 @@
 //!
 //! # fn main() -> Result<(), scytale::Error> {
 //! // Written once, for any hash.
-//! fn fingerprint<H: Hash>(
-//!     parts: &[&[u8]],
-//! ) -> Result<H::Output, scytale::Error> {
-//!     let mut hash = H::try_new()?;
+//! fn fingerprint<H: Hash + Default>(parts: &[&[u8]]) -> H::Output {
+//!     let mut hash = H::default();
 //!     for part in parts {
 //!         hash.update(part);
 //!     }
-//!     Ok(hash.finalize())
+//!     hash.finalize()
 //! }
-//! assert_eq!(fingerprint::<Sha256>(&[b"ab", b"c"])?, Sha256::digest(b"abc")?);
-//! let wide = fingerprint::<Sha512_256>(&[b"abc"])?;
+//! assert_eq!(fingerprint::<Sha256>(&[b"ab", b"c"]), Sha256::digest(b"abc"));
+//! let wide = fingerprint::<Sha512_256>(&[b"abc"]);
 //! assert_eq!(wide.len(), 32);
 //!
 //! // Or as an object, for code that learns its hash at run time.
@@ -32,7 +30,7 @@
 //! }
 //! let mut sha256 = Sha256::new();
 //! let mut sha512_256 = Sha512_256::new();
-//! assert_eq!(feed(&mut sha256), Sha256::digest(b"abc")?);
+//! assert_eq!(feed(&mut sha256), Sha256::digest(b"abc"));
 //! assert_eq!(feed(&mut sha512_256), wide);
 //!
 //! // A message of 19 bits: two whole bytes, then the top three bits
@@ -40,7 +38,7 @@
 //! let mut hash = Sha256::new();
 //! hash.update(&[0xff, 0x00]);
 //! let digest = hash.finalize_bits(0b1010_0000, 3)?;
-//! assert_ne!(digest, Sha256::digest(&[0xff, 0x00, 0xa0])?);
+//! assert_ne!(digest, Sha256::digest(&[0xff, 0x00, 0xa0]));
 //! # Ok(())
 //! # }
 //! ```
@@ -85,12 +83,12 @@ pub mod sha3;
 
 #[cfg(doc)]
 use crate::BlockType;
-use crate::Error;
+use crate::{ByteArray, Error};
 
 /// A hash function over byte strings, computed incrementally.
 ///
-/// Only construction can fail, and then only for an implementation
-/// that needs instructions this processor lacks.
+/// Nothing here can fail. Construction is not part of the trait: a
+/// hash is made by its own type, which always can.
 /// [`finalize`](Hash::finalize) returns the digest and leaves the
 /// state as [`reset`](Hash::reset) would, so one state can hash
 /// message after message; a digest of a prefix means cloning first,
@@ -99,18 +97,14 @@ use crate::Error;
 /// The digest length is a type, not a constant, so the trait is
 /// usable as an object once it is named: `&mut dyn Hash<Output =
 /// [u8; 32]>` takes SHA-256, SHA-512/256 or SHA3-256 alike. Only
-/// [`try_new`](Hash::try_new) and [`digest`](Hash::digest) need the
+/// [`digest`](Hash::digest) and construction itself need the
 /// concrete type. The block a hash is built on is not part of this
 /// trait; the concrete types say it through [`BlockType`], for the
 /// constructions, HMAC among them, that are defined in terms of it.
 pub trait Hash {
-    /// The digest; `[u8; 32]` for SHA-256.
-    type Output: Copy + AsRef<[u8]> + AsMut<[u8]>;
-
-    /// Starts a new hash.
-    fn try_new() -> Result<Self, Error>
-    where
-        Self: Sized;
+    /// The digest; `[u8; 32]` for SHA-256. An array, so that its
+    /// length is the size of its type.
+    type Output: ByteArray;
 
     /// Returns to the state of a new hash, without asking the
     /// processor again.
@@ -125,13 +119,13 @@ pub trait Hash {
     fn finalize(&mut self) -> Self::Output;
 
     /// The digest of `data`, in one call.
-    fn digest(data: &[u8]) -> Result<Self::Output, Error>
+    fn digest(data: &[u8]) -> Self::Output
     where
-        Self: Sized,
+        Self: Sized + Default,
     {
-        let mut hash = Self::try_new()?;
+        let mut hash = Self::default();
         hash.update(data);
-        Ok(hash.finalize())
+        hash.finalize()
     }
 }
 
@@ -179,11 +173,6 @@ pub trait BitHash: Hash {
 pub trait Xof {
     /// What the output is squeezed from.
     type Reader: XofReader;
-
-    /// Starts a new function.
-    fn try_new() -> Result<Self, Error>
-    where
-        Self: Sized;
 
     /// Returns to the state of a new function, without asking the
     /// processor again.
@@ -239,9 +228,9 @@ mod tests {
         let mut sha256 = Sha256::new();
         let mut sha512_256 = Sha512_256::new();
         let mut sha3_256 = Sha3_256::new();
-        assert_eq!(feed(&mut sha256), Sha256::digest(b"abc").unwrap());
-        assert_eq!(feed(&mut sha512_256), Sha512_256::digest(b"abc").unwrap());
-        assert_eq!(feed(&mut sha3_256), Sha3_256::digest(b"abc").unwrap());
+        assert_eq!(feed(&mut sha256), Sha256::digest(b"abc"));
+        assert_eq!(feed(&mut sha512_256), Sha512_256::digest(b"abc"));
+        assert_eq!(feed(&mut sha3_256), Sha3_256::digest(b"abc"));
 
         fn squeeze(
             xof: &mut dyn Xof<Reader = sha3::Shake128Reader>,
@@ -276,15 +265,12 @@ mod tests {
     /// `finalize` leaves a new hash: the next message hashes alone.
     #[test]
     fn finalize_resets() {
-        fn check<H: Hash>() {
-            let mut hash = H::try_new().unwrap();
+        fn check<H: Hash + Default>() {
+            let mut hash = H::default();
             hash.update(b"garbage");
             let _ = hash.finalize();
             hash.update(b"abc");
-            assert_eq!(
-                hash.finalize().as_ref(),
-                H::digest(b"abc").unwrap().as_ref()
-            );
+            assert_eq!(hash.finalize().as_ref(), H::digest(b"abc").as_ref());
         }
         check::<Sha1>();
         check::<Sha256>();
@@ -294,14 +280,14 @@ mod tests {
 
     #[test]
     fn xof_finalize_resets() {
-        fn check<X: Xof>() {
-            let mut xof = X::try_new().unwrap();
+        fn check<X: Xof + Default>() {
+            let mut xof = X::default();
             xof.update(b"garbage");
             let _ = xof.finalize_xof();
             xof.update(b"abc");
             let mut again = [0u8; 40];
             xof.finalize_xof().squeeze(&mut again);
-            let mut fresh = X::try_new().unwrap();
+            let mut fresh = X::default();
             fresh.update(b"abc");
             let mut expected = [0u8; 40];
             fresh.finalize_xof().squeeze(&mut expected);

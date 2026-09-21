@@ -29,7 +29,7 @@
 //! use scytale::hash::Hash;
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let digest = Sha1::digest(b"abc")?;
+//! let digest = Sha1::digest(b"abc");
 //! assert_eq!(digest[..4], [0xa9, 0x99, 0x3e, 0x36]);
 //! # Ok(())
 //! # }
@@ -130,8 +130,7 @@ fn portable(state: &mut [u32; 5], blocks: &[[u8; 64]]) {
 }
 
 impl Sha1 {
-    /// Starts a new hash; the same as [`Hash::try_new`], which
-    /// cannot fail here.
+    /// Starts a new hash.
     pub fn new() -> Self {
         Sha1 {
             state: IV,
@@ -203,10 +202,6 @@ impl BlockType for Sha1 {
 
 impl Hash for Sha1 {
     type Output = [u8; 20];
-
-    fn try_new() -> Result<Self, Error> {
-        Ok(Self::new())
-    }
 
     fn reset(&mut self) {
         self.state = IV;
@@ -306,18 +301,17 @@ mod tests {
     #[test]
     fn known_answers() {
         assert_eq!(
-            Sha1::digest(b"").unwrap(),
+            Sha1::digest(b""),
             unhex("da39a3ee5e6b4b0d3255bfef95601890afd80709")
         );
         assert_eq!(
-            Sha1::digest(b"abc").unwrap(),
+            Sha1::digest(b"abc"),
             unhex("a9993e364706816aba3e25717850c26c9cd0d89d")
         );
         assert_eq!(
             Sha1::digest(
                 b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
-            )
-            .unwrap(),
+            ),
             unhex("84983e441c3bd26ebaae4aa1f95129e5e54670f1")
         );
         let mut hash = Sha1::new();
@@ -336,7 +330,7 @@ mod tests {
     fn pieces_agree_with_one_call() {
         let data: [u8; 200] = core::array::from_fn(|i| (i * 7) as u8);
         for len in [0usize, 1, 55, 56, 57, 63, 64, 65, 119, 120, 128, 200] {
-            let whole = Sha1::digest(&data[..len]).unwrap();
+            let whole = Sha1::digest(&data[..len]);
             for piece in [1usize, 3, 16, 63, 64, 65] {
                 let mut hash = Sha1::new();
                 for chunk in data[..len].chunks(piece) {
@@ -420,7 +414,7 @@ mod tests {
         hash.update(b"garbage");
         hash.reset();
         hash.update(b"abc");
-        assert_eq!(hash.clone().finalize(), Sha1::digest(b"abc").unwrap());
+        assert_eq!(hash.clone().finalize(), Sha1::digest(b"abc"));
         extern crate std;
         assert_eq!(std::format!("{hash:?}"), "Sha1 { bytes: 3 }");
     }

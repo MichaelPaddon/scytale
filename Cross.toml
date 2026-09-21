@@ -2,10 +2,18 @@
 # to run foreign-architecture tests under qemu. Plain cargo ignores
 # this file.
 
+[build.env]
+# The script sets this so that a suite which cannot find its vectors
+# fails instead of skipping; it has to reach the tests in the
+# container.
+passthrough = ["SCYTALE_VECTORS"]
+
 [target.riscv64gc-unknown-linux-gnu]
 # The stock image's qemu predates hwprobe support for the crypto
 # extensions; see the Dockerfile.
 dockerfile = "scripts/cross/riscv64gc-unknown-linux-gnu.Dockerfile"
 # qemu's default RISC-V CPU lacks the crypto extensions; the script
-# sets QEMU_CPU so the emulated CPU has them.
-env.passthrough = ["QEMU_CPU"]
+# sets QEMU_CPU so the emulated CPU has them, and says which it
+# expects in SCYTALE_CPU_FEATURES, which the inventory test holds
+# the probes to.
+env.passthrough = ["QEMU_CPU", "SCYTALE_CPU_FEATURES"]

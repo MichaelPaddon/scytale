@@ -45,7 +45,10 @@
 //!   drawing a new prefix each time, which is right for a program
 //!   that cannot store anything. It trades certainty for a collision
 //!   chance that depends on how wide the prefix is: one in 2^64
-//!   between runs, for the split in the example below. The prefix
+//!   between any two runs, for the split in the example below, which
+//!   over `r` runs under one key comes to about `r^2 / 2^65`. It
+//!   refuses a prefix under eight bytes, where that stops being
+//!   small. The prefix
 //!   comes from a generator, and a generator copied with the process
 //!   draws the same prefix on both sides: see
 //!   [the rule](crate::random#fork-snapshots-and-clones-the-rule).
@@ -89,6 +92,13 @@ use crate::traits::ByteArray;
 /// lives long enough to need.
 const COUNTER: usize = 8;
 
+/// The narrowest random fixed part [`Nonces::try_random`] will draw,
+/// in bytes. Sixty-four bits puts the chance of two runs sharing a
+/// prefix at one in 2^64, and of any pair among `r` runs at about
+/// `r^2 / 2^65`: a million runs under one key is one in 2^25. Each
+/// byte fewer costs a factor of 256, which is soon no margin at all.
+pub const RANDOM_MIN: usize = 8;
+
 /// A sequence of nonces that cannot repeat.
 ///
 /// `B` is the nonce, so its width is a type: `Nonces<[u8; 12]>` is
@@ -96,7 +106,13 @@ const COUNTER: usize = 8;
 /// [`GcmSiv`](crate::aead::GcmSiv), [`Ccm`](crate::aead::Ccm) and
 /// [`ChaCha20`](super::chacha20) all take. Read the warnings above
 /// before using one across restarts.
-#[derive(Clone, Debug)]
+// Deliberately not `Clone`. The whole of this type is a promise
+// that a value is handed out once; a copy is two sequences giving
+// out the same nonces under the same key, which is the failure the
+// warnings above are about, one word away. Where a second sequence
+// is genuinely wanted, build it with `try_new` from a fixed part
+// that differs.
+#[derive(Debug)]
 pub struct Nonces<B: ByteArray> {
     /// The nonce with its counter field zeroed.
     fixed: B,
@@ -149,6 +165,13 @@ impl<B: ByteArray> Nonces<B> {
     /// For programs that cannot store a counter between runs. Each
     /// run gets a fixed part of its own, so the sequences do not
     /// overlap unless two runs draw the same bytes.
+    ///
+    /// What is left for the fixed part has to be at least
+    /// [`RANDOM_MIN`] bytes, or this returns
+    /// [`Error::InvalidNonceLength`]: everything this call promises
+    /// rests on two runs not drawing the same prefix, and with one
+    /// byte of it they do within a couple of dozen runs, and with
+    /// none, every time.
     pub fn try_random(
         source: &mut impl Random,
         counter: usize,
@@ -162,6 +185,9 @@ impl<B: ByteArray> Nonces<B> {
             .len()
             .checked_sub(counter)
             .ok_or(Error::InvalidNonceLength(counter))?;
+        if at < RANDOM_MIN {
+            return Err(Error::InvalidNonceLength(counter));
+        }
         source.fill(&mut fixed.as_mut()[..at])?;
         Self::try_new(&fixed.as_ref()[..at], 0)
     }
@@ -296,7 +322,10 @@ mod tests {
             Nonces::<[u8; 16]>::try_new(&[0; 4], 0).unwrap_err(),
             Error::InvalidNonceLength(4)
         );
-        for counter in [0, 9] {
+        // Five to eight bytes of counter are counters, but leave a
+        // twelve-byte nonce under eight bytes to draw: eight leaves
+        // four, which two runs in 2^32 share.
+        for counter in [0, 5, 6, 7, 8, 9] {
             let seed = [0x5au8; MIN_SEED];
             let mut rng = CtrDrbg::from_seed(&seed).expect("seed");
             assert_eq!(
@@ -305,6 +334,28 @@ mod tests {
                 "counter of {counter}"
             );
         }
+    }
+
+    /// A nonce with no room for a drawn part refuses, rather than
+    /// handing every run the same sequence; one with room draws.
+    #[test]
+    fn a_random_prefix_has_a_floor() {
+        let seed = [0x5au8; MIN_SEED];
+        let mut rng = CtrDrbg::from_seed(&seed).expect("seed");
+        // All counter: nothing drawn at all.
+        assert_eq!(
+            Nonces::<[u8; 8]>::try_random(&mut rng, 8).unwrap_err(),
+            Error::InvalidNonceLength(8)
+        );
+        // One byte drawn.
+        assert_eq!(
+            Nonces::<[u8; 8]>::try_random(&mut rng, 7).unwrap_err(),
+            Error::InvalidNonceLength(7)
+        );
+        // Exactly the floor, and above it.
+        assert!(Nonces::<[u8; 12]>::try_random(&mut rng, 4).is_ok());
+        assert!(Nonces::<[u8; 16]>::try_random(&mut rng, 8).is_ok());
+        assert!(Nonces::<[u8; 12]>::try_random(&mut rng, 1).is_ok());
     }
 
     /// The last number is still handed out, and a start beyond the

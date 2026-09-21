@@ -39,7 +39,7 @@
 //! let key = PrivateKey::generate(&mut rng)?;
 //! let signature = key.sign(&mut rng, b"", b"release v1.2")?;
 //!
-//! let public = PublicKey::try_new(&key.public_key().bytes())?;
+//! let public = PublicKey::new(&key.public_key().bytes());
 //! public.verify(b"", b"release v1.2", &signature)?;
 //! assert!(public.verify(b"", b"release v1.3", &signature).is_err());
 //! # Ok(())
@@ -389,8 +389,8 @@ impl Poly {
 
     /// `RejNTTPoly`: the entry of `A` at `row`, `col`, from
     /// SHAKE-128 over the seed and the indices, column first.
-    fn sample_ntt(rho: &[u8; 32], row: u8, col: u8) -> Result<Poly, Error> {
-        let mut xof = Shake128::try_new()?;
+    fn sample_ntt(rho: &[u8; 32], row: u8, col: u8) -> Poly {
+        let mut xof = Shake128::new();
         xof.update(rho);
         xof.update(&[col, row]);
         let mut reader = xof.finalize_xof();
@@ -409,13 +409,13 @@ impl Poly {
                 }
             }
         }
-        Ok(out)
+        out
     }
 
     /// `RejBoundedPoly`: coefficients in `[-eta, eta]` from SHAKE-256
     /// over the seed and a two-byte index, one nibble a candidate.
-    fn sample_bounded(eta: u32, rho: &[u8; 64], r: u16) -> Result<Poly, Error> {
-        let mut xof = Shake256::try_new()?;
+    fn sample_bounded(eta: u32, rho: &[u8; 64], r: u16) -> Poly {
+        let mut xof = Shake256::new();
         xof.update(rho);
         xof.update(&r.to_le_bytes());
         let mut reader = xof.finalize_xof();
@@ -439,13 +439,13 @@ impl Poly {
             }
         }
         out.0.iter_mut().for_each(|c| *c = csub(*c));
-        Ok(out)
+        out
     }
 
     /// `SampleInBall`: `tau` coefficients of `1` or `-1` placed by a
     /// shuffle driven by SHAKE-256 over the challenge hash.
-    fn sample_in_ball(tau: usize, c_tilde: &[u8]) -> Result<Poly, Error> {
-        let mut xof = Shake256::try_new()?;
+    fn sample_in_ball(tau: usize, c_tilde: &[u8]) -> Poly {
+        let mut xof = Shake256::new();
         xof.update(c_tilde);
         let mut reader = xof.finalize_xof();
         let mut signs = [0u8; 8];
@@ -465,7 +465,7 @@ impl Poly {
             let negative = (signs >> (i + tau - N)) & 1 == 1;
             out.0[j] = if negative { Q - 1 } else { 1 };
         }
-        Ok(out)
+        out
     }
 }
 
@@ -476,26 +476,23 @@ impl Zeroize for Poly {
 }
 
 /// `H`, SHAKE-256 over the parts, `out.len()` bytes.
-fn h(parts: &[&[u8]], out: &mut [u8]) -> Result<(), Error> {
-    let mut xof = Shake256::try_new()?;
+fn h(parts: &[&[u8]], out: &mut [u8]) {
+    let mut xof = Shake256::new();
     for part in parts {
         xof.update(part);
     }
     xof.finalize_xof().squeeze(out);
-    Ok(())
 }
 
 /// The expanded matrix `A` in the transform domain, `ExpandA`.
-fn expand_a<const K: usize, const L: usize>(
-    rho: &[u8; 32],
-) -> Result<[[Poly; L]; K], Error> {
+fn expand_a<const K: usize, const L: usize>(rho: &[u8; 32]) -> [[Poly; L]; K] {
     let mut a = [[Poly::ZERO; L]; K];
     for (r, row) in a.iter_mut().enumerate() {
         for (s, entry) in row.iter_mut().enumerate() {
-            *entry = Poly::sample_ntt(rho, r as u8, s as u8)?;
+            *entry = Poly::sample_ntt(rho, r as u8, s as u8);
         }
     }
-    Ok(a)
+    a
 }
 
 /// `A v` for `v` already in the transform domain, the result too.
@@ -576,24 +573,24 @@ fn key_gen<const K: usize, const L: usize>(
     xi: &[u8; SEED],
     pk: &mut [u8],
     sk: &mut [u8],
-) -> Result<(), Error> {
+) {
     let p = params::<K>();
     let mut seeds = [0u8; 128];
-    h(&[xi, &[K as u8, L as u8]], &mut seeds)?;
+    h(&[xi, &[K as u8, L as u8]], &mut seeds);
     let mut rho = [0u8; 32];
     rho.copy_from_slice(&seeds[..32]);
     let mut rho_prime = [0u8; 64];
     rho_prime.copy_from_slice(&seeds[32..96]);
     let key = &seeds[96..];
 
-    let a = expand_a::<K, L>(&rho)?;
+    let a = expand_a::<K, L>(&rho);
     let mut s1 = [Poly::ZERO; L];
     let mut s2 = [Poly::ZERO; K];
     for (r, s) in s1.iter_mut().enumerate() {
-        *s = Poly::sample_bounded(p.eta, &rho_prime, r as u16)?;
+        *s = Poly::sample_bounded(p.eta, &rho_prime, r as u16);
     }
     for (r, s) in s2.iter_mut().enumerate() {
-        *s = Poly::sample_bounded(p.eta, &rho_prime, (L + r) as u16)?;
+        *s = Poly::sample_bounded(p.eta, &rho_prime, (L + r) as u16);
     }
     let mut s1_hat = s1;
     s1_hat.iter_mut().for_each(Poly::ntt);
@@ -613,7 +610,7 @@ fn key_gen<const K: usize, const L: usize>(
     }
     encode_public(&rho, &t1, pk);
     let mut tr = [0u8; 64];
-    h(&[pk], &mut tr)?;
+    h(&[pk], &mut tr);
 
     // skEncode: rho || K || tr || s1 || s2 || t0.
     sk[..32].copy_from_slice(&rho);
@@ -635,7 +632,6 @@ fn key_gen<const K: usize, const L: usize>(
     s2.zeroize();
     s1_hat.zeroize();
     t0.zeroize();
-    Ok(())
 }
 
 /// The private key's parts, decoded and transformed once for a
@@ -711,7 +707,7 @@ fn check_private<const K: usize, const L: usize>(
         return Ok(false);
     }
     let e = Expanded::<K, L>::decode(sk);
-    let a = expand_a::<K, L>(&e.rho)?;
+    let a = expand_a::<K, L>(&e.rho);
     let mut t = matrix_mul(&a, &e.s1_hat);
     let mut t1 = [Poly::ZERO; K];
     let mut same = true;
@@ -730,7 +726,7 @@ fn check_private<const K: usize, const L: usize>(
     }
     encode_public(&e.rho, &t1, pk);
     let mut tr = [0u8; 64];
-    h(&[pk], &mut tr)?;
+    h(&[pk], &mut tr);
     Ok(same && constant_time::equal(&tr, &e.tr))
 }
 
@@ -744,10 +740,10 @@ fn sign<const K: usize, const L: usize>(
 ) -> Result<(), Error> {
     let p = params::<K>();
     let e = Expanded::<K, L>::decode(sk);
-    let a = expand_a::<K, L>(&e.rho)?;
+    let a = expand_a::<K, L>(&e.rho);
     let mut mu = [0u8; 64];
     {
-        let mut xof = Shake256::try_new()?;
+        let mut xof = Shake256::new();
         xof.update(&e.tr);
         for part in m_prime {
             xof.update(part);
@@ -755,7 +751,7 @@ fn sign<const K: usize, const L: usize>(
         xof.finalize_xof().squeeze(&mut mu);
     }
     let mut rho_double = [0u8; 64];
-    h(&[&e.key, rnd, &mu], &mut rho_double)?;
+    h(&[&e.key, rnd, &mu], &mut rho_double);
 
     let z_len = 32 * p.z_bits;
     let w1_len = 32 * p.w1_bits;
@@ -770,10 +766,24 @@ fn sign<const K: usize, const L: usize>(
             h(
                 &[&rho_double, &(kappa + r as u16).to_le_bytes()],
                 &mut y_bytes[..z_len],
-            )?;
+            );
             *y_r = Poly::unpack_signed(p.gamma1, p.z_bits, &y_bytes[..z_len]);
         }
-        kappa += L as u16;
+        // The packed mask is spent once it is unpacked, and it is as
+        // secret as `y`: the signature carries `z = y + c s1` with
+        // `c` in it, so anything that recovers `y` recovers `s1`.
+        y_bytes.zeroize();
+        // The counter is sixteen bits in the standard's encoding. A
+        // signature takes four or five turns on average and the
+        // chance of needing even a thousand is below 2^-256, so
+        // running out means the hashes are not behaving, and is said
+        // rather than wrapped back to masks already tried.
+        let Some(next) = kappa.checked_add(L as u16) else {
+            y.zeroize();
+            rho_double.zeroize();
+            return Err(Error::SequenceExhausted);
+        };
+        kappa = next;
 
         let mut y_hat = y;
         y_hat.iter_mut().for_each(Poly::ntt);
@@ -787,8 +797,8 @@ fn sign<const K: usize, const L: usize>(
             w1[i].pack(p.w1_bits, &mut w1_bytes[w1_len * i..w1_len * (i + 1)]);
         }
         let c_tilde = &mut sig[..p.c_tilde];
-        h(&[&mu, w1_bytes], c_tilde)?;
-        let mut c_hat = Poly::sample_in_ball(p.tau, c_tilde)?;
+        h(&[&mu, w1_bytes], c_tilde);
+        let mut c_hat = Poly::sample_in_ball(p.tau, c_tilde);
         c_hat.ntt();
 
         // z = y + c s1; r0 = LowBits(w - c s2).
@@ -886,19 +896,19 @@ fn verify<const K: usize, const L: usize>(
         return Err(Error::InvalidSignature);
     }
 
-    let a = expand_a::<K, L>(&rho)?;
+    let a = expand_a::<K, L>(&rho);
     let mut tr = [0u8; 64];
-    h(&[pk], &mut tr)?;
+    h(&[pk], &mut tr);
     let mut mu = [0u8; 64];
     {
-        let mut xof = Shake256::try_new()?;
+        let mut xof = Shake256::new();
         xof.update(&tr);
         for part in m_prime {
             xof.update(part);
         }
         xof.finalize_xof().squeeze(&mut mu);
     }
-    let mut c_hat = Poly::sample_in_ball(p.tau, c_tilde)?;
+    let mut c_hat = Poly::sample_in_ball(p.tau, c_tilde);
     c_hat.ntt();
 
     // w' = A z - c t1 2^d, then the hints recover w1.
@@ -927,7 +937,7 @@ fn verify<const K: usize, const L: usize>(
         w1.pack(p.w1_bits, &mut w1_bytes[w1_len * i..w1_len * (i + 1)]);
     }
     let mut again = [0u8; 64];
-    h(&[&mu, w1_bytes], &mut again[..p.c_tilde])?;
+    h(&[&mu, w1_bytes], &mut again[..p.c_tilde]);
     if constant_time::equal(&again[..p.c_tilde], c_tilde) {
         Ok(())
     } else {
@@ -1022,24 +1032,23 @@ macro_rules! parameter_set {
             pub fn generate<R: Random>(rng: &mut R) -> Result<Self, Error> {
                 let mut seed = [0u8; SEED_SIZE];
                 rng.fill(&mut seed)?;
-                let key = Self::try_from_seed(&seed);
+                let key = Self::from_seed(&seed);
                 seed.zeroize();
-                key
+                Ok(key)
             }
 
             /// The key a seed expands to, by FIPS 204's
-            /// `ML-DSA.KeyGen_internal`. Any 32 bytes are a seed.
-            pub fn try_from_seed(
-                seed: &[u8; SEED_SIZE],
-            ) -> Result<Self, Error> {
+            /// `ML-DSA.KeyGen_internal`. Any 32 bytes are a seed,
+            /// so there is nothing to reject.
+            pub fn from_seed(seed: &[u8; SEED_SIZE]) -> Self {
                 let mut expanded = [0u8; KEY_SIZE];
                 let mut bytes = [0u8; PUBLIC_KEY_SIZE];
-                ml_dsa::key_gen::<$k, $l>(seed, &mut bytes, &mut expanded)?;
-                Ok(PrivateKey {
+                ml_dsa::key_gen::<$k, $l>(seed, &mut bytes, &mut expanded);
+                PrivateKey {
                     seed: Some(*seed),
                     expanded,
                     public: PublicKey { bytes },
-                })
+                }
             }
 
             /// A key from its expanded form, checked: the public key
@@ -1143,7 +1152,7 @@ macro_rules! parameter_set {
                         let seed: &[u8; SEED_SIZE] = seed
                             .try_into()
                             .map_err(|_| Error::InvalidEncoding)?;
-                        let key = Self::try_from_seed(seed)?;
+                        let key = Self::from_seed(seed);
                         if expanded.is_some_and(|e| e[..] != key.expanded[..]) {
                             return Err(Error::InvalidEncoding);
                         }
@@ -1201,11 +1210,10 @@ macro_rules! parameter_set {
 
         impl PublicKey {
             /// A public key from its bytes. Every string of the right
-            /// length decodes, so nothing is checked beyond the type.
-            pub fn try_new(
-                bytes: &[u8; PUBLIC_KEY_SIZE],
-            ) -> Result<Self, Error> {
-                Ok(PublicKey { bytes: *bytes })
+            /// length decodes, so nothing is checked beyond the type,
+            /// and there is nothing to report.
+            pub fn new(bytes: &[u8; PUBLIC_KEY_SIZE]) -> Self {
+                PublicKey { bytes: *bytes }
             }
 
             /// The key's bytes.
@@ -1238,7 +1246,7 @@ macro_rules! parameter_set {
                 }
                 let key: &[u8; PUBLIC_KEY_SIZE] =
                     key.try_into().map_err(|_| Error::InvalidEncoding)?;
-                Self::try_new(key)
+                Ok(Self::new(key))
             }
 
             /// Writes the key as a `SubjectPublicKeyInfo` into the
@@ -1400,9 +1408,7 @@ mod tests {
                     Some(Error::InvalidLength(256))
                 );
 
-                let again =
-                    PrivateKey::try_from_seed(&key.seed_bytes().unwrap())
-                        .unwrap();
+                let again = PrivateKey::from_seed(&key.seed_bytes().unwrap());
                 assert_eq!(again.key_bytes(), key.key_bytes());
                 let expanded = PrivateKey::try_new(&key.key_bytes()).unwrap();
                 assert_eq!(expanded.public_key().bytes(), public.bytes());
@@ -1448,7 +1454,7 @@ mod tests {
 
     #[test]
     fn sets_do_not_mix() {
-        let key = ml_dsa_44::PrivateKey::try_from_seed(&[1u8; 32]).unwrap();
+        let key = ml_dsa_44::PrivateKey::from_seed(&[1u8; 32]);
         let mut out = [0u8; 8192];
         let n = key.der_bytes(&mut out).unwrap();
         assert_eq!(

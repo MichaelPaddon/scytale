@@ -186,6 +186,12 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Ff1<C> {
         message: &mut [u16],
         encrypt: bool,
     ) -> Result<(), Error> {
+        // The tweak's length goes into the first block as thirty-two
+        // bits. A longer one would be written there as its length
+        // modulo 2^32, the same as a shorter tweak's.
+        if u32::try_from(tweak.len()).is_err() {
+            return Err(Error::InvalidLength(tweak.len()));
+        }
         let number_bytes = self.check(message)?;
         let drawn = 4 * number_bytes.div_ceil(4) + 4;
         let n = message.len();
@@ -389,7 +395,10 @@ impl<'a, C: BlockCipher<Block = [u8; BLOCK]>> Chain<'a, C> {
     }
 
     fn finish(self) -> [u8; BLOCK] {
-        debug_assert_eq!(self.used, 0, "input was not whole blocks");
+        // Every caller pads to a whole block before finishing.
+        // Carrying a partial one through would return a state that
+        // is a MAC over the wrong input, and say nothing about it.
+        assert_eq!(self.used, 0, "input was not whole blocks");
         self.state
     }
 }

@@ -100,6 +100,12 @@ pub(crate) struct Health {
     reference: u16,
     count: u32,
     seen: u32,
+    /// Set by the first failure and never cleared. SP 800-90B
+    /// section 4.3 has a source that fails a test stop, not carry
+    /// on with the next sample as if nothing had happened: without
+    /// this a caller that simply asks again is handed output from
+    /// hardware that has just been caught misbehaving.
+    failed: bool,
 }
 
 impl Health {
@@ -112,6 +118,7 @@ impl Health {
             count: 0,
             // A full window, so the first sample starts a fresh one.
             seen: WINDOW,
+            failed: false,
         }
     }
 
@@ -123,11 +130,18 @@ impl Health {
     /// observed hardware failure, and because a working source offers
     /// either of them about once in 2^63 words.
     pub(crate) fn word(&mut self, word: u64) -> Result<(), Error> {
+        if self.failed {
+            return Err(broken());
+        }
         if word == 0 || word == u64::MAX {
+            self.failed = true;
             return Err(broken());
         }
         for half in 0..4 {
-            self.sample((word >> (16 * half)) as u16)?;
+            if let Err(e) = self.sample((word >> (16 * half)) as u16) {
+                self.failed = true;
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -230,9 +244,34 @@ mod tests {
     /// The stuck output line, which is the shipped hardware bug.
     #[test]
     fn all_ones_and_all_zeros_words_are_refused() {
+        assert!(Health::new().word(0).is_err());
+        assert!(Health::new().word(u64::MAX).is_err());
+    }
+
+    /// A source that has failed once stays failed. The next sample
+    /// differing from the stuck one is exactly what a flaky source
+    /// produces, and it must not buy the source a fresh start.
+    #[test]
+    fn a_failure_is_not_forgotten() {
+        let good = 0x0123_4567_89ab_cdefu64;
+        // The stuck-line words.
         let mut health = Health::new();
+        assert!(health.word(good).is_ok());
         assert!(health.word(0).is_err());
-        assert!(health.word(u64::MAX).is_err());
+        assert!(health.word(good).is_err());
+        assert!(health.word(good ^ 0x5555).is_err());
+
+        // A run past the cutoff, then samples that would reset it.
+        let mut health = Health::new();
+        let stuck = 0x7777_7777_7777_7777u64;
+        let mut failed = false;
+        for _ in 0..REPETITION {
+            failed |= health.word(stuck).is_err();
+        }
+        assert!(failed);
+        for i in 0..64u64 {
+            assert!(health.word(good.wrapping_add(i << 17)).is_err(), "{i}");
+        }
     }
 
     /// An ordinary word must pass, and must be counted as four

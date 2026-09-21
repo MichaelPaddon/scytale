@@ -101,12 +101,12 @@ fn bits(v: &Value) -> u32 {
 /// One extract and several expansions, each with its own fixed info
 /// and length, compared against the file's key material. The PRK is
 /// computed once, which is the whole point of the flow.
-fn multi_case<H: Hash + Clone + BlockType>(t: &Value) -> bool {
+fn multi_case<H: Hash + Clone + BlockType + Default>(t: &Value) -> bool {
     let param = &t["kdfMultiExpansionParameter"];
     let salt = hex(&param["salt"]);
     let mut ikm = hex(&param["z"]);
     ikm.extend_from_slice(&hex(&param["t"]));
-    let prk = hkdf::extract::<H>(&salt, &ikm).expect("extract");
+    let prk = hkdf::extract::<H>(&salt, &ikm);
 
     let iterations = param["iterationParameters"]
         .as_array()
@@ -126,7 +126,7 @@ fn multi_case<H: Hash + Clone + BlockType>(t: &Value) -> bool {
 }
 
 /// One derivation compared against the file's key material.
-fn case<H: Hash + Clone + BlockType>(t: &Value) -> bool {
+fn case<H: Hash + Clone + BlockType + Default>(t: &Value) -> bool {
     let param = &t["kdfParameter"];
     let salt = hex(&param["salt"]);
     // The hybrid shared secret: the classical part then the

@@ -37,8 +37,8 @@
 //! let bob = PrivateKey::generate(&mut rng)?;
 //!
 //! // Each side needs only the other's public key.
-//! let shared = alice.shared_secret(bob.public_key())?;
-//! assert_eq!(shared, bob.shared_secret(alice.public_key())?);
+//! let shared = alice.shared_secret(bob.public_key());
+//! assert_eq!(shared, bob.shared_secret(alice.public_key()));
 //! let mut key = [0u8; 32];
 //! hkdf::derive::<Sha256>(b"", &shared, &[b"session v1"], &mut key)?;
 //! # Ok(())
@@ -67,17 +67,14 @@ macro_rules! ecdh_curve {
             /// The secret shared with the holder of `public`: the
             /// x-coordinate of the product of the two keys, big-endian.
             ///
-            /// The point was checked when `public` was made, so the
-            /// only refusal left is the one the arithmetic cannot
-            /// produce, the identity, and it is checked anyway.
-            pub fn shared_secret(
-                &self,
-                public: &PublicKey,
-            ) -> Result<[u8; KEY_SIZE], Error> {
+            /// The point was checked when `public` was made and the
+            /// scalar when the private key was, so there is nothing
+            /// left for this call to refuse.
+            pub fn shared_secret(&self, public: &PublicKey) -> [u8; KEY_SIZE] {
                 let e = Engine::new(&$constants);
                 let mut out = [0u8; KEY_SIZE];
-                self.secret.shared_secret(&e, &public.point, &mut out)?;
-                Ok(out)
+                self.secret.shared_secret(&e, &public.point, &mut out);
+                out
             }
         }
     };
@@ -131,7 +128,7 @@ mod tests {
         );
         let key = p256::PrivateKey::try_new(&private).unwrap();
         let peer = p256::PublicKey::try_from_der(peer).unwrap();
-        assert_eq!(key.shared_secret(&peer).unwrap()[..], shared[..]);
+        assert_eq!(key.shared_secret(&peer)[..], shared[..]);
     }
 
     /// Both curves agree from either side, through every public
@@ -141,19 +138,19 @@ mod tests {
         let mut rng = crate::random::CtrDrbg::from_system().unwrap();
         let a = p384::PrivateKey::generate(&mut rng).unwrap();
         let b = p384::PrivateKey::generate(&mut rng).unwrap();
-        let shared = a.shared_secret(b.public_key()).unwrap();
+        let shared = a.shared_secret(b.public_key());
         let mut out = [0u8; 512];
         let n = b.public_key().der_bytes(&mut out).unwrap();
         assert_eq!(n, p384::PUBLIC_KEY_DER_SIZE);
         let via_der = p384::PublicKey::try_from_der(&out[..n]).unwrap();
-        assert_eq!(a.shared_secret(&via_der), Ok(shared));
+        assert_eq!(a.shared_secret(&via_der), shared);
         let n = b.public_key().pem_bytes(&mut out).unwrap();
         let via_pem = p384::PublicKey::try_from_pem(&out[..n]).unwrap();
-        assert_eq!(a.shared_secret(&via_pem), Ok(shared));
+        assert_eq!(a.shared_secret(&via_pem), shared);
         let n = a.der_bytes(&mut out).unwrap();
         assert_eq!(n, p384::DER_SIZE);
         let a2 = p384::PrivateKey::try_from_der(&out[..n]).unwrap();
-        assert_eq!(b.shared_secret(a2.public_key()), Ok(shared));
+        assert_eq!(b.shared_secret(a2.public_key()), shared);
 
         // A P-256 point is not a P-384 key, however presented.
         let c = p256::PrivateKey::generate(&mut rng).unwrap();

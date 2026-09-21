@@ -1282,13 +1282,13 @@ impl<'a> Private<'a> {
 /// MGF1: xors `out` with the counter-indexed digests of `seed`, as
 /// RFC 8017 appendix B.2.1 defines the mask. PSS and OAEP both mask
 /// with it.
-pub(crate) fn mgf1_xor<H: Hash>(
+pub(crate) fn mgf1_xor<H: Hash + Default>(
     seed: &[u8],
     out: &mut [u8],
 ) -> Result<(), Error> {
     for (counter, chunk) in (0u32..).zip(out.chunks_mut(size_of::<H::Output>()))
     {
-        let mut hasher = H::try_new()?;
+        let mut hasher = H::default();
         hasher.update(seed);
         hasher.update(&counter.to_be_bytes());
         let mask = hasher.finalize();

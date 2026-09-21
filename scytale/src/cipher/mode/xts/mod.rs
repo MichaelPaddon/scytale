@@ -220,7 +220,11 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
         tweak: &C::Block,
         data: &mut [u8],
     ) -> Result<(), Error> {
-        self.run(tweak, data, data.len() * 8, true)
+        // Only the count modulo a block, and modulo a byte, is ever
+        // looked at, and 128 divides every power of two a `usize`
+        // wraps at: wrapping keeps both exactly, where a plain
+        // product overflows a 32-bit `usize` at 512 MiB.
+        self.run(tweak, data, data.len().wrapping_mul(8), true)
     }
 
     /// Decrypts one data unit in place under `tweak`.
@@ -229,7 +233,8 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Xts<C> {
         tweak: &C::Block,
         data: &mut [u8],
     ) -> Result<(), Error> {
-        self.run(tweak, data, data.len() * 8, false)
+        // As in `encrypt`: wrapping keeps what is looked at.
+        self.run(tweak, data, data.len().wrapping_mul(8), false)
     }
 
     /// Encrypts a data unit of `bits` bits in place under `tweak`.

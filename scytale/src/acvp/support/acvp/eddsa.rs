@@ -25,11 +25,11 @@ fn sign(
     message: &[u8],
 ) -> [u8; 64] {
     if prehash {
-        let digest = Sha512::digest(message).expect("digest");
+        let digest = Sha512::digest(message);
         ed25519::sign_ph(secret, context, &digest).expect("sign_ph")
     } else {
         assert!(context.is_empty(), "no Ed25519ctx case is expected");
-        ed25519::sign(secret, message).expect("sign")
+        ed25519::sign(secret, message)
     }
 }
 
@@ -43,7 +43,7 @@ fn verify(
     signature: &[u8; 64],
 ) -> Result<(), Error> {
     if prehash {
-        let digest = Sha512::digest(message).expect("digest");
+        let digest = Sha512::digest(message);
         ed25519::verify_ph(public, context, &digest, signature)
     } else {
         assert!(context.is_empty(), "no Ed25519ctx case is expected");
@@ -66,7 +66,7 @@ pub fn run_sig_gen() {
         let prehash = group["preHash"].as_bool().expect("preHash");
         let secret: [u8; 32] = hex(&group["d"]).try_into().expect("d");
         let public: [u8; 32] = hex(&group["q"]).try_into().expect("q");
-        assert_eq!(ed25519::public_key(&secret), Ok(public));
+        assert_eq!(ed25519::public_key(&secret), public);
         for t in group["tests"].as_array().expect("tests") {
             let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
             let message = hex(&t["message"]);
@@ -155,7 +155,7 @@ pub fn run_key_gen() {
             let tag = format!("tgId {} tcId {}", group["tgId"], t["tcId"]);
             let secret: [u8; 32] = hex(&t["d"]).try_into().expect("d");
             let public: [u8; 32] = hex(&t["q"]).try_into().expect("q");
-            assert_eq!(ed25519::public_key(&secret), Ok(public), "{tag}");
+            assert_eq!(ed25519::public_key(&secret), public, "{tag}");
             cases += 1;
         }
     }

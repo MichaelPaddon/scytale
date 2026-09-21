@@ -59,8 +59,8 @@
 //! assert_eq!(&message, b"attack at dawn");
 //!
 //! // A digest, and a tag over the same bytes.
-//! let digest = Sha256::digest(&message)?;
-//! let mac = Hmac::<Sha256>::mac(mac_key.as_ref(), &message)?;
+//! let digest = Sha256::digest(&message);
+//! let mac = Hmac::<Sha256>::mac(mac_key.as_ref(), &message);
 //! assert_ne!(digest, mac);
 //! # Ok(())
 //! # }
@@ -125,7 +125,10 @@ extern crate std;
 #[cfg(test)]
 mod acvp;
 
-#[cfg(test)]
+// The benchmark times a thread by its processor clock, and wasm has
+// no such clock to read. It measures rather than checks, so the
+// tests there lose nothing by its absence.
+#[cfg(all(test, not(target_family = "wasm")))]
 mod bench;
 
 pub mod aead;

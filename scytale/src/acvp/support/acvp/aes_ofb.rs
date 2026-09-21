@@ -73,11 +73,9 @@ fn aft<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
         };
         let mut data = input;
         if encrypt {
-            ofb.encrypt(&block::<C>(&iv), &mut data)
-                .expect("whole blocks");
+            ofb.encrypt(&block::<C>(&iv), &mut data);
         } else {
-            ofb.decrypt(&block::<C>(&iv), &mut data)
-                .expect("whole blocks");
+            ofb.decrypt(&block::<C>(&iv), &mut data);
         }
         assert_eq!(data, expected, "tgId {} tcId {}", group["tgId"], t["tcId"]);
         count += 1;
@@ -116,7 +114,7 @@ fn mct<C: BlockCipher>(group: &Value, encrypt: bool) -> usize {
             let mut segment = input.clone();
             let mut state = ofb.stream(&block::<C>(&iv));
             for j in 0..MCT_SEGMENTS {
-                state.update(&mut segment).expect("one block");
+                state.update(&mut segment);
                 outputs.push(segment.clone());
                 segment = next_input(&iv, &outputs, j);
             }

@@ -15,7 +15,10 @@ use crate::mac::hmac::Hmac;
 /// vendored vectors. Tags are compared over `macLen` bits, a prefix
 /// of the full tag. The vectors' keys come in every length, so the
 /// any-length constructor keys the MAC.
-pub fn run_aft<H: Hash + Clone + BlockType>(file: &str, algorithm: &str) {
+pub fn run_aft<H: Hash + Clone + BlockType + Default>(
+    file: &str,
+    algorithm: &str,
+) {
     let Some(doc) = load(file, algorithm, "1.0") else {
         return;
     };
@@ -24,7 +27,7 @@ pub fn run_aft<H: Hash + Clone + BlockType>(file: &str, algorithm: &str) {
         assert_eq!(group["testType"], "AFT");
         let mac_bytes = group["macLen"].as_u64().expect("macLen") as usize / 8;
         for t in group["tests"].as_array().expect("tests") {
-            let mut mac = Hmac::<H>::try_new(&hex(&t["key"])).expect("key");
+            let mut mac = Hmac::<H>::new(&hex(&t["key"]));
             let msg = hex(&t["msg"]);
             mac.update(&msg);
             let expected = hex(&t["mac"]);

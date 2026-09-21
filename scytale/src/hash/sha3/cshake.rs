@@ -256,13 +256,15 @@ macro_rules! cshake {
             }
         }
 
+        impl Default for $name {
+            /// Both strings empty, which is SHAKE.
+            fn default() -> Self {
+                Self::new(b"", b"")
+            }
+        }
+
         impl Xof for $name {
             type Reader = $reader;
-
-            /// Both strings empty, which is SHAKE.
-            fn try_new() -> Result<Self, Error> {
-                Ok(Self::new(b"", b""))
-            }
 
             /// Returns to the state after the strings.
             fn reset(&mut self) {

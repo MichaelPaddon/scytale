@@ -9,6 +9,7 @@
 //! by writing the field arithmetic out again.
 
 use super::ghash::{BLOCK, Ghash, MAX_GROUP, multiply_by_x};
+use zeroize::Zeroize;
 
 /// Blocks reversed at a time on the way into GHASH.
 ///
@@ -54,6 +55,16 @@ enum Inner {
 /// this machine the two arms come out level at about this length, and
 /// above it the loop written out pulls away.
 const WORTH_IT: usize = 1024;
+
+// `Inner` wipes itself: the generic arm is a `Ghash` and the native
+// one wipes its powers of the subkey, each in its own `Drop`. The
+// buffered block here is the caller's data and goes too.
+impl Drop for Polyval {
+    fn drop(&mut self) {
+        self.block.zeroize();
+        self.used.zeroize();
+    }
+}
 
 impl Inner {
     fn new(

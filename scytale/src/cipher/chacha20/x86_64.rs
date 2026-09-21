@@ -155,6 +155,9 @@ unsafe fn xor(key: &[u32; 8], nonce: &[u32; 3], counter: u32, data: &mut [u8]) {
             for (d, k) in rest.iter_mut().zip(&scratch) {
                 *d ^= k;
             }
+            // Keystream under this key and nonce; the wide path above
+            // wipes its own working state for the same reason.
+            scratch.zeroize();
         }
     }
 }

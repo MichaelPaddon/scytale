@@ -383,6 +383,11 @@ pub(crate) struct Engine<'a, const L: usize> {
     /// table as the compiler makes it.
     #[cfg(target_arch = "x86_64")]
     vector: Option<x86_64::Avx2>,
+    /// Whether the written-out A64 point and field code applies:
+    /// it is P-256's arithmetic, not any four-limb curve's, so the
+    /// prime has to match and not merely the width.
+    #[cfg(target_arch = "aarch64")]
+    p256: bool,
     /// `b`, in the domain.
     b: Uint<L>,
     /// One, in the domain: `R mod p`.
@@ -399,12 +404,16 @@ impl<'a, const L: usize> Engine<'a, L> {
             .flatten();
         #[cfg(target_arch = "x86_64")]
         let vector = (L == 4).then(x86_64::probe).flatten();
+        #[cfg(target_arch = "aarch64")]
+        let p256 = L == 4 && curve.p.0[..] == super::montgomery::P256_PRIME;
         let one = field.to_mont(&Uint::one());
         let b = field.to_mont(&curve.b);
         Engine {
             curve,
             field,
             order,
+            #[cfg(target_arch = "aarch64")]
+            p256,
             #[cfg(target_arch = "x86_64")]
             fast,
             #[cfg(target_arch = "x86_64")]
@@ -471,7 +480,7 @@ impl<'a, const L: usize> Engine<'a, L> {
             return fast.invert(a);
         }
         #[cfg(target_arch = "aarch64")]
-        if L == 4 {
+        if self.p256 {
             return aarch64::invert_field(a);
         }
         let (exponent, _) = self.curve.p.sub_borrow(&Uint::from_limbs(&[2]));
@@ -696,7 +705,7 @@ impl<'a, const L: usize> Engine<'a, L> {
             return fast.jacobian_double(p);
         }
         #[cfg(target_arch = "aarch64")]
-        if L == 4 {
+        if self.p256 {
             return aarch64::jacobian_double(p);
         }
         self.portable_double(p)
@@ -744,7 +753,7 @@ impl<'a, const L: usize> Engine<'a, L> {
         twice: &Jacobian<L>,
     ) -> Jacobian<L> {
         #[cfg(target_arch = "aarch64")]
-        if L == 4 {
+        if self.p256 {
             let mut out = aarch64::jacobian_add(p, q);
             let same = out.x.is_zero_mask() & out.z.is_zero_mask();
             out.cmov(twice, same);
@@ -842,7 +851,7 @@ impl<'a, const L: usize> Engine<'a, L> {
         q: &Affine<L>,
     ) -> Jacobian<L> {
         #[cfg(target_arch = "aarch64")]
-        if L == 4 {
+        if self.p256 {
             let mut out = aarch64::jacobian_add_affine(p, q);
             out.cmov(
                 &Jacobian {
@@ -1415,13 +1424,20 @@ impl<const L: usize> Secret<L> {
     ) -> Result<Self, Error> {
         let mut buf = [[0u8; 8]; L];
         for _ in 0..GENERATE_TRIES {
-            rng.fill(buf.as_flattened_mut())?;
+            // Wiped on every way out, not only the accepted one: a
+            // refused candidate and a source that failed part way
+            // through both leave bytes the generator has committed.
+            if let Err(e) = rng.fill(buf.as_flattened_mut()) {
+                buf.zeroize();
+                return Err(e);
+            }
             let d = Uint::from_be_bytes(buf.as_flattened());
             if e.scalar_in_range(&d) {
                 buf.zeroize();
                 return Ok(Secret { d });
             }
         }
+        buf.zeroize();
         Err(Error::KeyGenerationFailed)
     }
 
@@ -1435,8 +1451,13 @@ impl<const L: usize> Secret<L> {
     pub(crate) fn public(&self, e: &Engine<L>) -> Public<L> {
         let p = e.mul_base(&self.d);
         // A scalar in range times a generator of prime order is
-        // never the identity.
-        let (x, y) = e.to_affine(&p).unwrap_or((Uint::ZERO, Uint::ZERO));
+        // never the identity, which is the only point `to_affine`
+        // has no affine form for. Falling back to a fixed pair
+        // would hand out (0, 0) -- not a point on either curve --
+        // as a public key, and nothing downstream would object.
+        let Some((x, y)) = e.to_affine(&p) else {
+            unreachable!("the public point is the identity");
+        };
         Public { x, y }
     }
 
@@ -1447,27 +1468,35 @@ impl<const L: usize> Secret<L> {
         e: &Engine<L>,
         public: &Public<L>,
         out: &mut [u8],
-    ) -> Result<(), Error> {
-        let p = e.point_mul(&e.lift(public), &self.d);
-        // Unreachable for a validated point on a prime-order curve,
-        // and checked anyway: the identity has no x to share.
-        let (mut x, mut y) = e.to_affine(&p).ok_or(Error::InvalidPublicKey)?;
+    ) {
+        let mut p = e.point_mul(&e.lift(public), &self.d);
+        // A validated point on a prime-order curve times a scalar in
+        // `[1, n - 1]` is never the identity, which is the only point
+        // with no affine form. Every `Public` is validated when it is
+        // built, so there is nothing here a caller could provoke.
+        let Some((mut x, mut y)) = e.to_affine(&p) else {
+            unreachable!("the shared point is the identity");
+        };
         x.to_be_bytes(out);
         x.zeroize();
         y.zeroize();
-        Ok(())
+        // The projective form is the same secret in other
+        // coordinates.
+        p.x.zeroize();
+        p.y.zeroize();
+        p.z.zeroize();
     }
 
     /// An ECDSA signature over `message`, `r || s` into `out` of
     /// twice the curve's width, with the nonce from RFC 6979.
-    pub(crate) fn sign<H: Hash + Clone + BlockType>(
+    pub(crate) fn sign<H: Hash + Clone + BlockType + Default>(
         &self,
         e: &Engine<L>,
         message: &[u8],
         out: &mut [u8],
     ) -> Result<(), Error> {
         debug_assert_eq!(out.len(), 2 * width::<L>());
-        let z = e.hash_to_scalar(H::digest(message)?.as_ref());
+        let z = e.hash_to_scalar(H::digest(message).as_ref());
 
         let mut d_bytes = [[0u8; 8]; L];
         self.d.to_be_bytes(d_bytes.as_flattened_mut());
@@ -1574,7 +1603,7 @@ impl<const L: usize> Public<L> {
     }
 
     /// Checks an ECDSA signature `r || s` over `message`.
-    pub(crate) fn verify<H: Hash>(
+    pub(crate) fn verify<H: Hash + Default>(
         &self,
         e: &Engine<L>,
         message: &[u8],
@@ -1589,7 +1618,7 @@ impl<const L: usize> Public<L> {
         if !e.scalar_in_range(&r) || !e.scalar_in_range(&s) {
             return Err(Error::InvalidSignature);
         }
-        let z = e.hash_to_scalar(H::digest(message)?.as_ref());
+        let z = e.hash_to_scalar(H::digest(message).as_ref());
         // R = (z / s) G + (r / s) Q, whose x must be r modulo n.
         let w = e.scalar_invert(&s);
         let u1 = e.scalar_mul(&z, &w);
@@ -1608,19 +1637,19 @@ impl<const L: usize> Public<L> {
 /// signature's hash, seeded with the private key and the message's
 /// digest, so the same key and message always give the same nonce
 /// and nothing else can.
-struct Nonce<H: Hash + Clone + BlockType> {
+struct Nonce<H: Hash + Clone + BlockType + Default> {
     k: H::Output,
     v: H::Output,
 }
 
-impl<H: Hash + Clone + BlockType> Nonce<H> {
+impl<H: Hash + Clone + BlockType + Default> Nonce<H> {
     /// Steps b through g, given `int2octets(x)` and
     /// `bits2octets(h1)`.
     fn try_new(x: &[u8], h: &[u8]) -> Result<Self, Error> {
         // V starts as 0x01 repeated and K as 0x00 repeated. A digest
         // is the only `H::Output` generic code can make; its value
         // is gone before either is used.
-        let mut v = H::digest(&[])?;
+        let mut v = H::digest(&[]);
         v.as_mut().fill(0x01);
         let mut k = v;
         k.as_mut().fill(0x00);
@@ -1632,13 +1661,13 @@ impl<H: Hash + Clone + BlockType> Nonce<H> {
 
     /// `K = HMAC_K(V || tag || x || h)`, then `V = HMAC_K(V)`.
     fn seed(&mut self, tag: u8, x: &[u8], h: &[u8]) -> Result<(), Error> {
-        let mut mac = Hmac::<H>::try_new(self.k.as_ref())?;
+        let mut mac = Hmac::<H>::new(self.k.as_ref());
         mac.update(self.v.as_ref());
         mac.update(&[tag]);
         mac.update(x);
         mac.update(h);
         self.k = mac.finalize();
-        self.v = Hmac::<H>::mac(self.k.as_ref(), self.v.as_ref())?;
+        self.v = Hmac::<H>::mac(self.k.as_ref(), self.v.as_ref());
         Ok(())
     }
 
@@ -1653,7 +1682,7 @@ impl<H: Hash + Clone + BlockType> Nonce<H> {
             let mut t = [[0u8; 8]; L];
             let mut filled = 0;
             while filled < width::<L>() {
-                self.v = Hmac::<H>::mac(self.k.as_ref(), self.v.as_ref())?;
+                self.v = Hmac::<H>::mac(self.k.as_ref(), self.v.as_ref());
                 let out = &mut t.as_flattened_mut()[filled..];
                 let take = out.len().min(size_of::<H::Output>());
                 out[..take].copy_from_slice(&self.v.as_ref()[..take]);
@@ -1675,7 +1704,7 @@ impl<H: Hash + Clone + BlockType> Nonce<H> {
     }
 }
 
-impl<H: Hash + Clone + BlockType> Drop for Nonce<H> {
+impl<H: Hash + Clone + BlockType + Default> Drop for Nonce<H> {
     fn drop(&mut self) {
         self.k.as_mut().zeroize();
         self.v.as_mut().zeroize();
@@ -2313,10 +2342,7 @@ mod tests {
         #[cfg(target_arch = "x86_64")]
         return e.fast.is_some();
         #[cfg(target_arch = "aarch64")]
-        return {
-            let _ = e;
-            L == 4
-        };
+        return e.p256;
     }
 
     /// The doubling written out for the processor agrees with the
@@ -2921,8 +2947,8 @@ mod tests {
         let b = Secret::generate(&e, &mut rng).unwrap();
         let mut ab = [0u8; 48];
         let mut ba = [0u8; 48];
-        a.shared_secret(&e, &b.public(&e), &mut ab).unwrap();
-        b.shared_secret(&e, &a.public(&e), &mut ba).unwrap();
+        a.shared_secret(&e, &b.public(&e), &mut ab);
+        b.shared_secret(&e, &a.public(&e), &mut ba);
         assert_eq!(ab, ba);
         assert_ne!(ab, [0u8; 48]);
     }

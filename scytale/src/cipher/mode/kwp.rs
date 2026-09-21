@@ -184,11 +184,16 @@ impl<C: BlockCipher<Block = [u8; BLOCK]>> Kwp<C> {
         let claimed = u32::from_be_bytes(length) as usize;
         // The padding it implies has to be less than a whole unit,
         // or the wrapped form would have been shorter.
-        bad |= claimed > padded || padded - claimed >= SEMIBLOCK;
-        if !bad {
-            for &byte in &out[claimed..] {
-                bad |= byte != 0;
-            }
+        // Both comparisons always run: `|` rather than `||`, which
+        // would stop at the first.
+        bad |= claimed > padded;
+        bad |= padded.wrapping_sub(claimed) >= SEMIBLOCK;
+        // The bytes past the message must be zero. Every byte of the
+        // unit is read and a mask picks out the ones past `claimed`,
+        // so neither the work nor the addresses depend on a length
+        // that came out of the decryption.
+        for (i, &byte) in out.iter().enumerate() {
+            bad |= (i >= claimed) & (byte != 0);
         }
         if bad {
             out.fill(0);

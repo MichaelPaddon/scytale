@@ -44,7 +44,19 @@ pub(crate) fn has_sha() -> bool {
 static SHA: Probe = Probe::new();
 
 fn ask_sha() -> bool {
-    __cpuid_count(7, 0).ebx & (1 << 29) != 0
+    // A processor whose highest leaf is below seven answers this one
+    // with the data of its highest, not with zeros, so the bits
+    // would be whatever that leaf happens to hold.
+    if core::arch::x86_64::__cpuid(0).eax < 7 {
+        return false;
+    }
+    // The loops also shuffle bytes (SSSE3, leaf 1 ECX bit 9) and
+    // insert and blend words (SSE4.1, bit 19). Every processor with
+    // the SHA instructions has both, but a hypervisor can hide one
+    // and not the other, and asking costs nothing.
+    let sse = (1 << 9) | (1 << 19);
+    core::arch::x86_64::__cpuid(1).ecx & sse == sse
+        && __cpuid_count(7, 0).ebx & (1 << 29) != 0
 }
 
 /// The compression function via SHA-NI.
@@ -242,7 +254,6 @@ unsafe fn compress(state: &mut [u32; 8], data: *const u8, count: usize) {
 mod tests {
     use super::*;
     use crate::Error;
-    use crate::hash::Hash;
     use crate::hash::sha2::portable;
     use crate::hash::sha2::tests::{
         check_known_answers, check_matches_portable,
@@ -255,7 +266,12 @@ mod tests {
         }
         type Sha384 = portable::Sha384;
         type Sha512 = portable::Sha512;
-        check_known_answers::<Sha224, Sha256, Sha384, Sha512>();
+        check_known_answers(
+            || Sha224::try_new().expect("supported"),
+            || Sha256::try_new().expect("supported"),
+            || Sha384::try_new().expect("supported"),
+            || Sha512::try_new().expect("supported"),
+        );
     }
 
     #[test]
@@ -263,8 +279,14 @@ mod tests {
         if !has_sha() {
             return;
         }
-        check_matches_portable::<Sha224, portable::Sha224>();
-        check_matches_portable::<Sha256, portable::Sha256>();
+        check_matches_portable(
+            || Sha224::try_new().expect("supported"),
+            || portable::Sha224::try_new().expect("portable"),
+        );
+        check_matches_portable(
+            || Sha256::try_new().expect("supported"),
+            || portable::Sha256::try_new().expect("portable"),
+        );
     }
 
     #[test]

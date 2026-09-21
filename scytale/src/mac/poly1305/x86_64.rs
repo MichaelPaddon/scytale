@@ -45,6 +45,7 @@
 use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
 
 use crate::probe::Probe;
+use zeroize::Zeroize;
 
 /// Bytes in a block.
 const BLOCK: usize = 16;
@@ -69,17 +70,28 @@ const LIMBS: usize = 5;
 /// past the top of the field is worth; then the limb mask; then the
 /// bit that sits above a whole block.
 #[repr(align(32))]
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Tables([[u64; LANES]; 11]);
 
 /// Everything worked out from the key, once.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct Powers {
     tables: Tables,
     /// The weight each lane's chain is multiplied by at the end:
     /// `r^4`, `r^3`, `r^2` and `r`, in the order the loads below
     /// leave the lanes.
     weights: [[u64; LIMBS]; LANES],
+}
+
+// Every word here is worked out from `r`, and the last weight is `r`
+// itself: the one-time key. Not `Copy`, so that there is one of these
+// to wipe and not a copy left on the frame of whatever was handed
+// one; the loop reaches it by reference.
+impl Drop for Powers {
+    fn drop(&mut self) {
+        self.tables.0.zeroize();
+        self.weights.zeroize();
+    }
 }
 
 /// Whether the processor and operating system support AVX2.

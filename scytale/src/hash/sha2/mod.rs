@@ -16,7 +16,7 @@
 //! let mut hash = Sha256::new();
 //! hash.update(b"ab");
 //! hash.update(b"c");
-//! assert_eq!(hash.finalize(), Sha256::digest(b"abc")?);
+//! assert_eq!(hash.finalize(), Sha256::digest(b"abc"));
 //! # Ok(())
 //! # }
 //! ```
@@ -359,10 +359,6 @@ macro_rules! automatic {
         impl<V: $variant> Hash for $name<V> {
             type Output = V::Output;
 
-            fn try_new() -> Result<Self, Error> {
-                Ok(Self::new())
-            }
-
             fn reset(&mut self) {
                 match &mut self.0 {
                     $(
@@ -534,8 +530,8 @@ pub(crate) mod tests {
     ];
 
     /// Hashes a message given as a repeated piece, in pieces.
-    fn digest<H: Hash>(example: &Example) -> H::Output {
-        let mut hash = H::try_new().unwrap();
+    fn digest<H: Hash>(example: &Example, start: fn() -> H) -> H::Output {
+        let mut hash = start();
         for _ in 0..example.repeat {
             hash.update(example.message);
         }
@@ -544,25 +540,31 @@ pub(crate) mod tests {
 
     /// Checks the four variants of one implementation against the
     /// FIPS 180-4 examples.
-    pub(crate) fn check_known_answers<A, B, C, D>()
-    where
+    pub(crate) fn check_known_answers<A, B, C, D>(
+        a: fn() -> A,
+        b: fn() -> B,
+        c: fn() -> C,
+        d: fn() -> D,
+    ) where
         A: Hash<Output = [u8; 28]>,
         B: Hash<Output = [u8; 32]>,
         C: Hash<Output = [u8; 48]>,
         D: Hash<Output = [u8; 64]>,
     {
         for example in &EXAMPLES {
-            assert_eq!(digest::<A>(example), hex(example.sha224)[..28]);
-            assert_eq!(digest::<B>(example), hex(example.sha256)[..32]);
-            assert_eq!(digest::<C>(example), hex(example.sha384)[..48]);
-            assert_eq!(digest::<D>(example), hex(example.sha512)[..64]);
+            assert_eq!(digest(example, a), hex(example.sha224)[..28]);
+            assert_eq!(digest(example, b), hex(example.sha256)[..32]);
+            assert_eq!(digest(example, c), hex(example.sha384)[..48]);
+            assert_eq!(digest(example, d), hex(example.sha512)[..64]);
         }
     }
 
     /// Checks one implementation against the portable one over every
     /// length up to a few blocks, fed in every way.
-    pub(crate) fn check_matches_portable<H, P>()
-    where
+    pub(crate) fn check_matches_portable<H, P>(
+        start: fn() -> H,
+        portable: fn() -> P,
+    ) where
         H: Hash,
         P: Hash<Output = H::Output>,
         H::Output: PartialEq + core::fmt::Debug,
@@ -570,11 +572,15 @@ pub(crate) mod tests {
         let data: [u8; 300] = core::array::from_fn(|i| (i * 7 + i / 3) as u8);
         for len in 0..data.len() {
             let message = &data[..len];
-            let expected = P::digest(message).unwrap();
-            assert_eq!(H::digest(message).unwrap(), expected, "len {len}");
+            let mut reference = portable();
+            reference.update(message);
+            let expected = reference.finalize();
+            let mut once = start();
+            once.update(message);
+            assert_eq!(once.finalize(), expected, "len {len}");
             // Split at each point, and in threes at a few.
             for split in (0..len).step_by(13) {
-                let mut hash = H::try_new().unwrap();
+                let mut hash = start();
                 hash.update(&message[..split]);
                 hash.update(&message[split..]);
                 assert_eq!(hash.finalize(), expected, "len {len} at {split}");
@@ -584,7 +590,7 @@ pub(crate) mod tests {
 
     #[test]
     fn known_answers() {
-        check_known_answers::<Sha224, Sha256, Sha384, Sha512>();
+        check_known_answers(Sha224::new, Sha256::new, Sha384::new, Sha512::new);
     }
 
     /// The SHA-512/t starting values are SHA-512 of "SHA-512/t" from
@@ -607,24 +613,24 @@ pub(crate) mod tests {
     #[test]
     fn sha512_t_known_answers() {
         assert_eq!(
-            Sha512_224::digest(b"abc").unwrap(),
+            Sha512_224::digest(b"abc"),
             hex("4634270f707b6a54daae7530460842e20e37ed265ceee9a43e8924aa")
                 [..28]
         );
         assert_eq!(
-            Sha512_256::digest(b"abc").unwrap(),
+            Sha512_256::digest(b"abc"),
             hex(
                 "53048e2681941ef99b2e29b76b4c7dabe4c2d0c634fc6d46e0e2f13107e7\
                  af23"
             )[..32]
         );
         assert_eq!(
-            Sha512_224::digest(b"").unwrap(),
+            Sha512_224::digest(b""),
             hex("6ed0dd02806fa89e25de060c19d3ac86cabb87d6a0ddd05c333b84f4")
                 [..28]
         );
         assert_eq!(
-            Sha512_256::digest(b"").unwrap(),
+            Sha512_256::digest(b""),
             hex(
                 "c672b8d1ef56ed28ab87c3622c5114069bdd3ad7b8f9737498d0c01ecef0\
                  967a"
@@ -634,18 +640,30 @@ pub(crate) mod tests {
 
     #[test]
     fn matches_portable() {
-        check_matches_portable::<Sha512_224, portable::Sha512_224>();
-        check_matches_portable::<Sha512_256, portable::Sha512_256>();
-        check_matches_portable::<Sha224, portable::Sha224>();
-        check_matches_portable::<Sha256, portable::Sha256>();
-        check_matches_portable::<Sha384, portable::Sha384>();
-        check_matches_portable::<Sha512, portable::Sha512>();
+        check_matches_portable(Sha512_224::new, || {
+            portable::Sha512_224::try_new().expect("portable")
+        });
+        check_matches_portable(Sha512_256::new, || {
+            portable::Sha512_256::try_new().expect("portable")
+        });
+        check_matches_portable(Sha224::new, || {
+            portable::Sha224::try_new().expect("portable")
+        });
+        check_matches_portable(Sha256::new, || {
+            portable::Sha256::try_new().expect("portable")
+        });
+        check_matches_portable(Sha384::new, || {
+            portable::Sha384::try_new().expect("portable")
+        });
+        check_matches_portable(Sha512::new, || {
+            portable::Sha512::try_new().expect("portable")
+        });
     }
 
     #[test]
     fn splitting_does_not_matter() {
         let data: [u8; 517] = core::array::from_fn(|i| (i * 31) as u8);
-        let expected = Sha256::digest(&data).unwrap();
+        let expected = Sha256::digest(&data);
         for chunk in [1, 3, 7, 63, 64, 65, 128, 200] {
             let mut hash = Sha256::new();
             for piece in data.chunks(chunk) {
@@ -661,7 +679,7 @@ pub(crate) mod tests {
         hash.update(b"not this");
         hash.reset();
         hash.update(b"abc");
-        assert_eq!(hash.finalize(), Sha512::digest(b"abc").unwrap());
+        assert_eq!(hash.finalize(), Sha512::digest(b"abc"));
     }
 
     #[test]
@@ -670,8 +688,8 @@ pub(crate) mod tests {
         hash.update(b"ab");
         let mut fork = hash.clone();
         hash.update(b"c");
-        assert_eq!(hash.finalize(), Sha256::digest(b"abc").unwrap());
-        assert_eq!(fork.finalize(), Sha256::digest(b"ab").unwrap());
+        assert_eq!(hash.finalize(), Sha256::digest(b"abc"));
+        assert_eq!(fork.finalize(), Sha256::digest(b"ab"));
     }
 
     /// The SHAVS bit-oriented vectors: the one-bit message 0, and the
@@ -715,7 +733,7 @@ pub(crate) mod tests {
             // The same bit string, hashed by the portable code with
             // the bits fed the same way, must agree; and it must
             // differ from the message without them.
-            let mut p = portable::Sha384::try_new().unwrap();
+            let mut p = portable::Sha384::try_new().expect("portable");
             p.update(&data[..len]);
             assert_eq!(p.finalize_bits(0xa0, 3).unwrap(), bits);
             let mut whole = Sha384::new();
@@ -728,11 +746,8 @@ pub(crate) mod tests {
     fn digest_is_the_same_as_update_then_finalize() {
         let mut hash = Sha224::new();
         hash.update(b"abc");
-        assert_eq!(hash.finalize(), Sha224::digest(b"abc").unwrap());
-        assert_eq!(
-            <Sha224 as Hash>::digest(b"abc").unwrap(),
-            Sha224::digest(b"abc").unwrap()
-        );
+        assert_eq!(hash.finalize(), Sha224::digest(b"abc"));
+        assert_eq!(<Sha224 as Hash>::digest(b"abc"), Sha224::digest(b"abc"));
     }
 
     /// Compiles only if every engine wipes itself on drop.
@@ -849,10 +864,6 @@ macro_rules! digest {
 
         impl Hash for $name {
             type Output = [u8; $out];
-
-            fn try_new() -> Result<Self, Error> {
-                Ok(Self::new())
-            }
 
             fn reset(&mut self) {
                 self.0.reset()

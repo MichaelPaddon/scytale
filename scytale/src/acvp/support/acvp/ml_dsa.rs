@@ -66,7 +66,7 @@ macro_rules! set {
                 let key = match seed {
                     Some(seed) => {
                         let seed: [u8; 32] = seed.try_into().expect("seed");
-                        $module::PrivateKey::try_from_seed(&seed).expect("seed")
+                        $module::PrivateKey::from_seed(&seed)
                     }
                     None => {
                         let sk: [u8; $module::KEY_SIZE] =
@@ -98,7 +98,7 @@ macro_rules! set {
                 else {
                     return false;
                 };
-                let key = $module::PublicKey::try_new(&pk).expect("pk");
+                let key = $module::PublicKey::new(&pk);
                 key.verify(context, message, &sig).is_ok()
             }
         }

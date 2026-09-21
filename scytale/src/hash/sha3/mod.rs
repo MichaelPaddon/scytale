@@ -16,7 +16,7 @@
 //! use scytale::hash::{Hash, Xof, XofReader};
 //!
 //! # fn main() -> Result<(), scytale::Error> {
-//! let digest = Sha3_256::digest(b"abc")?;
+//! let digest = Sha3_256::digest(b"abc");
 //! assert_eq!(digest[..4], [0x3a, 0x98, 0x5d, 0xa7]);
 //!
 //! let mut shake = Shake128::new();
@@ -248,10 +248,6 @@ impl<V: engine::Variant> BlockType for Auto<V> {
 impl<V: DigestVariant> Hash for Auto<V> {
     type Output = V::Output;
 
-    fn try_new() -> Result<Self, Error> {
-        Ok(Self::new())
-    }
-
     fn reset(&mut self) {
         dispatch!(&mut self.0, Inner, s => Hash::reset(s))
     }
@@ -295,10 +291,6 @@ impl<V: XofVariant> XofReader for AutoReader<V> {
 
 impl<V: XofVariant> Xof for Auto<V> {
     type Reader = AutoReader<V>;
-
-    fn try_new() -> Result<Self, Error> {
-        Ok(Self::new())
-    }
 
     fn reset(&mut self) {
         dispatch!(&mut self.0, Inner, s => Xof::reset(s))
@@ -465,8 +457,8 @@ pub(crate) mod tests {
         },
     ];
 
-    fn squeeze<X: Xof>(message: &[u8], n: usize) -> [u8; 64] {
-        let mut x = X::try_new().unwrap();
+    fn squeeze<X: Xof>(message: &[u8], n: usize, start: fn() -> X) -> [u8; 64] {
+        let mut x = start();
         x.update(message);
         let mut out = [0u8; 64];
         x.finalize_xof().squeeze(&mut out[..n]);
@@ -475,8 +467,11 @@ pub(crate) mod tests {
 
     /// Checks the six functions of one implementation against the
     /// NIST examples.
-    pub(crate) fn check_known_answers<A, B, C, D, E, F>()
-    where
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn check_known_answers<A, B, C, D, E, F>(
+        starts: (fn() -> A, fn() -> B, fn() -> C, fn() -> D),
+        xofs: (fn() -> E, fn() -> F),
+    ) where
         A: Hash<Output = [u8; 28]>,
         B: Hash<Output = [u8; 32]>,
         C: Hash<Output = [u8; 48]>,
@@ -485,22 +480,34 @@ pub(crate) mod tests {
         F: Xof,
     {
         for e in &EXAMPLES {
-            assert_eq!(A::digest(e.message).unwrap(), hex(e.sha3_224)[..28]);
-            assert_eq!(B::digest(e.message).unwrap(), hex(e.sha3_256)[..32]);
-            assert_eq!(C::digest(e.message).unwrap(), hex(e.sha3_384)[..48]);
-            assert_eq!(D::digest(e.message).unwrap(), hex(e.sha3_512)[..64]);
+            let mut a = starts.0();
+            a.update(e.message);
+            assert_eq!(a.finalize(), hex(e.sha3_224)[..28]);
+            let mut b = starts.1();
+            b.update(e.message);
+            assert_eq!(b.finalize(), hex(e.sha3_256)[..32]);
+            let mut c = starts.2();
+            c.update(e.message);
+            assert_eq!(c.finalize(), hex(e.sha3_384)[..48]);
+            let mut d = starts.3();
+            d.update(e.message);
+            assert_eq!(d.finalize(), hex(e.sha3_512)[..64]);
             assert_eq!(
-                squeeze::<E>(e.message, 32)[..32],
+                squeeze(e.message, 32, xofs.0)[..32],
                 hex(e.shake128)[..32]
             );
-            assert_eq!(squeeze::<F>(e.message, 64), hex(e.shake256));
+            assert_eq!(squeeze(e.message, 64, xofs.1), hex(e.shake256));
         }
     }
 
     /// Checks one implementation against the portable one over every
     /// length up to a few blocks, fed in every way, digest and XOF.
-    pub(crate) fn check_matches_portable<H, P, X, Y>()
-    where
+    pub(crate) fn check_matches_portable<H, P, X, Y>(
+        start: fn() -> H,
+        portable: fn() -> P,
+        xof: fn() -> X,
+        portable_xof: fn() -> Y,
+    ) where
         H: Hash,
         P: Hash<Output = H::Output>,
         H::Output: PartialEq + core::fmt::Debug,
@@ -510,17 +517,21 @@ pub(crate) mod tests {
         let data: [u8; 400] = core::array::from_fn(|i| (i * 7 + i / 3) as u8);
         for len in 0..data.len() {
             let message = &data[..len];
-            let expected = P::digest(message).unwrap();
-            assert_eq!(H::digest(message).unwrap(), expected, "len {len}");
+            let mut reference = portable();
+            reference.update(message);
+            let expected = reference.finalize();
+            let mut once = start();
+            once.update(message);
+            assert_eq!(once.finalize(), expected, "len {len}");
             for split in (0..len).step_by(17) {
-                let mut hash = H::try_new().unwrap();
+                let mut hash = start();
                 hash.update(&message[..split]);
                 hash.update(&message[split..]);
                 assert_eq!(hash.finalize(), expected, "len {len} at {split}");
             }
             assert_eq!(
-                squeeze::<X>(message, 64),
-                squeeze::<Y>(message, 64),
+                squeeze(message, 64, xof),
+                squeeze(message, 64, portable_xof),
                 "xof len {len}"
             );
         }
@@ -528,24 +539,20 @@ pub(crate) mod tests {
 
     #[test]
     fn known_answers() {
-        check_known_answers::<
-            Sha3_224,
-            Sha3_256,
-            Sha3_384,
-            Sha3_512,
-            Shake128,
-            Shake256,
-        >();
+        check_known_answers(
+            (Sha3_224::new, Sha3_256::new, Sha3_384::new, Sha3_512::new),
+            (Shake128::new, Shake256::new),
+        );
     }
 
     #[test]
     fn matches_portable() {
-        check_matches_portable::<
-            Sha3_256,
-            portable::Sha3_256,
-            Shake256,
-            portable::Shake256,
-        >();
+        check_matches_portable(
+            Sha3_256::new,
+            || portable::Sha3_256::try_new().expect("portable"),
+            Shake256::new,
+            || portable::Shake256::try_new().expect("portable"),
+        );
     }
 
     /// Two bit-string cases from the NIST ACVP SHA3-256 vectors: 22
@@ -592,7 +599,7 @@ pub(crate) mod tests {
 
     #[test]
     fn squeezing_in_pieces_is_the_same_stream() {
-        let whole = squeeze::<Shake128>(b"abc", 64);
+        let whole = squeeze(b"abc", 64, Shake128::new);
         let mut x = Shake128::new();
         x.update(b"abc");
         let mut reader = x.finalize_xof();
@@ -620,7 +627,7 @@ pub(crate) mod tests {
     #[test]
     fn splitting_does_not_matter() {
         let data: [u8; 617] = core::array::from_fn(|i| (i * 31) as u8);
-        let expected = Sha3_512::digest(&data).unwrap();
+        let expected = Sha3_512::digest(&data);
         for chunk in [1, 3, 7, 71, 72, 73, 144, 200] {
             let mut hash = Sha3_512::new();
             for piece in data.chunks(chunk) {
@@ -638,8 +645,8 @@ pub(crate) mod tests {
         hash.update(b"ab");
         let mut fork = hash.clone();
         hash.update(b"c");
-        assert_eq!(hash.finalize(), Sha3_224::digest(b"abc").unwrap());
-        assert_eq!(fork.finalize(), Sha3_224::digest(b"ab").unwrap());
+        assert_eq!(hash.finalize(), Sha3_224::digest(b"abc"));
+        assert_eq!(fork.finalize(), Sha3_224::digest(b"ab"));
     }
 
     #[test]
@@ -724,10 +731,6 @@ macro_rules! digest {
         impl Hash for $name {
             type Output = [u8; $out];
 
-            fn try_new() -> Result<Self, Error> {
-                Ok(Self::new())
-            }
-
             fn reset(&mut self) {
                 Hash::reset(&mut self.0)
             }
@@ -799,10 +802,6 @@ macro_rules! shake {
 
         impl Xof for $name {
             type Reader = $reader;
-
-            fn try_new() -> Result<Self, Error> {
-                Ok(Self::new())
-            }
 
             fn reset(&mut self) {
                 Xof::reset(&mut self.0)

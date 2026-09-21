@@ -39,6 +39,34 @@ fn ask_aesni() -> bool {
     features & (1 << 25) != 0 && features & (1 << 9) != 0
 }
 
+/// Whether the processor has AES-NI *and* AVX, with the operating
+/// system saving its state: AES-NI and SSSE3 as above, then OSXSAVE
+/// and AVX (leaf 1, ECX bits 27 and 28) and XCR0 bits 1 and 2.
+///
+/// AES-NI does not imply AVX. A loop written in the VEX encodings --
+/// `vmovdqu`, `vpxor`, `vaesenc` -- needs both, and asking only for
+/// AES-NI puts an illegal instruction on every Westmere and on the
+/// whole Silvermont and Goldmont line, which have the cipher and not
+/// the encoding. Any suite whose assembly is VEX-encoded asks this
+/// rather than [`has_aesni`].
+pub(crate) fn has_aesni_avx() -> bool {
+    AESNI_AVX.yes(ask_aesni_avx)
+}
+
+/// Kept, as [`AESNI`] is: a mode asks when it is built, and that is
+/// once per key.
+static AESNI_AVX: Probe = Probe::new();
+
+fn ask_aesni_avx() -> bool {
+    let wanted = (1 << 27) | (1 << 28);
+    if !has_aesni() || __cpuid(1).ecx & wanted != wanted {
+        return false;
+    }
+    // SAFETY: OSXSAVE was just confirmed, so XGETBV is available.
+    let xcr0 = unsafe { _xgetbv(0) };
+    xcr0 & 0b110 == 0b110
+}
+
 /// Whether the processor and operating system support VAES on 256-bit
 /// registers: VAES (leaf 7, ECX bit 9), AVX2 (leaf 7, EBX bit 5), and
 /// the OS saving the upper register halves (XCR0 bits 1 and 2).

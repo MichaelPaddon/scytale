@@ -1,11 +1,12 @@
 #!/bin/sh
-# Runs every test (including the long ones marked #[ignore]) for each
+# Runs the tests, including the long ones marked #[ignore], for each
 # architecture. The benchmark is ignored too and is left out: it
 # measures rather than checks, and a sweep under qemu would take
-# hours. Use scripts/bench for that. The host architecture runs natively; the others run
-# with `cross`, which builds in a container holding the cross linker,
-# the target's libc and qemu. For development only; CI tests on real
-# hardware.
+# hours. Use scripts/bench for that. The host architecture runs
+# natively and runs everything; the others run with `cross`, which
+# builds in a container holding the cross linker, the target's libc
+# and qemu, and leave out the large data tests, as said below. For
+# development only; CI tests on real hardware.
 #
 # Requirements: `cargo install cross`, `rustup target add <target>`
 # for each foreign target, and Docker or Podman.
@@ -38,6 +39,18 @@ max,vlen=256
 max,vlen=512
 "
 
+# What `max` has, of the extensions any backend needs. The standard
+# library cannot say on RISC-V, so without this the inventory test
+# could only print what the probes found; with it the test holds them
+# to it. A QEMU_CPU given by hand is a different processor, so it
+# gets no list.
+RISCV_FEATURES="v zbb zbkb zkne zknd zknh zvkned zvknha zvknhb zvbb \
+zvkb zvkg"
+
+# This runs from a checkout, so the vectors are there, and a suite
+# that cannot find them is to fail rather than skip.
+export SCYTALE_VECTORS=required
+
 cd "$(dirname "$0")/.."
 
 host=$(rustc -vV | sed -n 's/^host: //p')
@@ -63,8 +76,21 @@ run_target() {
         echo "missing rust-std: rustup target add $target" >&2
         exit 1
     fi
+    # The large data tests are left out under emulation. Each is one
+    # test, so one thread, hashing gigabytes through qemu: it is what
+    # the run sat on, one processor busy, long after every other test
+    # had finished. What they check is that the length survives a
+    # message past 2^32 bits, which is the engine's arithmetic and the
+    # same code on every architecture, and the host run above and CI
+    # both do it natively. The Monte Carlo suites stay: they chain
+    # calls through each hardware backend, and for the RISC-V ones
+    # this is the only place they run.
+    if [ "$target" = riscv64gc-unknown-linux-gnu ] \
+        && [ -z "$QEMU_SWEEP" ]; then
+        export SCYTALE_CPU_FEATURES="$RISCV_FEATURES"
+    fi
     cross test --workspace --target "$target" -- \
-        --include-ignored --skip bench::speed
+        --include-ignored --skip bench::speed --skip sha_ldt
     if [ "$target" = riscv64gc-unknown-linux-gnu ] \
         && [ -z "$QEMU_SWEEP" ]; then
         for cpu in $RISCV_CONFIGS; do
@@ -72,6 +98,7 @@ run_target() {
             QEMU_CPU=$cpu cross test --workspace --target "$target" -- \
                 --skip bench::speed
         done
+        unset SCYTALE_CPU_FEATURES
     fi
 }
 

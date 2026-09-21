@@ -88,7 +88,7 @@ fn label(group: &Value, t: &Value) -> Vec<u8> {
     out
 }
 
-fn decrypt<H: Hash>(
+fn decrypt<H: Hash + Default>(
     key: &PrivateKey,
     label: &[u8],
     ciphertext: &[u8],
