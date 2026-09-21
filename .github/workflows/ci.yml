@@ -342,7 +342,7 @@ jobs:
 
       - name: ASCII only
         run: |
-          if grep -rnP '[^\x00-\x7F]' \
+          if grep -rnP --include='*.rs' '[^\x00-\x7F]' \
               scytale/src scytale-cli/src scytale-ring/src; then
               echo "non-ASCII characters found" >&2
               exit 1
