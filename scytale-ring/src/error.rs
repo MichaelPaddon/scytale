@@ -62,6 +62,14 @@ impl KeyRejected {
         Self("RNG failed")
     }
 
+    pub(crate) fn public_key_is_missing() -> Self {
+        Self("PublicKeyIsMissing")
+    }
+
+    pub(crate) fn version_not_supported() -> Self {
+        Self("VersionNotSupported")
+    }
+
     pub(crate) fn too_small() -> Self {
         Self("TooSmall")
     }
@@ -82,8 +90,8 @@ impl KeyRejected {
         Self("UnexpectedError")
     }
 
-    /// The reason scytale gave, in ring's words: a value out of range
-    /// is a bad component, a failed source is the generator's fault,
+    /// The reason scytale gave, in ring's words. The two say the same
+    /// things about a key: scytale's names are matched one to one,
     /// and anything else wrong with the bytes is an encoding error.
     pub(crate) fn from_scytale(e: scytale::Error) -> Self {
         use scytale::Error as E;
@@ -91,11 +99,12 @@ impl KeyRejected {
             E::InvalidPrivateKey | E::InvalidPublicKey => {
                 Self::invalid_component()
             }
-            E::InvalidKeyLength(_) => Self::invalid_encoding(),
+            E::WrongAlgorithm => Self::wrong_algorithm(),
+            E::InconsistentKey => Self::inconsistent_components(),
+            E::UnsupportedVersion => Self::version_not_supported(),
             E::KeyGenerationFailed | E::EntropyUnavailable(_) => {
                 Self::rng_failed()
             }
-            E::NotSupported => Self::wrong_algorithm(),
             _ => Self::invalid_encoding(),
         }
     }
@@ -141,5 +150,8 @@ mod tests {
         assert_eq!(name(E::InvalidPrivateKey), "InvalidComponent");
         assert_eq!(name(E::InvalidPublicKey), "InvalidComponent");
         assert_eq!(name(E::EntropyUnavailable(0)), "RNG failed");
+        assert_eq!(name(E::WrongAlgorithm), "WrongAlgorithm");
+        assert_eq!(name(E::InconsistentKey), "InconsistentComponents");
+        assert_eq!(name(E::UnsupportedVersion), "VersionNotSupported");
     }
 }

@@ -157,7 +157,7 @@ mod tests {
         let n = c.public_key().der_bytes(&mut out).unwrap();
         assert_eq!(
             p384::PublicKey::try_from_der(&out[..n]).err(),
-            Some(Error::InvalidEncoding)
+            Some(Error::WrongAlgorithm)
         );
         assert_eq!(
             p384::PublicKey::try_from_sec1(&c.public_key().sec1_bytes()).err(),

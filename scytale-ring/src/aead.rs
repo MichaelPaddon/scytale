@@ -14,6 +14,7 @@ use zeroize::Zeroize;
 
 use crate::{error, hkdf};
 
+pub mod chacha20_poly1305_openssh;
 pub mod quic;
 
 /// The length of every nonce here.

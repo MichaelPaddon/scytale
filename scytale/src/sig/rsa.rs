@@ -803,8 +803,8 @@ impl PublicKey {
     /// here.
     ///
     /// The modulus is checked as [`try_new`](Self::try_new) checks
-    /// it; anything else wrong with the bytes is
-    /// [`Error::InvalidEncoding`].
+    /// it. Another algorithm's key is [`Error::WrongAlgorithm`], and
+    /// anything else wrong with the bytes [`Error::InvalidEncoding`].
     pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
         Self::filled(|words| PublicKeyRef::fill_from_der(der, words))
     }
@@ -1034,8 +1034,10 @@ impl PrivateKey {
     ///
     /// The `RSAPrivateKey` inside carries the primes, so the key
     /// comes in as if through [`try_new_crt`](Self::try_new_crt),
-    /// with the same checks. A multi-prime key, or anything else
-    /// wrong with the bytes, is [`Error::InvalidEncoding`].
+    /// with the same checks. Another algorithm's key is
+    /// [`Error::WrongAlgorithm`], a multi-prime key
+    /// [`Error::UnsupportedVersion`], and anything else wrong with
+    /// the bytes [`Error::InvalidEncoding`].
     pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
         Self::filled(|words, scratch| {
             PrivateKeyRef::fill_from_der(der, words, scratch)
@@ -2259,7 +2261,7 @@ mod tests {
         out[oid_end] = 0x02;
         assert_eq!(
             PrivateKey::try_from_der(&out[..n]).err(),
-            Some(Error::InvalidEncoding)
+            Some(Error::WrongAlgorithm)
         );
         out[oid_end] = 0x01;
         assert_eq!(
@@ -2281,7 +2283,7 @@ mod tests {
         out[oid_end] = 0x02;
         assert_eq!(
             PublicKey::try_from_der(&out[..n]).err(),
-            Some(Error::InvalidEncoding)
+            Some(Error::WrongAlgorithm)
         );
 
         // The version field of RSAPrivateKey: 1 means multi-prime.
@@ -2290,7 +2292,7 @@ mod tests {
         out[6] = 1;
         assert_eq!(
             PrivateKey::try_from_pkcs1(&out[..n]).err(),
-            Some(Error::InvalidEncoding)
+            Some(Error::UnsupportedVersion)
         );
 
         // A public block is not a private key, whatever it holds.

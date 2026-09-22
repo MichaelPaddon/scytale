@@ -10,10 +10,11 @@ use scytale::Key;
 use scytale::hash::sha2::{Sha256, Sha384};
 use scytale::sig::ecdsa::{p256, p384};
 use scytale::sig::ed25519;
+use zeroize::Zeroize;
 
 use crate::debug::HexStr;
 use crate::error::{self, KeyRejected};
-use crate::{rand, sealed};
+use crate::{pkcs8, pkcs8_peek, rand, sealed};
 
 pub use crate::rsa::{
     PublicKeyComponents as RsaPublicKeyComponents,
@@ -211,14 +212,65 @@ impl Ed25519KeyPair {
         }
     }
 
-    /// A key pair from PKCS#8, version 1 or 2. A public key carried in
-    /// version 2 is checked against the seed.
+    /// A fresh key pair from `rng`, as a PKCS#8 version 2 document
+    /// carrying the public key, which [`from_pkcs8`](Self::from_pkcs8)
+    /// reads back.
+    pub fn generate_pkcs8(
+        rng: &dyn rand::SecureRandom,
+    ) -> Result<pkcs8::Document, error::Unspecified> {
+        let mut seed = Key::from([0u8; ed25519::KEY_SIZE]);
+        rng.fill(seed.as_mut())?;
+        let mut der = ed25519::PrivateKey::new(&seed).der_bytes();
+        let document = pkcs8::Document::new(&der);
+        der.zeroize();
+        Ok(document)
+    }
+
+    /// A key pair from PKCS#8 version 2 (RFC 5958's version 1), which
+    /// must carry the public key; it is checked against the seed.
+    pub fn from_pkcs8(pkcs8: &[u8]) -> Result<Self, KeyRejected> {
+        pkcs8_peek::check(pkcs8, pkcs8_peek::ED25519)?;
+        // ring refuses the version before it reads the key, so a
+        // version 1 structure is refused for its version whatever
+        // else is wrong with it.
+        if pkcs8_peek::version(pkcs8) == Some(0) {
+            return Err(KeyRejected::version_not_supported());
+        }
+        let mut fixed = [0u8; LEGACY_MAX];
+        let pkcs8 = legacy_public_key_tag_fixed(pkcs8, &mut fixed);
+        let (secret, form) = ed25519::secret_from_der_with_form(pkcs8)
+            .map_err(KeyRejected::from_scytale)?;
+        if !form.v1 {
+            return Err(KeyRejected::version_not_supported());
+        }
+        if !form.public_key {
+            return Err(KeyRejected::public_key_is_missing());
+        }
+        Ok(Self::from_seed(secret))
+    }
+
+    /// A key pair from PKCS#8 of either version. A version 2 structure
+    /// must still carry the public key, which is checked against the
+    /// seed; version 1 cannot carry one and is taken on the seed
+    /// alone.
     pub fn from_pkcs8_maybe_unchecked(
         pkcs8: &[u8],
     ) -> Result<Self, KeyRejected> {
-        ed25519::PrivateKey::try_from_der(pkcs8)
-            .map(Self::from_private)
-            .map_err(KeyRejected::from_scytale)
+        pkcs8_peek::check(pkcs8, pkcs8_peek::ED25519)?;
+        let mut fixed = [0u8; LEGACY_MAX];
+        let pkcs8 = legacy_public_key_tag_fixed(pkcs8, &mut fixed);
+        let (secret, form) = ed25519::secret_from_der_with_form(pkcs8)
+            .map_err(KeyRejected::from_scytale)?;
+        if form.v1 && !form.public_key {
+            return Err(KeyRejected::public_key_is_missing());
+        }
+        Ok(Self::from_seed(secret))
+    }
+
+    fn from_seed(mut secret: [u8; ed25519::KEY_SIZE]) -> Self {
+        let key = Key::from(secret);
+        secret.zeroize();
+        Self::from_private(ed25519::PrivateKey::new(&key))
     }
 
     /// A key pair from its 32-byte seed.
@@ -248,6 +300,66 @@ impl Ed25519KeyPair {
     /// Signs `msg`.
     pub fn sign(&self, msg: &[u8]) -> Signature {
         Signature::new(&self.private.sign(msg))
+    }
+}
+
+/// The longest structure the legacy repair handles: an RFC 5958
+/// PrivateKeyInfo with attributes has no bound, but the ones ring
+/// wrote are well under this.
+const LEGACY_MAX: usize = 256;
+
+/// `pkcs8` with the public key's tag repaired, if it carries the one
+/// ring's early versions wrote.
+///
+/// RFC 5958 puts the public key in `[1] IMPLICIT BIT STRING`, one
+/// primitive element, and that is what scytale reads. ring 0.16 wrote
+/// `[1] EXPLICIT`, a constructed element around a whole BIT STRING,
+/// and ring still reads its own old keys. scytale is right to refuse
+/// them; a caller switching from ring may still hold one, so this
+/// rewrites that one element, at the end of the structure where the
+/// standard puts it, into the standard form: `A1 23 03 21 00 <key>`
+/// becomes `81 21 00 <key>`, two bytes shorter, and the outer
+/// length shrinks to match. Anything else is returned as it came.
+fn legacy_public_key_tag_fixed<'a>(
+    pkcs8: &'a [u8],
+    fixed: &'a mut [u8; LEGACY_MAX],
+) -> &'a [u8] {
+    const KEY: usize = ED25519_PUBLIC_KEY_LEN;
+    const LEGACY_TAIL: usize = 5 + KEY;
+    let n = pkcs8.len();
+    let legacy = (4 + LEGACY_TAIL..=LEGACY_MAX).contains(&n)
+        && pkcs8[n - LEGACY_TAIL..n - KEY] == [0xa1, 0x23, 0x03, 0x21, 0x00];
+    if !legacy {
+        return pkcs8;
+    }
+    // Only the outer SEQUENCE's length changes. It is either one
+    // byte, or the two-byte form 0x81 0xnn; the structure is too
+    // small for any other.
+    let (header, body) = match pkcs8 {
+        [0x30, len, ..] if *len < 0x80 && usize::from(*len) + 2 == n => {
+            (2, usize::from(*len))
+        }
+        [0x30, 0x81, len, ..] if usize::from(*len) + 3 == n => {
+            (3, usize::from(*len))
+        }
+        _ => return pkcs8,
+    };
+    let out = &mut fixed[..n - 2];
+    out[..n - LEGACY_TAIL].copy_from_slice(&pkcs8[..n - LEGACY_TAIL]);
+    let tail = n - LEGACY_TAIL;
+    out[tail] = 0x81;
+    out[tail + 1] = 0x21;
+    out[tail + 2] = 0x00;
+    out[tail + 3..].copy_from_slice(&pkcs8[n - KEY..]);
+    // The new length may fit one byte where the old took two.
+    let len = body - 2;
+    if header == 3 && len < 0x80 {
+        out.copy_within(2.., 1);
+        out[1] = len as u8;
+        &out[..n - 3]
+    } else {
+        out[header - 1] = len as u8;
+        out
     }
 }
 
@@ -546,6 +658,29 @@ impl EcdsaKeyPair {
         }
     }
 
+    /// A fresh key pair from `rng`, as a PKCS#8 document carrying the
+    /// public point, which [`from_pkcs8`](Self::from_pkcs8) reads back.
+    pub fn generate_pkcs8(
+        alg: &'static EcdsaSigningAlgorithm,
+        rng: &dyn rand::SecureRandom,
+    ) -> Result<pkcs8::Document, error::Unspecified> {
+        macro_rules! generate {
+            ($curve:ident) => {{
+                let key =
+                    crate::agreement::draw(rng, $curve::PrivateKey::try_new)?;
+                let mut der = [0u8; $curve::DER_SIZE];
+                let n = key.der_bytes(&mut der).map_err(error::erase)?;
+                let document = pkcs8::Document::new(&der[..n]);
+                der.zeroize();
+                Ok(document)
+            }};
+        }
+        match alg.curve {
+            Curve::P256 => generate!(p256),
+            Curve::P384 => generate!(p384),
+        }
+    }
+
     /// A key pair from PKCS#8 on the algorithm's curve. A public key
     /// carried in it is checked against the private one.
     pub fn from_pkcs8(
@@ -553,14 +688,23 @@ impl EcdsaKeyPair {
         pkcs8: &[u8],
         _rng: &dyn rand::SecureRandom,
     ) -> Result<Self, KeyRejected> {
-        let private =
-            match alg.curve {
-                Curve::P256 => p256::PrivateKey::try_from_der(pkcs8)
-                    .map(EcdsaPrivate::P256),
-                Curve::P384 => p384::PrivateKey::try_from_der(pkcs8)
-                    .map(EcdsaPrivate::P384),
-            }
-            .map_err(KeyRejected::from_scytale)?;
+        let expected = match alg.curve {
+            Curve::P256 => pkcs8_peek::EC_P256,
+            Curve::P384 => pkcs8_peek::EC_P384,
+        };
+        pkcs8_peek::check(pkcs8, expected)?;
+        let (private, form) = match alg.curve {
+            Curve::P256 => p256::PrivateKey::try_from_der_with_form(pkcs8)
+                .map(|(k, f)| (EcdsaPrivate::P256(k), f)),
+            Curve::P384 => p384::PrivateKey::try_from_der_with_form(pkcs8)
+                .map(|(k, f)| (EcdsaPrivate::P384(k), f)),
+        }
+        .map_err(KeyRejected::from_scytale)?;
+        // RFC 5915 makes the public point optional; ring requires it,
+        // and calls its absence an encoding error.
+        if !form.public_key {
+            return Err(KeyRejected::invalid_encoding());
+        }
         Ok(Self::from_private(alg, private))
     }
 

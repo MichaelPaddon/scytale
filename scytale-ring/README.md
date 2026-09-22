@@ -16,7 +16,7 @@ so it says nothing about ring. This table does:
 
 | scytale-ring | ring API | Tested with |
 | --- | --- | --- |
-| 0.7 | 0.17, checked against 0.17.14 | rustls 0.23.45, rustls-webpki 0.103.15 |
+| 0.8 | 0.17, checked against 0.17.14 | rustls 0.23.45, rustls-webpki 0.103.15 |
 
 A new ring API arrives in a new scytale-ring minor version, and a row
 here says so.
@@ -27,7 +27,7 @@ Replace ring in your own manifest:
 
 ```toml
 [dependencies]
-ring = { package = "scytale-ring", version = "0.7" }
+ring = { package = "scytale-ring", version = "0.8" }
 ```
 
 That reaches your crate's own calls. It does not reach a dependency
@@ -38,6 +38,9 @@ editing that crate's manifest the same way.
 
 ## What is tested
 
+- ring's own test suite, every file of it, vendored unchanged under
+  `ring-tests/` with its vector files and ring's licence beside them.
+  Every test passes; nothing is skipped or altered.
 - Unit tests for every module, against published vectors (FIPS 180,
   RFC 4231, RFC 5869, RFC 7748, RFC 8032, RFC 8439, RFC 9001) and
   against keys and signatures made by OpenSSL.
@@ -52,15 +55,10 @@ editing that crate's manifest the same way.
   a test that compares signature bytes with stored ones will not
   match. The random source ring's signing calls take is accepted and
   not used.
-- **Some key rejections give a different reason.** A key ring refuses
-  is refused here too, but for a malformed PKCS#8 key the reason may be
-  `InvalidEncoding` where ring names a more specific cause.
-- **An ECDSA PKCS#8 key with no public key is accepted.** ring requires
-  it; RFC 5915 makes it optional.
-- **Not yet provided:** `aead::chacha20_poly1305_openssh`, `pbkdf2`,
-  `pkcs8`, `io`, key generation into PKCS#8 (`generate_pkcs8`),
-  `Ed25519KeyPair::from_pkcs8` (the version 2 only form), and ring's
-  deprecated `test` and `constant_time` modules.
+- **Keys ring's old versions wrote are read.** ring 0.16 wrote Ed25519
+  PKCS#8 with the public key under the wrong tag, and ring still reads
+  them; so does this crate, by repairing that one element before
+  scytale reads the key. scytale itself refuses them.
 - **Minimum Rust is 1.88**, scytale's, where ring's is 1.66.
 
 ## Licence

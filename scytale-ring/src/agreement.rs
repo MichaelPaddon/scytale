@@ -84,7 +84,7 @@ impl fmt::Debug for EphemeralPrivateKey {
 /// A scalar drawn from `rng` as big-endian bytes, redrawn while it is
 /// out of range. The bytes drawn are the key, so a source that returns
 /// fixed bytes gives a known key, as ring's tests rely on.
-fn draw<const N: usize, K>(
+pub(crate) fn draw<const N: usize, K>(
     rng: &dyn rand::SecureRandom,
     make: impl Fn(&[u8; N]) -> Result<K, scytale::Error>,
 ) -> Result<K, error::Unspecified> {

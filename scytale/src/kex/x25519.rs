@@ -192,13 +192,14 @@ pub const PUBLIC_KEY_PEM_SIZE: usize = 113;
 /// `PRIVATE KEY` in a PEM file, which RFC 8410 fixes for X25519: the
 /// 32 bytes in an OCTET STRING of their own inside the one PKCS#8
 /// provides. A version 1 structure that also carries the public key
-/// is read, and refused when that key is not the secret's, since a
-/// pair that disagrees has been corrupted. Anything else that is not
-/// this structure under `id-X25519`, the other curve's key
-/// included, is [`Error::InvalidEncoding`].
+/// is read, and refused as [`Error::InconsistentKey`] when that key
+/// is not the secret's. A structure under another identifier, the
+/// other curve's included, or under `id-X25519` with the NULL
+/// parameters RFC 8410 forbids, is [`Error::WrongAlgorithm`];
+/// anything else wrong with the bytes is [`Error::InvalidEncoding`].
 pub fn secret_from_der(der: &[u8]) -> Result<[u8; KEY_SIZE], Error> {
-    let (secret, carried) = der::curve_secret_from_der(&der::X25519, der)?;
-    checked(secret, carried)
+    let found = der::curve_secret_from_der(&der::X25519, der)?;
+    checked(found.secret, found.public)
 }
 
 /// The secret a structure carried, once the public key it may
@@ -212,7 +213,7 @@ fn checked(
         && carried != public_key(&secret)
     {
         secret.zeroize();
-        return Err(Error::InvalidEncoding);
+        return Err(Error::InconsistentKey);
     }
     Ok(secret)
 }
@@ -241,7 +242,8 @@ pub fn public_key_der(public: &[u8; KEY_SIZE]) -> [u8; PUBLIC_KEY_DER_SIZE] {
 /// leniently; anything else that is not exactly one well-formed
 /// block, an encrypted key included, is [`Error::InvalidEncoding`].
 pub fn secret_from_pem(pem: &[u8]) -> Result<[u8; KEY_SIZE], Error> {
-    let (secret, carried) = der::curve_secret_from_pem(&der::X25519, pem)?;
+    let found = der::curve_secret_from_pem(&der::X25519, pem)?;
+    let (secret, carried) = (found.secret, found.public);
     checked(secret, carried)
 }
 
@@ -727,10 +729,10 @@ mod tests {
         // An Ed25519 key is not an X25519 key.
         let mut e = secret_der_bytes;
         e[11] = 0x70;
-        assert_eq!(secret_from_der(&e), Err(Error::InvalidEncoding));
+        assert_eq!(secret_from_der(&e), Err(Error::WrongAlgorithm));
         let mut e = public_der_bytes;
         e[8] = 0x70;
-        assert_eq!(public_key_from_der(&e), Err(Error::InvalidEncoding));
+        assert_eq!(public_key_from_der(&e), Err(Error::WrongAlgorithm));
 
         // A version 1 structure carrying the public key reads when
         // the pair agrees and is refused when it does not.
@@ -744,6 +746,6 @@ mod tests {
         v1[51..].copy_from_slice(&public);
         assert_eq!(secret_from_der(&v1), Ok(secret));
         v1[82] ^= 1;
-        assert_eq!(secret_from_der(&v1), Err(Error::InvalidEncoding));
+        assert_eq!(secret_from_der(&v1), Err(Error::InconsistentKey));
     }
 }

@@ -20,7 +20,7 @@ name = "ring"
 
 [dependencies]
 # Moves with the workspace version.
-scytale = { path = "../scytale", version = "0.7" }
+scytale = { path = "../scytale", version = "0.8" }
 untrusted = "0.9"
 zeroize = { version = "1", default-features = false }
 

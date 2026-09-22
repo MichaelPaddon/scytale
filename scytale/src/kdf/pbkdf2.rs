@@ -66,24 +66,73 @@ pub fn pbkdf2<H: Hash + Clone + BlockType + Default>(
     // once per iteration.
     let mut mac = Hmac::<H>::new(password);
     for (i, chunk) in key.chunks_mut(size_of::<H::Output>()).enumerate() {
-        // U_1 = PRF(P, S || INT(i)), then U_j = PRF(P, U_{j-1}).
-        mac.update(salt);
-        mac.update(&(i as u32 + 1).to_be_bytes());
-        let mut u = mac.finalize();
-        let mut t = u;
-        for _ in 1..iterations {
-            mac.update(u.as_ref());
-            u = mac.finalize();
-            for (t, u) in t.as_mut().iter_mut().zip(u.as_ref()) {
-                *t ^= u;
-            }
-        }
+        let mut t = block(&mut mac, salt, iterations, i);
         chunk.copy_from_slice(&t.as_ref()[..chunk.len()]);
-        // Both are output key material the caller already has.
-        u.as_mut().zeroize();
+        // Output key material the caller already has.
         t.as_mut().zeroize();
     }
     Ok(())
+}
+
+/// Whether `key` is what [`pbkdf2`] derives from `password` and
+/// `salt`, for a stored verifier: each block is derived and compared
+/// as it goes, so no buffer the key's length is needed, and the
+/// comparison takes the same time whichever block differs.
+///
+/// Returns [`Error::AuthenticationFailed`] on a mismatch, and the
+/// errors [`pbkdf2`] returns for the same inputs. An empty `key` is
+/// [`Error::InvalidLength`]: nothing can be checked against nothing.
+pub fn verify<H: Hash + Clone + BlockType + Default>(
+    password: &[u8],
+    salt: &[u8],
+    iterations: u32,
+    key: &[u8],
+) -> Result<(), Error> {
+    if iterations == 0 {
+        return Err(Error::InvalidIterations);
+    }
+    if key.is_empty()
+        || key.len().div_ceil(size_of::<H::Output>()) > u32::MAX as usize
+    {
+        return Err(Error::InvalidLength(key.len()));
+    }
+    let mut mac = Hmac::<H>::new(password);
+    let mut same = true;
+    for (i, chunk) in key.chunks(size_of::<H::Output>()).enumerate() {
+        let mut t = block(&mut mac, salt, iterations, i);
+        // Every block is compared whatever the earlier ones said.
+        same &= crate::constant_time::equal(&t.as_ref()[..chunk.len()], chunk);
+        t.as_mut().zeroize();
+    }
+    if same {
+        Ok(())
+    } else {
+        Err(Error::AuthenticationFailed)
+    }
+}
+
+/// Block `i` of the output, counted from zero, under a MAC keyed with
+/// the password: U_1 = PRF(P, S || INT(i + 1)), U_j = PRF(P, U_{j-1}),
+/// and the block is their XOR. The result is output key material.
+fn block<H: Hash + Clone + BlockType + Default>(
+    mac: &mut Hmac<H>,
+    salt: &[u8],
+    iterations: u32,
+    i: usize,
+) -> H::Output {
+    mac.update(salt);
+    mac.update(&(i as u32 + 1).to_be_bytes());
+    let mut u = mac.finalize();
+    let mut t = u;
+    for _ in 1..iterations {
+        mac.update(u.as_ref());
+        u = mac.finalize();
+        for (t, u) in t.as_mut().iter_mut().zip(u.as_ref()) {
+            *t ^= u;
+        }
+    }
+    u.as_mut().zeroize();
+    t
 }
 
 #[cfg(test)]
@@ -141,6 +190,40 @@ mod tests {
                 "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa\
                  98134a"
             )
+        );
+    }
+
+    /// A stored key verifies whole and cut short, and a wrong one,
+    /// wrong in any block, does not.
+    #[test]
+    fn verify_agrees_with_derivation() {
+        let mut key = [0u8; 40];
+        pbkdf2::<Sha256>(b"password", b"salt", 3, &mut key).unwrap();
+        assert_eq!(verify::<Sha256>(b"password", b"salt", 3, &key), Ok(()));
+        assert_eq!(
+            verify::<Sha256>(b"password", b"salt", 3, &key[..7]),
+            Ok(())
+        );
+        for i in [0, 31, 32, 39] {
+            let mut wrong = key;
+            wrong[i] ^= 1;
+            assert_eq!(
+                verify::<Sha256>(b"password", b"salt", 3, &wrong),
+                Err(Error::AuthenticationFailed),
+                "{i}"
+            );
+        }
+        assert_eq!(
+            verify::<Sha256>(b"password", b"salt", 2, &key),
+            Err(Error::AuthenticationFailed)
+        );
+        assert_eq!(
+            verify::<Sha256>(b"password", b"salt", 3, &[]),
+            Err(Error::InvalidLength(0))
+        );
+        assert_eq!(
+            verify::<Sha256>(b"password", b"salt", 0, &key),
+            Err(Error::InvalidIterations)
         );
     }
 

@@ -1303,14 +1303,14 @@ macro_rules! parameter_set {
 
             /// A key from its DER PKCS#8 `PrivateKeyInfo`, the form
             /// under `PRIVATE KEY` in a PEM file: the key's bytes as an
-            /// OCTET STRING under this parameter set's OID. Another set,
-            /// or anything else wrong with the bytes, is
-            /// [`Error::InvalidEncoding`].
+            /// OCTET STRING under this parameter set's OID. Another set
+            /// is [`Error::WrongAlgorithm`], and anything else wrong
+            /// with the bytes [`Error::InvalidEncoding`].
             pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
                 let info = crate::der::read_pkcs8(der)?;
                 let algorithm = &info.algorithm;
                 if algorithm.oid != OID || !algorithm.params.is_empty() {
-                    return Err(Error::InvalidEncoding);
+                    return Err(Error::WrongAlgorithm);
                 }
                 let mut inner = crate::der::Reader::new(info.private_key);
                 let bytes = inner.octet_string()?;
@@ -1389,7 +1389,7 @@ macro_rules! parameter_set {
             pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
                 let (algorithm, key) = crate::der::read_spki(der)?;
                 if algorithm.oid != OID || !algorithm.params.is_empty() {
-                    return Err(Error::InvalidEncoding);
+                    return Err(Error::WrongAlgorithm);
                 }
                 let key: &[u8; PUBLIC_KEY_SIZE] =
                     key.try_into().map_err(|_| Error::InvalidEncoding)?;
@@ -1556,12 +1556,12 @@ mod tests {
         let n = key.der_bytes(&mut out).unwrap();
         assert_eq!(
             sha2_128f::PrivateKey::try_from_der(&out[..n]).err(),
-            Some(Error::InvalidEncoding)
+            Some(Error::WrongAlgorithm)
         );
         let n = key.public_key().der_bytes(&mut out).unwrap();
         assert_eq!(
             shake_128s::PublicKey::try_from_der(&out[..n]).err(),
-            Some(Error::InvalidEncoding)
+            Some(Error::WrongAlgorithm)
         );
     }
 }

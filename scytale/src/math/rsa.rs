@@ -1052,12 +1052,13 @@ const PRIVATE_DER: usize = 8 * modulus_len(MAX_BITS);
 /// `id-RSASSA-PSS` with whatever it carries, which constrains the
 /// scheme rather than the key and is not read.
 fn rsa_algorithm(algorithm: &Algorithm, pss: bool) -> Result<(), Error> {
-    let ok = (algorithm.oid == der::RSA_ENCRYPTION && algorithm.no_params())
+    let ok = (algorithm.oid == der::RSA_ENCRYPTION
+        && algorithm.absent_or_null_params())
         || (pss && algorithm.oid == der::RSASSA_PSS);
     if ok {
         Ok(())
     } else {
-        Err(Error::InvalidEncoding)
+        Err(Error::WrongAlgorithm)
     }
 }
 
@@ -1161,9 +1162,11 @@ impl<'a> Private<'a> {
         let mut key = outer.sequence()?;
         outer.end()?;
         // Version 0 is a two-prime key. Version 1 is multi-prime,
-        // which nothing here handles.
-        if key.integer()? != [0] {
-            return Err(Error::InvalidEncoding);
+        // which nothing here handles; RFC 8017 defines no other.
+        match key.integer()? {
+            [0] => {}
+            [1] => return Err(Error::UnsupportedVersion),
+            _ => return Err(Error::InvalidEncoding),
         }
         let n = key.integer()?;
         let e = key.integer()?;

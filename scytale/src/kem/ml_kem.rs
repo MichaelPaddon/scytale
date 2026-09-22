@@ -963,14 +963,15 @@ macro_rules! parameter_set {
             /// A key from its DER PKCS#8 `PrivateKeyInfo`, the form
             /// under `PRIVATE KEY` in a PEM file, which holds the
             /// seed, the expanded key, or both; both are checked, and
-            /// a pair that disagrees is refused as corrupt. Another
-            /// parameter set, or anything else wrong with the bytes,
-            /// is [`Error::InvalidEncoding`].
+            /// a pair that disagrees is [`Error::InconsistentKey`].
+            /// Another parameter set is [`Error::WrongAlgorithm`], and
+            /// anything else wrong with the bytes
+            /// [`Error::InvalidEncoding`].
             pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
                 let info = crate::der::read_pkcs8(der)?;
                 let algorithm = &info.algorithm;
                 if algorithm.oid != OID || !algorithm.params.is_empty() {
-                    return Err(Error::InvalidEncoding);
+                    return Err(Error::WrongAlgorithm);
                 }
                 let SeedOrExpanded { seed, expanded } =
                     crate::der::read_seed_or_expanded(info.private_key)?;
@@ -1082,7 +1083,7 @@ macro_rules! parameter_set {
             pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
                 let (algorithm, key) = crate::der::read_spki(der)?;
                 if algorithm.oid != OID || !algorithm.params.is_empty() {
-                    return Err(Error::InvalidEncoding);
+                    return Err(Error::WrongAlgorithm);
                 }
                 let key: &[u8; PUBLIC_KEY_SIZE] =
                     key.try_into().map_err(|_| Error::InvalidEncoding)?;
@@ -1303,12 +1304,12 @@ mod tests {
         let n = key.der_bytes(&mut out).unwrap();
         assert_eq!(
             ml_kem_768::PrivateKey::try_from_der(&out[..n]).err(),
-            Some(Error::InvalidEncoding)
+            Some(Error::WrongAlgorithm)
         );
         let n = key.public_key().der_bytes(&mut out).unwrap();
         assert_eq!(
             ml_kem_768::PublicKey::try_from_der(&out[..n]).err(),
-            Some(Error::InvalidEncoding)
+            Some(Error::WrongAlgorithm)
         );
     }
 

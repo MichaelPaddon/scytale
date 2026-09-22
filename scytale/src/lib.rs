@@ -153,5 +153,6 @@ pub mod sig;
 
 mod traits;
 
+pub use der::Pkcs8Form;
 pub use error::Error;
 pub use traits::{BlockType, ByteArray, Key, KeyType, Random};

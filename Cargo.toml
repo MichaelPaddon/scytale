@@ -1,9 +1,14 @@
 [workspace]
 resolver = "2"
-members = ["scytale", "scytale-cli", "scytale-ring"]
+members = [
+    "scytale",
+    "scytale-cli",
+    "scytale-ring",
+    "scytale-ring/ring-tests",
+]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 # `as_chunks_mut`, which turns a byte slice into cipher blocks without
 # unsafe, landed in 1.88.

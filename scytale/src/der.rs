@@ -338,12 +338,18 @@ pub(crate) struct Algorithm<'a> {
 }
 
 impl Algorithm<'_> {
-    /// Whether the parameters are absent or a NULL, the two ways of
-    /// saying there are none. Which is right depends on the
-    /// algorithm and writers get it wrong both ways, so both are
-    /// read.
-    pub(crate) fn no_params(&self) -> bool {
+    /// Whether the parameters are absent or a NULL. RFC 8017 says
+    /// `rsaEncryption` takes a NULL, and enough writers leave it out
+    /// that an RSA reader accepts either; this is for that reader.
+    pub(crate) fn absent_or_null_params(&self) -> bool {
         self.params.is_empty() || self.params == [NULL, 0]
+    }
+
+    /// Whether the parameters are absent, which RFC 8410 requires of
+    /// the curve algorithms: a NULL there is a defect the RFC names
+    /// and says not to propagate, so it is not read either.
+    pub(crate) fn absent_params(&self) -> bool {
+        self.params.is_empty()
     }
 }
 
@@ -404,12 +410,29 @@ pub(crate) fn write_spki_with(
     })
 }
 
+/// Which form a PKCS#8 `PrivateKeyInfo` took, for a caller whose own
+/// rules are stricter than the standard's: one that requires the
+/// version 1 form, or the public key, may ask. Every reader here
+/// takes either version and checks a public key when one is carried.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Pkcs8Form {
+    /// Whether it was version 1, RFC 5958's OneAsymmetricKey.
+    pub v1: bool,
+    /// Whether it carried the public key, which was then checked
+    /// against the private one.
+    pub public_key: bool,
+}
+
 /// A whole PKCS#8 PrivateKeyInfo.
 pub(crate) struct Pkcs8<'a> {
     pub(crate) algorithm: Algorithm<'a>,
     /// The privateKey OCTET STRING's contents, an encoding of the
     /// algorithm's own.
     pub(crate) private_key: &'a [u8],
+    /// Whether the structure is version 1, RFC 5958's
+    /// OneAsymmetricKey, which is the form that may carry a public
+    /// key.
+    pub(crate) v1: bool,
     /// The public key a version 1 structure may carry.
     pub(crate) public_key: Option<&'a [u8]>,
 }
@@ -423,7 +446,7 @@ pub(crate) fn read_pkcs8(der: &[u8]) -> Result<Pkcs8<'_>, Error> {
     let v1 = match info.integer()? {
         [0] => false,
         [1] => true,
-        _ => return Err(Error::InvalidEncoding),
+        _ => return Err(Error::UnsupportedVersion),
     };
     let algorithm = algorithm(&mut info)?;
     let private_key = info.octet_string()?;
@@ -440,6 +463,7 @@ pub(crate) fn read_pkcs8(der: &[u8]) -> Result<Pkcs8<'_>, Error> {
     Ok(Pkcs8 {
         algorithm,
         private_key,
+        v1,
         public_key,
     })
 }
@@ -526,10 +550,10 @@ pub(crate) const CURVE_PUBLIC_DER: usize = 44;
 pub(crate) fn curve_secret_from_der(
     oid: &[u8; 3],
     der: &[u8],
-) -> Result<([u8; CURVE_KEY], Option<[u8; CURVE_KEY]>), Error> {
+) -> Result<CurveSecret, Error> {
     let info = read_pkcs8(der)?;
-    if info.algorithm.oid != oid || !info.algorithm.no_params() {
-        return Err(Error::InvalidEncoding);
+    if info.algorithm.oid != oid || !info.algorithm.absent_params() {
+        return Err(Error::WrongAlgorithm);
     }
     let mut inner = Reader::new(info.private_key);
     let seed = inner.octet_string()?;
@@ -539,7 +563,22 @@ pub(crate) fn curve_secret_from_der(
         .public_key
         .map(|p| p.try_into().map_err(|_| Error::InvalidEncoding))
         .transpose()?;
-    Ok((secret, public))
+    Ok(CurveSecret {
+        secret,
+        public,
+        v1: info.v1,
+    })
+}
+
+/// What a curve PrivateKeyInfo held.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+pub(crate) struct CurveSecret {
+    pub(crate) secret: [u8; CURVE_KEY],
+    /// The public key it carried, which only a version 1 structure
+    /// can.
+    pub(crate) public: Option<[u8; CURVE_KEY]>,
+    /// Whether it was version 1.
+    pub(crate) v1: bool,
 }
 
 /// A curve secret's version 0 PrivateKeyInfo, which is fixed down
@@ -590,8 +629,8 @@ pub(crate) fn curve_public_from_der(
     der: &[u8],
 ) -> Result<[u8; CURVE_KEY], Error> {
     let (algorithm, key) = read_spki(der)?;
-    if algorithm.oid != oid || !algorithm.no_params() {
-        return Err(Error::InvalidEncoding);
+    if algorithm.oid != oid || !algorithm.absent_params() {
+        return Err(Error::WrongAlgorithm);
     }
     key.try_into().map_err(|_| Error::InvalidEncoding)
 }
@@ -629,7 +668,7 @@ const CURVE_SECRET_SCRATCH: usize = 512;
 pub(crate) fn curve_secret_from_pem(
     oid: &[u8; 3],
     pem: &[u8],
-) -> Result<([u8; CURVE_KEY], Option<[u8; CURVE_KEY]>), Error> {
+) -> Result<CurveSecret, Error> {
     let mut der = [0u8; CURVE_SECRET_SCRATCH];
     let result = pem::decode(&[PRIVATE_KEY], pem, &mut der)
         .and_then(|(_, n)| curve_secret_from_der(oid, &der[..n]));
@@ -835,11 +874,12 @@ mod tests {
                 write_spki(&mut out, &oid, false, |w| w.raw(&public)).unwrap();
             assert_eq!(out[..n], curve_public_der(&oid, &public));
 
-            let (back, carried) =
+            let back =
                 curve_secret_from_der(&oid, &curve_secret_der(&oid, &secret))
                     .unwrap();
-            assert_eq!(back, secret);
-            assert_eq!(carried, None);
+            assert_eq!(back.secret, secret);
+            assert_eq!(back.public, None);
+            assert!(!back.v1);
             assert_eq!(
                 curve_public_from_der(&oid, &curve_public_der(&oid, &public)),
                 Ok(public)
@@ -852,10 +892,10 @@ mod tests {
         let secret = [0x11u8; 32];
         let good = curve_secret_der(&ED25519, &secret);
         // The other curve's OID; a bare seed without CurvePrivateKey;
-        // a 31-byte seed; NULL parameters are tolerated.
+        // a 31-byte seed; and NULL parameters, which RFC 8410 forbids.
         assert_eq!(
             curve_secret_from_der(&X25519, &good),
-            Err(Error::InvalidEncoding)
+            Err(Error::WrongAlgorithm)
         );
         let mut bare = [0u8; 46];
         bare[..14].copy_from_slice(&[
@@ -882,8 +922,8 @@ mod tests {
         ]);
         with_null[18..].copy_from_slice(&secret);
         assert_eq!(
-            curve_secret_from_der(&ED25519, &with_null).map(|(s, _)| s),
-            Ok(secret)
+            curve_secret_from_der(&ED25519, &with_null),
+            Err(Error::WrongAlgorithm)
         );
     }
 
@@ -908,7 +948,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             curve_secret_from_der(&ED25519, &out[..n]),
-            Ok((secret, Some(public)))
+            Ok(CurveSecret {
+                secret,
+                public: Some(public),
+                v1: true
+            })
         );
         // The same with version 0 has a field it may not have.
         out[4] = 0;
@@ -920,7 +964,7 @@ mod tests {
         out[4] = 2;
         assert_eq!(
             curve_secret_from_der(&ED25519, &out[..n]),
-            Err(Error::InvalidEncoding)
+            Err(Error::UnsupportedVersion)
         );
     }
 
@@ -939,7 +983,14 @@ mod tests {
         for oid in [ED25519, X25519] {
             let pem = curve_secret_pem(&oid, &secret);
             assert!(pem.starts_with(b"-----BEGIN PRIVATE KEY-----\n"));
-            assert_eq!(curve_secret_from_pem(&oid, &pem), Ok((secret, None)));
+            assert_eq!(
+                curve_secret_from_pem(&oid, &pem),
+                Ok(CurveSecret {
+                    secret,
+                    public: None,
+                    v1: false
+                })
+            );
             let pem = curve_public_pem(&oid, &public);
             assert!(pem.starts_with(b"-----BEGIN PUBLIC KEY-----\n"));
             assert_eq!(curve_public_from_pem(&oid, &pem), Ok(public));

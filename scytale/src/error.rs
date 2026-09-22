@@ -116,9 +116,21 @@ pub enum Error {
     /// help an attacker.
     InvalidSignature,
     /// The bytes are not the DER or PEM structure the call reads:
-    /// malformed, truncated, followed by trailing data, wrongly
-    /// labelled, or encoding a different algorithm.
+    /// malformed, truncated, followed by trailing data, or wrongly
+    /// labelled.
     InvalidEncoding,
+    /// The structure is well formed but names another algorithm, or
+    /// another curve or parameter set of this one, than the call
+    /// reads keys for.
+    WrongAlgorithm,
+    /// The structure carries both halves of a key pair and they do
+    /// not belong together: the public half is not the private
+    /// half's own. Neither half is returned.
+    InconsistentKey,
+    /// The structure's version is one this library does not read:
+    /// a multi-prime RSA key, or a PKCS#8 version newer than the
+    /// two defined.
+    UnsupportedVersion,
     /// The processor lacks the instructions this implementation needs.
     NotSupported,
     /// The system would not supply random bytes. The number is the
@@ -197,6 +209,15 @@ impl fmt::Display for Error {
             }
             Error::InvalidEncoding => {
                 write!(f, "invalid encoding")
+            }
+            Error::WrongAlgorithm => {
+                write!(f, "key is for another algorithm")
+            }
+            Error::InconsistentKey => {
+                write!(f, "public and private halves disagree")
+            }
+            Error::UnsupportedVersion => {
+                write!(f, "unsupported structure version")
             }
             Error::NotSupported => {
                 write!(f, "not supported by this processor")

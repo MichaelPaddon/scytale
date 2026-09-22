@@ -65,7 +65,7 @@ use crate::der;
 use crate::hash::Hash;
 use crate::hash::sha2::Sha512;
 use crate::math::fe25519::Fe;
-use crate::{Error, Key, Random};
+use crate::{Error, Key, Pkcs8Form, Random};
 
 mod base;
 
@@ -330,13 +330,25 @@ pub const PUBLIC_KEY_PEM_SIZE: usize = 113;
 /// `PRIVATE KEY` in a PEM file, which RFC 8410 fixes for Ed25519: the
 /// 32 bytes in an OCTET STRING of their own inside the one PKCS#8
 /// provides. A version 1 structure that also carries the public key
-/// is read, and refused when that key is not the secret's, since a
-/// pair that disagrees has been corrupted. Anything else that is not
-/// this structure under `id-Ed25519`, the other curve's key
-/// included, is [`Error::InvalidEncoding`].
+/// is read, and refused as [`Error::InconsistentKey`] when that key
+/// is not the secret's. A structure under another identifier, the
+/// other curve's included, or under `id-Ed25519` with the NULL
+/// parameters RFC 8410 forbids, is [`Error::WrongAlgorithm`];
+/// anything else wrong with the bytes is [`Error::InvalidEncoding`].
 pub fn secret_from_der(der: &[u8]) -> Result<[u8; KEY_SIZE], Error> {
-    let (secret, carried) = der::curve_secret_from_der(&der::ED25519, der)?;
-    checked(secret, carried)
+    secret_from_der_with_form(der).map(|(secret, _)| secret)
+}
+
+/// As [`secret_from_der`], and also which form the structure took.
+pub fn secret_from_der_with_form(
+    der: &[u8],
+) -> Result<([u8; KEY_SIZE], Pkcs8Form), Error> {
+    let found = der::curve_secret_from_der(&der::ED25519, der)?;
+    let form = Pkcs8Form {
+        v1: found.v1,
+        public_key: found.public.is_some(),
+    };
+    Ok((checked(found.secret, found.public)?, form))
 }
 
 /// The secret a structure carried, once the public key it may
@@ -350,7 +362,7 @@ fn checked(
         let derived = public_key(&secret);
         if derived != carried {
             secret.zeroize();
-            return Err(Error::InvalidEncoding);
+            return Err(Error::InconsistentKey);
         }
     }
     Ok(secret)
@@ -382,7 +394,8 @@ pub fn public_key_der(
 /// leniently; anything else that is not exactly one well-formed
 /// block, an encrypted key included, is [`Error::InvalidEncoding`].
 pub fn secret_from_pem(pem: &[u8]) -> Result<[u8; KEY_SIZE], Error> {
-    let (secret, carried) = der::curve_secret_from_pem(&der::ED25519, pem)?;
+    let found = der::curve_secret_from_pem(&der::ED25519, pem)?;
+    let (secret, carried) = (found.secret, found.public);
     checked(secret, carried)
 }
 
@@ -2011,6 +2024,53 @@ mod tests {
     /// What OpenSSL 3.5 writes for a fresh key, from
     /// `openssl genpkey -algorithm Ed25519` and `openssl pkey
     /// -outform DER`, with and without `-pubout`.
+    /// The form is reported: version 0, version 1 without a public
+    /// key, and version 1 with one. A NULL parameter is another
+    /// algorithm's identifier, and a version past 1 is not read.
+    #[test]
+    fn the_form_of_a_private_key_info_is_reported() {
+        let secret = [0x11u8; 32];
+        let v0 = secret_der(&secret);
+        assert_eq!(
+            secret_from_der_with_form(&v0),
+            Ok((
+                secret,
+                Pkcs8Form {
+                    v1: false,
+                    public_key: false
+                }
+            ))
+        );
+        let pair = PrivateKey::new(&Key::from(secret)).der_bytes();
+        assert_eq!(
+            secret_from_der_with_form(&pair).map(|(_, f)| f),
+            Ok(Pkcs8Form {
+                v1: true,
+                public_key: true
+            })
+        );
+        // Version 1 with the public key left out: legal, and said.
+        let mut v1 = v0;
+        v1[4] = 1;
+        assert_eq!(
+            secret_from_der_with_form(&v1).map(|(_, f)| f),
+            Ok(Pkcs8Form {
+                v1: true,
+                public_key: false
+            })
+        );
+        v1[4] = 2;
+        assert_eq!(secret_from_der(&v1), Err(Error::UnsupportedVersion));
+
+        let mut with_null = [0u8; 50];
+        with_null[..18].copy_from_slice(&[
+            0x30, 48, 0x02, 1, 0, 0x30, 7, 0x06, 3, 0x2b, 0x65, 0x70, 0x05, 0,
+            0x04, 34, 0x04, 32,
+        ]);
+        with_null[18..].copy_from_slice(&secret);
+        assert_eq!(secret_from_der(&with_null), Err(Error::WrongAlgorithm));
+    }
+
     #[test]
     fn openssl_encodings() {
         let mut secret_der_buf = [0u8; DER_SIZE];
@@ -2038,11 +2098,11 @@ mod tests {
         // An X25519 key is not an Ed25519 key.
         let mut x = *secret_der_bytes.first_chunk::<DER_SIZE>().unwrap();
         x[11] = 0x6e;
-        assert_eq!(secret_from_der(&x), Err(Error::InvalidEncoding));
+        assert_eq!(secret_from_der(&x), Err(Error::WrongAlgorithm));
         let mut x = *public_der_bytes
             .first_chunk::<PUBLIC_KEY_DER_SIZE>()
             .unwrap();
         x[8] = 0x6e;
-        assert_eq!(public_key_from_der(&x), Err(Error::InvalidEncoding));
+        assert_eq!(public_key_from_der(&x), Err(Error::WrongAlgorithm));
     }
 }

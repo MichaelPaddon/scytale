@@ -60,6 +60,7 @@ use super::montgomery::Montgomery;
 use super::uint::Uint;
 use crate::BlockType;
 use crate::Error;
+use crate::Pkcs8Form;
 use crate::Random;
 use crate::der::{self, Reader, Writer};
 use crate::hash::Hash;
@@ -1755,7 +1756,7 @@ impl<const L: usize> Public<L> {
     pub(crate) fn from_spki(e: &Engine<L>, der: &[u8]) -> Result<Self, Error> {
         let (algorithm, point) = der::read_spki(der)?;
         if !is_this_curve(e.curve, &algorithm) {
-            return Err(Error::InvalidEncoding);
+            return Err(Error::WrongAlgorithm);
         }
         Self::try_from_sec1(e, point)
     }
@@ -1809,12 +1810,16 @@ impl<const L: usize> Secret<L> {
             return Err(Error::InvalidEncoding);
         }
         let d = key.octet_string()?;
+        // The parameters, when present, name a curve; any curve but
+        // this one, or anything that is not a named curve, is
+        // another algorithm's key.
         if let Some(params) = key.optional(der::context(0))? {
             let mut params = Reader::new(params);
-            if params.oid()? != e.curve.oid {
-                return Err(Error::InvalidEncoding);
+            let named = params.oid().is_ok_and(|oid| oid == e.curve.oid)
+                && params.end().is_ok();
+            if !named {
+                return Err(Error::WrongAlgorithm);
             }
-            params.end()?;
         }
         // A scalar of another width is another curve's, whatever
         // the parameters said; one out of range is a bad key.
@@ -1847,7 +1852,7 @@ impl<const L: usize> Secret<L> {
         if let Some(carried) = carried
             && (carried.x.0 != public.x.0 || carried.y.0 != public.y.0)
         {
-            return Err(Error::InvalidEncoding);
+            return Err(Error::InconsistentKey);
         }
         Ok((self, public))
     }
@@ -1856,13 +1861,18 @@ impl<const L: usize> Secret<L> {
     pub(crate) fn from_pkcs8(
         e: &Engine<L>,
         der: &[u8],
-    ) -> Result<(Self, Public<L>), Error> {
+    ) -> Result<(Self, Public<L>, Pkcs8Form), Error> {
         let info = der::read_pkcs8(der)?;
         if !is_this_curve(e.curve, &info.algorithm) {
-            return Err(Error::InvalidEncoding);
+            return Err(Error::WrongAlgorithm);
         }
         let (secret, carried) = Self::from_ec_private_key(e, info.private_key)?;
-        secret.with_public(e, carried)
+        let form = Pkcs8Form {
+            v1: info.v1,
+            public_key: carried.is_some(),
+        };
+        let (secret, public) = secret.with_public(e, carried)?;
+        Ok((secret, public, form))
     }
 
     /// A key from a bare ECPrivateKey, the `EC PRIVATE KEY` form.
@@ -1911,7 +1921,7 @@ impl<const L: usize> Secret<L> {
         let mut der = [0u8; SCRATCH];
         let result = pem::decode(&PRIVATE_LABELS, pem, &mut der).and_then(
             |(form, n)| match form {
-                0 => Self::from_pkcs8(e, &der[..n]),
+                0 => Self::from_pkcs8(e, &der[..n]).map(|(s, p, _)| (s, p)),
                 _ => Self::from_sec1_der(e, &der[..n]),
             },
         );
@@ -2077,13 +2087,24 @@ macro_rules! key_types {
             /// under `PRIVATE KEY` in a PEM file: `id-ecPublicKey`
             /// naming this curve, around an RFC 5915 `ECPrivateKey`.
             /// A public point carried inside is checked against the
-            /// secret's own, and a pair that disagrees is refused as
-            /// corrupt. A key on another curve, or anything else wrong
-            /// with the bytes, is [`Error::InvalidEncoding`].
+            /// secret's own, and a pair that disagrees is
+            /// [`Error::InconsistentKey`]. A key on another curve, or
+            /// of another algorithm, is [`Error::WrongAlgorithm`], and
+            /// anything else wrong with the bytes
+            /// [`Error::InvalidEncoding`].
             pub fn try_from_der(der: &[u8]) -> Result<Self, Error> {
+                Self::try_from_der_with_form(der).map(|(key, _)| key)
+            }
+
+            /// As [`try_from_der`](Self::try_from_der), and also which
+            /// form the structure took: whether the `ECPrivateKey`
+            /// carried the public point.
+            pub fn try_from_der_with_form(
+                der: &[u8],
+            ) -> Result<(Self, crate::Pkcs8Form), Error> {
                 let e = Engine::new(&$constants);
-                let (secret, public) = Secret::from_pkcs8(&e, der)?;
-                Ok(Self::from_secret(secret, public))
+                let (secret, public, form) = Secret::from_pkcs8(&e, der)?;
+                Ok((Self::from_secret(secret, public), form))
             }
 
             /// Writes the key as a `PrivateKeyInfo` into the front of

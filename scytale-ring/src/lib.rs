@@ -16,7 +16,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! ring = { package = "scytale-ring", version = "0.7" }
+//! ring = { package = "scytale-ring", version = "0.8" }
 //! ```
 //!
 //! That reaches the crate whose manifest it is. It cannot reach a
@@ -35,17 +35,46 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+#[cfg(any(feature = "std", feature = "test_logging"))]
+extern crate std;
+
 mod debug;
+mod pkcs8_peek;
+
+/// A vector file for [`test::run`], read at compile time.
+#[cfg(feature = "alloc")]
+#[macro_export]
+macro_rules! test_file {
+    ($file_name:expr) => {
+        $crate::test::File {
+            file_name: $file_name,
+            contents: include_str!($file_name),
+        }
+    };
+}
 
 pub mod aead;
 pub mod agreement;
+#[doc(hidden)]
+#[deprecated(note = "Will be removed. Internal module not intended for \
+                    external use, with no promises regarding side channels.")]
+pub mod constant_time;
 pub mod digest;
 pub mod error;
 pub mod hkdf;
 pub mod hmac;
+pub mod io;
+pub mod pbkdf2;
+pub mod pkcs8;
 pub mod rand;
 pub mod rsa;
 pub mod signature;
+#[cfg(feature = "alloc")]
+#[doc(hidden)]
+#[deprecated(note = "internal API that will be removed")]
+pub mod test;
 
 mod sealed {
     pub trait Sealed {}

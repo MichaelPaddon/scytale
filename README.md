@@ -579,7 +579,7 @@ unchanged:
 
 ```toml
 [dependencies]
-ring = { package = "scytale-ring", version = "0.7" }
+ring = { package = "scytale-ring", version = "0.8" }
 ```
 
 rustls and rustls-webpki pass their own test suites on it

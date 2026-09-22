@@ -275,3 +275,60 @@ fn keys_can_cross_threads() {
     both::<&'static dyn VerificationAlgorithm>();
     both::<UnparsedPublicKey<&[u8]>>();
 }
+
+/// RFC 8410 section 10.3's example key, as ring 0.16 wrote it: the
+/// public key under a constructed `[1]` around a whole BIT STRING.
+/// Both loaders repair it; and one with the standard tag, or with no
+/// public key, is left alone.
+#[test]
+fn rings_legacy_public_key_tag_is_repaired() {
+    let seed =
+        "d4ee72dbf913584ad5b6d8f1f769f8ad3afe7c28cbf1d4fbe097a88f44755842";
+    let public =
+        "19bf44096984cdfe8541bac167dc3b96c85086aa30b6b6cb0c5c38ad703166e1";
+    let legacy = hex(&format!(
+        "3053020101300506032b657004220420{seed}a123032100{public}"
+    ));
+    let pair = Ed25519KeyPair::from_pkcs8(&legacy).expect("legacy");
+    assert_eq!(pair.public_key().as_ref(), &hex(public)[..]);
+    Ed25519KeyPair::from_pkcs8_maybe_unchecked(&legacy).expect("legacy");
+
+    let standard = hex(&format!(
+        "3051020101300506032b657004220420{seed}812100{public}"
+    ));
+    let pair = Ed25519KeyPair::from_pkcs8(&standard).expect("standard");
+    assert_eq!(pair.public_key().as_ref(), &hex(public)[..]);
+
+    // The same with attributes, which is the two-byte length form
+    // once the attributes are long enough.
+    let attributes = "a01f301d060a2a864886f70d01090914310f0c0d437572646c6520\
+                      436861697273";
+    let legacy = hex(&format!(
+        "3074020101300506032b657004220420{seed}{attributes}a123032100{public}"
+    ));
+    Ed25519KeyPair::from_pkcs8(&legacy).expect("legacy with attributes");
+    let mut long = hex(&format!(
+        "3081b1020101300506032b657004220420{seed}a05c305a060a2a864886f70d\
+         01090914314c0c4a{}a123032100{public}",
+        "41".repeat(74)
+    ));
+    Ed25519KeyPair::from_pkcs8(&long).expect("long legacy");
+    let last = long.len() - 1;
+    long[last] ^= 1;
+    let e = Ed25519KeyPair::from_pkcs8(&long).expect_err("wrong key");
+    assert_eq!(format!("{e}"), "InconsistentComponents");
+
+    // A flipped key under the legacy tag is still inconsistent, and a
+    // version 1 structure with the legacy tag is still refused.
+    let mut wrong = hex(&format!(
+        "3053020101300506032b657004220420{seed}a123032100{public}"
+    ));
+    let last = wrong.len() - 1;
+    wrong[last] ^= 1;
+    let e = Ed25519KeyPair::from_pkcs8(&wrong).expect_err("wrong key");
+    assert_eq!(format!("{e}"), "InconsistentComponents");
+    let v1 = hex(&format!(
+        "3051020100300506032b657004220420{seed}a123032100{public}"
+    ));
+    assert!(Ed25519KeyPair::from_pkcs8_maybe_unchecked(&v1).is_err());
+}

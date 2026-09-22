@@ -276,24 +276,53 @@ mod tests {
         assert_eq!(&out[..n], der);
     }
 
+    /// The form is reported, and a public point that is not the
+    /// secret's own is refused as a pair that disagrees.
+    #[test]
+    fn a_carried_point_is_reported_and_checked() {
+        let mut rng = crate::random::CtrDrbg::from_system().unwrap();
+        let a = p256::PrivateKey::generate(&mut rng).unwrap();
+        let b = p256::PrivateKey::generate(&mut rng).unwrap();
+        let mut der = [0u8; p256::DER_SIZE];
+        let n = a.der_bytes(&mut der).unwrap();
+        let (back, form) =
+            p256::PrivateKey::try_from_der_with_form(&der[..n]).unwrap();
+        assert_eq!(back.public_key().sec1_bytes(), a.public_key().sec1_bytes());
+        assert_eq!(
+            form,
+            crate::Pkcs8Form {
+                v1: false,
+                public_key: true
+            }
+        );
+        // The point is the last thing written; swap in another key's.
+        let point = &mut der[n - p256::PUBLIC_KEY_SIZE..n];
+        assert_eq!(point, &a.public_key().sec1_bytes());
+        point.copy_from_slice(&b.public_key().sec1_bytes());
+        assert_eq!(
+            p256::PrivateKey::try_from_der(&der[..n]).err(),
+            Some(Error::InconsistentKey)
+        );
+    }
+
     /// A key of the other curve is refused by every importer.
     #[test]
     fn curves_do_not_mix() {
         assert_eq!(
             p256::PrivateKey::try_from_pem(P384_PEM).err(),
-            Some(Error::InvalidEncoding)
+            Some(Error::WrongAlgorithm)
         );
         assert_eq!(
             p384::PrivateKey::try_from_pem(P256_PEM).err(),
-            Some(Error::InvalidEncoding)
+            Some(Error::WrongAlgorithm)
         );
         assert_eq!(
             p256::PublicKey::try_from_pem(P384_PUBLIC_PEM).err(),
-            Some(Error::InvalidEncoding)
+            Some(Error::WrongAlgorithm)
         );
         assert_eq!(
             p384::PrivateKey::try_from_pem(P256_SEC1_PEM).err(),
-            Some(Error::InvalidEncoding)
+            Some(Error::WrongAlgorithm)
         );
         let mut der = [0u8; 112];
         let der = unhex(P384_SIGNATURE_DER, &mut der);

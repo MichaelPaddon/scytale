@@ -10,9 +10,11 @@ use core::fmt;
 use scytale::hash::sha1::Sha1;
 use scytale::hash::sha2::{Sha256, Sha384, Sha512};
 use scytale::sig::rsa;
+use zeroize::Zeroize;
 
 use crate::digest::{self, Id};
 use crate::error::{self, KeyRejected};
+use crate::io::der;
 use crate::rand::{self, Bridge};
 use crate::signature::{self, VerificationAlgorithm};
 
@@ -25,6 +27,9 @@ const PRIVATE_MAX_BITS: usize = 4096;
 
 /// The smallest public exponent a signing key may have.
 const PRIVATE_MIN_EXPONENT: u64 = 65537;
+
+/// The largest public exponent any key may have: 2^33 - 1.
+const PUBLIC_MAX_EXPONENT: u64 = (1 << 33) - 1;
 
 /// Runs `$body` with `$h` bound to the scytale hash `$id` names.
 macro_rules! by_hash {
@@ -57,6 +62,43 @@ macro_rules! by_hash {
 /// modulus a few bits short of a boundary still counts as reaching it.
 fn bits_rounded_up(bits: usize) -> usize {
     bits.div_ceil(8) * 8
+}
+
+/// Whether both primes are exactly `half` bits long.
+fn primes_are_half_the_modulus(
+    key: &rsa::PrivateKey,
+    half: usize,
+) -> Result<bool, KeyRejected> {
+    const MAX: usize = PRIVATE_MAX_BITS / 16;
+    let len = key.prime_len();
+    let mut p = [0u8; MAX];
+    let mut q = [0u8; MAX];
+    let mut rest = [[0u8; MAX]; 3];
+    let [dp, dq, qinv] = &mut rest;
+    let read = key.crt_bytes(
+        &mut p[..len],
+        &mut q[..len],
+        &mut dp[..len],
+        &mut dq[..len],
+        &mut qinv[..len],
+    );
+    let ok = bit_length(&p[..len]) == half && bit_length(&q[..len]) == half;
+    p.zeroize();
+    q.zeroize();
+    rest.zeroize();
+    read.map(|()| ok)
+        .map_err(|_| KeyRejected::invalid_component())
+}
+
+/// The bit length of a big-endian integer.
+fn bit_length(bytes: &[u8]) -> usize {
+    let zeros = bytes.iter().take_while(|&&b| b == 0).count();
+    match bytes.get(zeros) {
+        Some(first) => {
+            8 * (bytes.len() - zeros) - first.leading_zeros() as usize
+        }
+        None => 0,
+    }
 }
 
 pub(crate) mod padding {
@@ -222,6 +264,11 @@ fn verify_with(
     if bits < params.min_bits || key.bits() > PUBLIC_MAX_BITS {
         return Err(error::Unspecified);
     }
+    // ring reads the exponent into 33 bits and no more; scytale takes
+    // up to 64. The bound is ring's, so a key ring refuses is refused.
+    if u64::from_be_bytes(key.exponent_bytes()) > PUBLIC_MAX_EXPONENT {
+        return Err(error::Unspecified);
+    }
     let checked = match params.padding_alg.scheme() {
         Scheme::Pkcs1(d) => {
             by_hash!(d.id, H => key.verify_pkcs1::<H>(msg, signature))
@@ -371,8 +418,31 @@ impl fmt::Debug for KeyPair {
 impl KeyPair {
     /// A key pair from its PKCS#8 `PrivateKeyInfo`.
     pub fn from_pkcs8(pkcs8: &[u8]) -> Result<Self, KeyRejected> {
+        crate::pkcs8_peek::check(pkcs8, crate::pkcs8_peek::RSA_ENCRYPTION)?;
         let key = rsa::PrivateKey::try_from_der(pkcs8)
             .map_err(KeyRejected::from_scytale)?;
+        Self::checked(key)
+    }
+
+    /// A key pair from its integers, checked as a parsed key is.
+    pub fn from_components<Public, Private>(
+        components: &KeyPairComponents<Public, Private>,
+    ) -> Result<Self, KeyRejected>
+    where
+        Public: AsRef<[u8]>,
+        Private: AsRef<[u8]>,
+    {
+        let key = rsa::PrivateKey::try_new_crt(
+            components.public_key.n.as_ref(),
+            components.public_key.e.as_ref(),
+            components.d.as_ref(),
+            components.p.as_ref(),
+            components.q.as_ref(),
+            components.dP.as_ref(),
+            components.dQ.as_ref(),
+            components.qInv.as_ref(),
+        )
+        .map_err(KeyRejected::from_scytale)?;
         Self::checked(key)
     }
 
@@ -398,11 +468,15 @@ impl KeyPair {
             return Err(KeyRejected::too_small());
         }
         // Each prime is half the modulus; ring asks that to be a whole
-        // number of 512-bit steps.
-        if !bits.div_ceil(2).is_multiple_of(512) {
+        // number of 512-bit steps, and both primes to be exactly that.
+        let half = bits.div_ceil(2);
+        if !half.is_multiple_of(512) {
             return Err(
                 KeyRejected::private_modulus_len_not_multiple_of_512_bits(),
             );
+        }
+        if !primes_are_half_the_modulus(&private, half)? {
+            return Err(KeyRejected::inconsistent_components());
         }
         Ok(KeyPair {
             public: PublicKey::from_scytale(&public)?,
@@ -467,6 +541,75 @@ pub struct PublicKeyComponents<B> {
     pub e: B,
 }
 
+impl<B> From<&PublicKey> for PublicKeyComponents<B>
+where
+    B: FromIterator<u8>,
+{
+    fn from(public_key: &PublicKey) -> Self {
+        // The key is held as its DER, which is the two integers in
+        // a SEQUENCE; every key here was written that way.
+        let parts = untrusted::Input::from(public_key.as_ref()).read_all(
+            error::Unspecified,
+            |input| {
+                der::nested(
+                    input,
+                    der::Tag::Sequence,
+                    error::Unspecified,
+                    |r| {
+                        let n = der::positive_integer(r)?;
+                        let e = der::positive_integer(r)?;
+                        Ok((n, e))
+                    },
+                )
+            },
+        );
+        let (n, e) =
+            parts.unwrap_or_else(|_| unreachable!("a key this crate wrote"));
+        Self {
+            n: n.big_endian_without_leading_zero()
+                .iter()
+                .copied()
+                .collect(),
+            e: e.big_endian_without_leading_zero()
+                .iter()
+                .copied()
+                .collect(),
+        }
+    }
+}
+
+/// A key pair as its integers, big-endian: the public key, the private
+/// exponent, the primes and the Chinese remainder parts.
+#[allow(non_snake_case)]
+#[derive(Clone, Copy)]
+pub struct KeyPairComponents<Public, Private = Public> {
+    /// The modulus and public exponent.
+    pub public_key: PublicKeyComponents<Public>,
+    /// The private exponent.
+    pub d: Private,
+    /// The first prime.
+    pub p: Private,
+    /// The second prime.
+    pub q: Private,
+    /// `d mod (p - 1)`.
+    pub dP: Private,
+    /// `d mod (q - 1)`.
+    pub dQ: Private,
+    /// `q^-1 mod p`.
+    pub qInv: Private,
+}
+
+impl<Public, Private> fmt::Debug for KeyPairComponents<Public, Private>
+where
+    PublicKeyComponents<Public>: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KeyPairComponents")
+            .field("public_key", &self.public_key)
+            .finish()
+    }
+}
+
 impl<B> fmt::Debug for PublicKeyComponents<B>
 where
     B: AsRef<[u8]>,
@@ -490,8 +633,16 @@ where
         message: &[u8],
         signature: &[u8],
     ) -> Result<(), error::Unspecified> {
-        let key = rsa::PublicKey::try_new(self.n.as_ref(), self.e.as_ref())
-            .map_err(error::erase)?;
+        // ring takes each integer as DER would hold it: big-endian with
+        // no leading zero. scytale would strip one; the bytes are held
+        // to ring's rule first.
+        let (n, e) = (self.n.as_ref(), self.e.as_ref());
+        if n.first().is_none_or(|&b| b == 0)
+            || e.first().is_none_or(|&b| b == 0)
+        {
+            return Err(error::Unspecified);
+        }
+        let key = rsa::PublicKey::try_new(n, e).map_err(error::erase)?;
         verify_with(params, &key, message, signature)
     }
 }

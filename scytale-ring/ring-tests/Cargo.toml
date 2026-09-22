@@ -1,0 +1,34 @@
+[package]
+name = "scytale-ring-tests"
+description = "ring's own test suite, run against scytale-ring"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# ring's tests and their vector files, vendored unchanged; see
+# tests/LICENSE-ring. Only run here, never published.
+publish = false
+
+# The tests name the crate `ring`, as any code written against ring
+# does, and this is how a manifest switches it.
+[dependencies]
+ring = { package = "scytale-ring", path = "..", features = ["std"] }
+untrusted = "0.9"
+
+# The files are ring's, kept byte for byte, so they are read under
+# ring's rules rather than this repository's: ring deprecates its
+# test harness and calls it anyway, and its style is its own.
+
+# The features ring's tests ask about, with ring's meanings; `std`
+# is on so that every test runs.
+[features]
+default = ["std"]
+alloc = ["ring/alloc"]
+slow_tests = []
+std = ["ring/std"]
+
+[lints.rust]
+deprecated = "allow"
+
+[lints.clippy]
+all = { level = "allow", priority = -1 }
