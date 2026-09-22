@@ -1,0 +1,22 @@
+#!/bin/sh
+# Runs the style job's checks exactly as .github/workflows/ci.yml
+# runs them, by reading the commands out of the workflow rather than
+# keeping a copy here that could drift. Run it before every push.
+#
+# Requires python3 with PyYAML, and GNU grep as `grep` on PATH, which
+# is what the runner has; a different grep treats binary files
+# differently and has passed here what failed there.
+
+set -eu
+cd "$(dirname "$0")/.."
+
+python3 - <<'PY' > target/ci-style.sh
+import yaml
+jobs = yaml.safe_load(open(".github/workflows/ci.yml"))["jobs"]
+for step in jobs["style"]["steps"]:
+    if "run" in step and "rustup" not in step["run"]:
+        print("echo '==>", step["name"] + "'")
+        print(step["run"])
+PY
+PATH="/usr/bin:$PATH" sh -eu target/ci-style.sh
+echo "style checks passed as CI runs them"
