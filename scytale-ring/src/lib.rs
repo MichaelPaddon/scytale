@@ -1,4 +1,4 @@
-//! ring's API, answered by scytale.
+//! A drop-in replacement for ring 0.17, implemented with scytale.
 //!
 //! This crate presents the public interface of
 //! [ring](https://crates.io/crates/ring) 0.17, and does the work with

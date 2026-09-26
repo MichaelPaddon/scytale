@@ -1,6 +1,6 @@
 [package]
 name = "scytale-ring"
-description = "ring 0.17's API, answered by scytale"
+description = "A drop-in replacement for ring 0.17, implemented with scytale: pure Rust, no C compiler, no build script"
 # scytale's version: the two are released together. Which ring API
 # this presents is in the description and the docs.
 version.workspace = true
