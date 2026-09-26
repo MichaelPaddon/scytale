@@ -36,9 +36,11 @@
 //! [`Error::InvalidPublicKey`], [`Error::InvalidPrivateKey`] and
 //! [`Error::InvalidSignature`] come only from the public-key
 //! algorithms, and say deliberately little.
-//! [`Error::InvalidEncoding`] comes only from reading a key in DER
-//! or PEM, and says as little: the bytes are not the structure the
-//! call reads.
+//! [`Error::InvalidEncoding`] comes from reading a key in DER or
+//! PEM, or text through [`codec`](crate::codec), and says as
+//! little: the bytes are not the structure the call reads.
+//! [`Error::InvalidPadding`] comes only from removing padding, and
+//! says least of all, for the reason its own documentation gives.
 
 use core::fmt;
 
@@ -115,10 +117,22 @@ pub enum Error {
     /// Deliberately says no more than that; which check failed would
     /// help an attacker.
     InvalidSignature,
-    /// The bytes are not the DER or PEM structure the call reads:
+    /// The bytes are not the DER or PEM structure the call reads,
+    /// or the text is not the hex or base64 it is read as:
     /// malformed, truncated, followed by trailing data, or wrongly
     /// labelled.
     InvalidEncoding,
+    /// The last block does not end in padding of the scheme being
+    /// removed.
+    ///
+    /// Deliberately says no more than that, and should be shown to
+    /// no one who did not hold the key. Whether a decryption's
+    /// padding was valid, learned one ciphertext at a time, is the
+    /// padding oracle, which decrypts messages without the key; the
+    /// defence is a MAC over the ciphertext, checked before
+    /// decrypting, so that a forged ciphertext never reaches this
+    /// check at all.
+    InvalidPadding,
     /// The structure is well formed but names another algorithm, or
     /// another curve or parameter set of this one, than the call
     /// reads keys for.
@@ -210,6 +224,9 @@ impl fmt::Display for Error {
             Error::InvalidEncoding => {
                 write!(f, "invalid encoding")
             }
+            Error::InvalidPadding => {
+                write!(f, "invalid padding")
+            }
             Error::WrongAlgorithm => {
                 write!(f, "key is for another algorithm")
             }
@@ -287,6 +304,7 @@ mod tests {
             render(Error::InvalidEncoding, &mut buf),
             "invalid encoding"
         );
+        assert_eq!(render(Error::InvalidPadding, &mut buf), "invalid padding");
         assert_eq!(
             render(Error::NotSupported, &mut buf),
             "not supported by this processor"

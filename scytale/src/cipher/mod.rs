@@ -47,12 +47,14 @@
 //! is a stronger requirement than it sounds. [`Nonces`] counts them,
 //! so a repeat is impossible rather than merely unlikely. It sits
 //! here rather than under [`mode`] because both a mode and a bare
-//! stream cipher take one.
+//! stream cipher take one. [`padding`] fills the last block for the
+//! modes that need whole ones.
 
 pub mod aes;
 pub mod chacha20;
 pub mod mode;
 pub mod nonce;
+pub mod padding;
 
 pub use nonce::Nonces;
 

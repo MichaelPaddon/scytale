@@ -24,7 +24,7 @@
 use zeroize::Zeroize;
 
 use crate::Error;
-use crate::pem;
+use crate::codec::pem;
 
 // The universal tags in use.
 const INTEGER: u8 = 0x02;
@@ -58,6 +58,39 @@ pub(crate) const X25519: [u8; 3] = [0x2b, 0x65, 0x6e];
 
 /// The contents of the OID `id-Ed25519`, 1.3.101.112.
 pub(crate) const ED25519: [u8; 3] = [0x2b, 0x65, 0x70];
+
+/// The bytes a length of `n` takes: one below 128, otherwise one
+/// for the count of bytes and then the bytes themselves.
+const fn length_len(n: usize) -> usize {
+    if n < 128 {
+        1
+    } else if n < 1 << 8 {
+        2
+    } else if n < 1 << 16 {
+        3
+    } else {
+        4
+    }
+}
+
+/// The length of an element whose contents are `contents` long:
+/// tag, length and contents.
+pub(crate) const fn tlv_len(contents: usize) -> usize {
+    1 + length_len(contents) + contents
+}
+
+/// The length of a SubjectPublicKeyInfo whose algorithm is an OID
+/// of `oid` bytes with no parameters, around a key of `key` bytes.
+pub(crate) const fn spki_len(oid: usize, key: usize) -> usize {
+    tlv_len(tlv_len(tlv_len(oid)) + tlv_len(1 + key))
+}
+
+/// The length of a version 0 PrivateKeyInfo whose algorithm is an
+/// OID of `oid` bytes with no parameters, around a privateKey whose
+/// contents are `key` bytes.
+pub(crate) const fn pkcs8_len(oid: usize, key: usize) -> usize {
+    tlv_len(tlv_len(1) + tlv_len(tlv_len(oid)) + tlv_len(key))
+}
 
 /// A cursor over encoded bytes. Each call consumes one element and
 /// hands back its contents; a constructed element comes back as a
@@ -670,7 +703,7 @@ pub(crate) fn curve_secret_from_pem(
     pem: &[u8],
 ) -> Result<CurveSecret, Error> {
     let mut der = [0u8; CURVE_SECRET_SCRATCH];
-    let result = pem::decode(&[PRIVATE_KEY], pem, &mut der)
+    let result = pem::decode_one_of(&[PRIVATE_KEY], pem, &mut der)
         .and_then(|(_, n)| curve_secret_from_der(oid, &der[..n]));
     der.zeroize();
     result
@@ -683,7 +716,7 @@ pub(crate) fn curve_secret_pem(
 ) -> [u8; CURVE_SECRET_PEM] {
     let mut der = curve_secret_der(oid, secret);
     let mut out = [0u8; CURVE_SECRET_PEM];
-    let n = pem::encode(PRIVATE_KEY, &der, &mut out);
+    let n = pem::encode_exact(PRIVATE_KEY, &der, &mut out);
     debug_assert_eq!(n, CURVE_SECRET_PEM);
     der.zeroize();
     out
@@ -700,7 +733,7 @@ pub(crate) fn curve_pair_pem(
 ) -> [u8; CURVE_PAIR_PEM] {
     let mut der = curve_pair_der(oid, secret, public);
     let mut out = [0u8; CURVE_PAIR_PEM];
-    let n = pem::encode(PRIVATE_KEY, &der, &mut out);
+    let n = pem::encode_exact(PRIVATE_KEY, &der, &mut out);
     debug_assert_eq!(n, CURVE_PAIR_PEM);
     der.zeroize();
     out
@@ -712,7 +745,7 @@ pub(crate) fn curve_public_from_pem(
     pem: &[u8],
 ) -> Result<[u8; CURVE_KEY], Error> {
     let mut der = [0u8; CURVE_PUBLIC_DER];
-    let (_, n) = pem::decode(&[PUBLIC_KEY], pem, &mut der)?;
+    let (_, n) = pem::decode_one_of(&[PUBLIC_KEY], pem, &mut der)?;
     curve_public_from_der(oid, &der[..n])
 }
 
@@ -723,7 +756,7 @@ pub(crate) fn curve_public_pem(
 ) -> [u8; CURVE_PUBLIC_PEM] {
     let der = curve_public_der(oid, public);
     let mut out = [0u8; CURVE_PUBLIC_PEM];
-    let n = pem::encode(PUBLIC_KEY, &der, &mut out);
+    let n = pem::encode_exact(PUBLIC_KEY, &der, &mut out);
     debug_assert_eq!(n, CURVE_PUBLIC_PEM);
     out
 }

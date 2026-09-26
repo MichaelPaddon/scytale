@@ -794,7 +794,8 @@ fn private_key_is_valid<const K: usize>(dk: &[u8]) -> bool {
 
 /// The OID prefix of the three parameter sets,
 /// 2.16.840.1.101.3.4.4; the last arc is 1, 2 or 3.
-const OID_PREFIX: [u8; 8] = [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x04];
+pub(crate) const OID_PREFIX: [u8; 8] =
+    [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x04];
 
 /// Room for any encoding of any key here: an expanded ML-KEM-1024
 /// key with both forms is under this.
@@ -843,6 +844,29 @@ macro_rules! parameter_set {
             oid[8] = $arc;
             oid
         };
+
+        /// The most a private key's DER encoding can be: a PKCS#8
+        /// `PrivateKeyInfo` around the expanded key. A key that has
+        /// its seed is written as the seed instead, which is
+        /// shorter; a buffer this long takes either.
+        pub const DER_SIZE: usize =
+            crate::der::pkcs8_len(OID.len(), crate::der::tlv_len(KEY_SIZE));
+
+        /// The length of a public key's DER encoding, a
+        /// `SubjectPublicKeyInfo`.
+        pub const PUBLIC_KEY_DER_SIZE: usize =
+            crate::der::spki_len(OID.len(), PUBLIC_KEY_SIZE);
+
+        /// The length of a public key's PEM encoding, a `PUBLIC KEY`
+        /// block.
+        pub const PUBLIC_KEY_PEM_SIZE: usize =
+            crate::codec::pem::encoded_len("PUBLIC KEY", PUBLIC_KEY_DER_SIZE);
+
+        /// The length of a private key's PEM encoding, a `PRIVATE
+        /// KEY` block around the DER above; the most it can be, as
+        /// [`DER_SIZE`] is.
+        pub const PEM_SIZE: usize =
+            crate::codec::pem::encoded_len("PRIVATE KEY", DER_SIZE);
 
         #[doc = concat!("An ", $name, " private key, FIPS 203's")]
         /// decapsulation key, with its seed when it was made from
@@ -1018,7 +1042,9 @@ macro_rules! parameter_set {
             pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
                 let mut der = [0u8; ml_kem::SCRATCH];
                 let labels = [ml_kem::PRIVATE_LABEL];
-                let result = crate::pem::decode(&labels, pem, &mut der)
+                let result = crate::codec::pem::decode_one_of(
+                    &labels, pem, &mut der,
+                )
                     .and_then(|(_, n)| Self::try_from_der(&der[..n]));
                 der.zeroize();
                 result
@@ -1032,7 +1058,9 @@ macro_rules! parameter_set {
                 let label = ml_kem::PRIVATE_LABEL;
                 let result = self
                     .der_bytes(&mut der)
-                    .and_then(|n| crate::pem::write(label, &der[..n], out));
+                    .and_then(|n| {
+                        crate::codec::pem::encode(label, &der[..n], out)
+                    });
                 der.zeroize();
                 result
             }
@@ -1101,7 +1129,11 @@ macro_rules! parameter_set {
             pub fn try_from_pem(pem: &[u8]) -> Result<Self, Error> {
                 let mut der = [0u8; ml_kem::SCRATCH];
                 let (_, n) =
-                    crate::pem::decode(&[ml_kem::PUBLIC_LABEL], pem, &mut der)?;
+                    crate::codec::pem::decode_one_of(
+                        &[ml_kem::PUBLIC_LABEL],
+                        pem,
+                        &mut der,
+                    )?;
                 Self::try_from_der(&der[..n])
             }
 
@@ -1110,7 +1142,7 @@ macro_rules! parameter_set {
             pub fn pem_bytes(&self, out: &mut [u8]) -> Result<usize, Error> {
                 let mut der = [0u8; ml_kem::SCRATCH];
                 let n = self.der_bytes(&mut der)?;
-                crate::pem::write(ml_kem::PUBLIC_LABEL, &der[..n], out)
+                crate::codec::pem::encode(ml_kem::PUBLIC_LABEL, &der[..n], out)
             }
         }
     };
@@ -1276,16 +1308,22 @@ mod tests {
                 let back = PrivateKey::try_from_der(&out[..n]).unwrap();
                 assert_eq!(back.seed_bytes(), key.seed_bytes());
                 let n = expanded.der_bytes(&mut out).unwrap();
+                assert_eq!(n, DER_SIZE);
                 let back = PrivateKey::try_from_der(&out[..n]).unwrap();
                 assert_eq!(back.key_bytes(), key.key_bytes());
                 let n = key.pem_bytes(&mut out).unwrap();
+                assert!(n < PEM_SIZE);
                 assert!(out.starts_with(b"-----BEGIN PRIVATE KEY-----\n"));
                 let back = PrivateKey::try_from_pem(&out[..n]).unwrap();
                 assert_eq!(back.key_bytes(), key.key_bytes());
+                let n = expanded.pem_bytes(&mut out).unwrap();
+                assert_eq!(n, PEM_SIZE);
                 let n = key.public_key().der_bytes(&mut out).unwrap();
+                assert_eq!(n, PUBLIC_KEY_DER_SIZE);
                 let back = PublicKey::try_from_der(&out[..n]).unwrap();
                 assert_eq!(back.bytes(), key.public_key().bytes());
                 let n = key.public_key().pem_bytes(&mut out).unwrap();
+                assert_eq!(n, PUBLIC_KEY_PEM_SIZE);
                 let back = PublicKey::try_from_pem(&out[..n]).unwrap();
                 assert_eq!(back.bytes(), key.public_key().bytes());
             }};

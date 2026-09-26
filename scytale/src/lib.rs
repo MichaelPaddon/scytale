@@ -20,7 +20,9 @@
 //! | [`pke`] | RSA-OAEP public-key encryption |
 //! | [`random`] | a CTR_DRBG generator and the entropy that seeds it |
 //! | [`constant_time`] | comparing secrets without timing them |
+//! | [`codec`] | hex, base64 and PEM, in constant time |
 //! | [`sig`] | Ed25519, ECDSA, ML-DSA, SLH-DSA and RSA signatures |
+//! | [`KeyInfo`] | which algorithm an encoded key is for |
 //! | [`Error`] | the one type every fallible call returns |
 //!
 //! # Example
@@ -135,6 +137,7 @@ pub mod aead;
 mod align;
 mod arch;
 pub mod cipher;
+pub mod codec;
 pub mod constant_time;
 mod der;
 mod error;
@@ -143,9 +146,9 @@ mod implementation;
 pub mod kdf;
 pub mod kem;
 pub mod kex;
+mod key_info;
 pub mod mac;
 mod math;
-mod pem;
 pub mod pke;
 mod probe;
 pub mod random;
@@ -155,4 +158,5 @@ mod traits;
 
 pub use der::Pkcs8Form;
 pub use error::Error;
+pub use key_info::{Algorithm, KeyInfo};
 pub use traits::{BlockType, ByteArray, Key, KeyType, Random};

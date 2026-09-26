@@ -62,11 +62,11 @@ use crate::BlockType;
 use crate::Error;
 use crate::Pkcs8Form;
 use crate::Random;
+use crate::codec::pem;
 use crate::der::{self, Reader, Writer};
 use crate::hash::Hash;
 use crate::mac::Mac;
 use crate::mac::hmac::Hmac;
-use crate::pem;
 
 /// A curve's constants, each as a big-endian hex string of the
 /// curve's width, and the OID that names it in a certificate.
@@ -344,7 +344,8 @@ pub(crate) const P384: Curve<6> = Curve {
 
 /// The contents of the OID `id-ecPublicKey`, 1.2.840.10045.2.1,
 /// which names every prime-curve key; the parameters say which.
-const EC_PUBLIC_KEY: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
+pub(crate) const EC_PUBLIC_KEY: &[u8] =
+    &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
 
 /// A point in projective coordinates, `(X : Y : Z)` for the affine
 /// `(X/Z, Y/Z)`, every coordinate in the field's Montgomery domain.
@@ -1742,15 +1743,6 @@ fn algorithm_identifier<const L: usize>(curve: &Curve<L>, w: &mut Writer) {
     w.oid(curve.oid);
 }
 
-/// `der` as a PEM block under `label`, into the front of `out`.
-fn to_pem(label: &str, der: &[u8], out: &mut [u8]) -> Result<usize, Error> {
-    let needed = pem::encoded_len(label, der.len());
-    if out.len() < needed {
-        return Err(Error::OutputTooSmall(needed));
-    }
-    Ok(pem::encode(label, der, out))
-}
-
 impl<const L: usize> Public<L> {
     /// A point from a SubjectPublicKeyInfo naming this curve.
     pub(crate) fn from_spki(e: &Engine<L>, der: &[u8]) -> Result<Self, Error> {
@@ -1779,7 +1771,7 @@ impl<const L: usize> Public<L> {
 
     pub(crate) fn from_pem(e: &Engine<L>, pem: &[u8]) -> Result<Self, Error> {
         let mut der = [0u8; SCRATCH];
-        let (_, n) = pem::decode(&[PUBLIC_LABEL], pem, &mut der)?;
+        let (_, n) = pem::decode_one_of(&[PUBLIC_LABEL], pem, &mut der)?;
         Self::from_spki(e, &der[..n])
     }
 
@@ -1790,7 +1782,7 @@ impl<const L: usize> Public<L> {
     ) -> Result<usize, Error> {
         let mut der = [0u8; SCRATCH];
         let n = self.spki(e, &mut der)?;
-        to_pem(PUBLIC_LABEL, &der[..n], out)
+        pem::encode(PUBLIC_LABEL, &der[..n], out)
     }
 }
 
@@ -1919,12 +1911,11 @@ impl<const L: usize> Secret<L> {
         pem: &[u8],
     ) -> Result<(Self, Public<L>), Error> {
         let mut der = [0u8; SCRATCH];
-        let result = pem::decode(&PRIVATE_LABELS, pem, &mut der).and_then(
-            |(form, n)| match form {
+        let result = pem::decode_one_of(&PRIVATE_LABELS, pem, &mut der)
+            .and_then(|(form, n)| match form {
                 0 => Self::from_pkcs8(e, &der[..n]).map(|(s, p, _)| (s, p)),
                 _ => Self::from_sec1_der(e, &der[..n]),
-            },
-        );
+            });
         der.zeroize();
         result
     }
@@ -1939,7 +1930,7 @@ impl<const L: usize> Secret<L> {
         let mut der = [0u8; SCRATCH];
         let result = self
             .pkcs8(e, public, &mut der)
-            .and_then(|n| to_pem(PRIVATE_LABELS[0], &der[..n], out));
+            .and_then(|n| pem::encode(PRIVATE_LABELS[0], &der[..n], out));
         der.zeroize();
         result
     }
@@ -2017,12 +2008,12 @@ macro_rules! key_types {
         /// The length of a private key's PEM encoding, a
         /// `PRIVATE KEY` block.
         pub const PEM_SIZE: usize =
-            crate::pem::encoded_len("PRIVATE KEY", DER_SIZE);
+            crate::codec::pem::encoded_len("PRIVATE KEY", DER_SIZE);
 
         /// The length of a public key's PEM encoding, a `PUBLIC KEY`
         /// block.
         pub const PUBLIC_KEY_PEM_SIZE: usize =
-            crate::pem::encoded_len("PUBLIC KEY", PUBLIC_KEY_DER_SIZE);
+            crate::codec::pem::encoded_len("PUBLIC KEY", PUBLIC_KEY_DER_SIZE);
 
         #[doc = concat!("A ", $job, " key on ", $curve, ": a secret")]
         /// scalar in `[1, n - 1]`, wiped on drop, with its public

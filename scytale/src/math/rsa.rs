@@ -38,10 +38,10 @@ use zeroize::Zeroize;
 
 use crate::Error;
 use crate::Random;
+use crate::codec::pem;
 use crate::der::{self, Algorithm, Reader, Writer};
 use crate::hash::Hash;
 use crate::math::limbs::{self, Modulus};
-use crate::pem;
 
 /// The narrowest modulus accepted, in bits. Below this RSA is broken
 /// rather than merely weak.
@@ -1062,15 +1062,6 @@ fn rsa_algorithm(algorithm: &Algorithm, pss: bool) -> Result<(), Error> {
     }
 }
 
-/// `der` as a PEM block under `label`, into the front of `out`.
-fn to_pem(label: &str, der: &[u8], out: &mut [u8]) -> Result<usize, Error> {
-    let needed = pem::encoded_len(label, der.len());
-    if out.len() < needed {
-        return Err(Error::OutputTooSmall(needed));
-    }
-    Ok(pem::encode(label, der, out))
-}
-
 impl<'a> Public<'a> {
     /// The RSAPublicKey structure of RFC 8017 A.1.1, laid out in
     /// `storage`.
@@ -1125,7 +1116,7 @@ impl<'a> Public<'a> {
         storage: &mut [u64],
     ) -> Result<usize, Error> {
         let mut der = [0u8; PUBLIC_DER];
-        let (form, n) = pem::decode(&PUBLIC_LABELS, pem, &mut der)?;
+        let (form, n) = pem::decode_one_of(&PUBLIC_LABELS, pem, &mut der)?;
         match form {
             0 => Self::fill_from_spki(&der[..n], pss, storage),
             _ => Self::fill_from_pkcs1(&der[..n], storage),
@@ -1145,7 +1136,7 @@ impl<'a> Public<'a> {
         } else {
             (PUBLIC_LABELS[0], self.spki_bytes(&mut der)?)
         };
-        to_pem(label, &der[..n], out)
+        pem::encode(label, &der[..n], out)
     }
 }
 
@@ -1252,12 +1243,11 @@ impl<'a> Private<'a> {
         scratch: &mut [u64],
     ) -> Result<usize, Error> {
         let mut der = [0u8; PRIVATE_DER];
-        let result = pem::decode(&PRIVATE_LABELS, pem, &mut der).and_then(
-            |(form, n)| match form {
+        let result = pem::decode_one_of(&PRIVATE_LABELS, pem, &mut der)
+            .and_then(|(form, n)| match form {
                 0 => Self::fill_from_pkcs8(&der[..n], pss, storage, scratch),
                 _ => Self::fill_from_pkcs1(&der[..n], storage, scratch),
-            },
-        );
+            });
         der.zeroize();
         result
     }
@@ -1276,7 +1266,7 @@ impl<'a> Private<'a> {
             self.pkcs8_bytes(&mut der).map(|n| (PRIVATE_LABELS[0], n))
         };
         let result =
-            encoded.and_then(|(label, n)| to_pem(label, &der[..n], out));
+            encoded.and_then(|(label, n)| pem::encode(label, &der[..n], out));
         der.zeroize();
         result
     }

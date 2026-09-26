@@ -187,6 +187,7 @@ the machinery behind it:
 | `sig` | signatures | Ed25519, ECDSA over P-256 and P-384, ML-DSA, SLH-DSA, RSA-PSS, RSA PKCS#1 v1.5 |
 | `random` | random numbers | CTR_DRBG over AES-256, and what seeds it |
 | `constant_time` | comparing secrets | equality whose timing says nothing |
+| `codec` | bytes as text | hex, base64 and PEM, in constant time |
 
 ### Ciphers
 
@@ -227,7 +228,7 @@ work.
 
 | Mode | Kind | Notes |
 | --- | --- | --- |
-| CBC | confidentiality | whole blocks only; no padding |
+| CBC | confidentiality | whole blocks only; `cipher::padding` fills the last one |
 | CFB1, CFB8, CFB128 | confidentiality | the three NIST segment sizes |
 | OFB | confidentiality | |
 | CTR | confidentiality | |

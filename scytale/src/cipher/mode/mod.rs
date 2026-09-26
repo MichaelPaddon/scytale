@@ -29,6 +29,11 @@
 //! | Plain stream, for a protocol | [`Ctr`], [`Cbc`], [`Ofb`], [`Cfb128`] |
 //! | Byte or bit at a time, for a legacy protocol | [`Cfb8`], [`Cfb1`] |
 //!
+//! [`Cbc`] and [`Cfb128`] take whole blocks;
+//! [`padding`](crate::cipher::padding) brings a message up to one.
+//! The format-preserving modes take symbols; [`Alphabet`] turns text
+//! into them.
+//!
 //! [`Xts`] is for storage, where there is no room for a tag and the
 //! threat is a stolen disk. [`Kw`] and [`Kwp`] are deterministic,
 //! which is right for keys and wrong for anything else. The
@@ -44,6 +49,7 @@
 //!
 //! [`BlockCipher`]: crate::cipher::BlockCipher
 
+pub mod alphabet;
 pub mod cbc;
 pub mod cfb1;
 pub mod cfb128;
@@ -56,6 +62,7 @@ pub mod kwp;
 pub mod ofb;
 pub mod xts;
 
+pub use alphabet::Alphabet;
 pub use cbc::Cbc;
 pub use cfb1::Cfb1;
 pub use cfb8::Cfb8;

@@ -65,7 +65,9 @@ excluded.
 | SHA-1, SHA-2, SHA-3, SHAKE, cSHAKE | all backends | no data-dependent control flow; hashing a secret leaks only its length |
 | HMAC, HKDF, PBKDF2 | over the hashes | as the hash; `Mac::verify` compares with `constant_time::equal` |
 | KMAC | over cSHAKE | as the hash; `verify_tag`, `verify_bits` and `Mac::verify` compare with `constant_time::equal` |
-| CTR, CBC, CFB, OFB, XTS | over the cipher | as the cipher; CBC has no padding, so no padding oracle |
+| CTR, CBC, CFB, OFB, XTS | over the cipher | as the cipher; the modes themselves have no padding |
+| PKCS#7 padding | `cipher/padding/pkcs7.rs` | `unpad` reads the whole last block and combines the checks by mask; one error for every failure, documented as the padding oracle it would be if shown to an attacker |
+| hex, base64, PEM | `codec/` | each character computed from its value with masks, no table indexed by a secret; a bad character is recorded and reported after the whole string is read |
 | CMAC | over the cipher | as the cipher; subkey doubling masks rather than branches; `Mac::verify` compares with `constant_time::equal` |
 | KW, KWP | over the cipher | the integrity check value is compared with `constant_time::equal` |
 | GCM, GCM-SIV, XPN, CCM, ChaCha20-Poly1305 | over the above | tag compared whole with `constant_time::equal`; plaintext never released on failure |
@@ -107,7 +109,8 @@ what, and why that is accepted.
 | ML-DSA signing | the number of rejection rounds | inherent in the scheme (FIPS 204); the count is independent of the key and within a round nothing depends on a secret |
 | SLH-DSA | nothing secret | see above; listed here because its running time does vary, with the public message digest |
 | FF1, FF3-1 | the plaintext and tweak, through radix division | the modes are defined over arithmetic in the caller's radix and division is not constant time on any target; documented on both modes; do not use them where an attacker can time them |
-| DER and PEM import and export | the structure and lengths of the encoding | DER lengths encode integer bit lengths, so a private key's encoding reveals the bit length of `d`, `p` and `q` whatever the parser does; the reader branches on structure but not on the value of any integer; treat a key's encoded form as a secret with the same care as the key |
+| `Alphabet` | the text, through a search of the alphabet | the format-preserving modes it serves are not constant time either; a format is not a secret |
+| `KeyInfo`, DER and PEM import and export | the structure and lengths of the encoding | DER lengths encode integer bit lengths, so a private key's encoding reveals the bit length of `d`, `p` and `q` whatever the parser does; the reader branches on structure but not on the value of any integer; treat a key's encoded form as a secret with the same care as the key |
 | `constant_time::equal` on unequal lengths | the lengths | lengths are not secret |
 | Implementation selection | the processor | asked once per process, in `probe.rs`, and every call thereafter is one predictable branch; not secret-dependent |
 | Every operation | its lengths | see *Attacker models* |
