@@ -1,13 +1,67 @@
 # scytale-ring
 
-[ring](https://crates.io/crates/ring) 0.17's API, with the work done by
-[scytale](https://crates.io/crates/scytale).
+A drop-in replacement for [ring](https://crates.io/crates/ring) that
+does the work with [scytale](https://crates.io/crates/scytale).
 
-This is not a fork of ring. None of ring's implementation is here, and
-there is no C or assembly to build: every operation is a call into
-scytale, which is portable Rust with hardware acceleration chosen at
-run time. The library is named `ring`, so code written against ring
-compiles unchanged.
+It presents ring 0.17's public API, module for module and name for
+name, and the library is called `ring`, so code written against ring
+compiles and runs unchanged. Behind the API is scytale: no line of
+ring's implementation is here.
+
+## Why
+
+ring is a good library, and most of the Rust TLS ecosystem is written
+against it. A developer might still want the same API answered by a
+different implementation:
+
+- **No C compiler, no build script.** ring builds C and assembly
+  through `cc`, which needs a working C toolchain for every target and
+  is the usual reason a cross-compile or a locked-down build fails.
+  scytale is Rust, with its hardware acceleration in `asm!` blocks
+  chosen at run time, so this crate builds wherever `rustc` does:
+  `no_std`, with no allocator, on a bare board or in wasm.
+- **Speed.** scytale's hot loops are hand-written assembly, tuned
+  per processor: AES-128-GCM runs at 14 GB/s with VAES and SHA-256
+  at 2.4 GB/s with SHA-NI on a laptop core, with figures for every
+  algorithm and implementation published in its `benchmarks/`.
+- **Testing.** scytale is checked against the NIST ACVP vectors and
+  Project Wycheproof, more than 85,000 cases, on every implementation
+  of every primitive, on x86-64, ARM64 and RISC-V hardware and on
+  eleven emulated processors. This crate then runs ring's own test
+  suite and the test suites of rustls and rustls-webpki on top.
+- **A second implementation.** Two independent implementations of one
+  API let you compare them, test against each other, or keep one as
+  a fallback. Switching between ring and this crate is one line of
+  a manifest, in either direction.
+
+## Dropping it in
+
+In the manifest of the crate that uses ring, change the dependency:
+
+```toml
+[dependencies]
+ring = { package = "scytale-ring", version = "0.8" }
+```
+
+That is the whole change. `use ring::aead;`, `ring::digest::SHA256`,
+`signature::EcdsaKeyPair::from_pkcs8`, and everything else keep
+working, because the package is presented under the library name
+`ring`. Change the line back, and ring is back.
+
+To see it done, this repository does exactly that to ring's own test
+suite: `ring-tests/Cargo.toml` holds the line above, and the files
+under `ring-tests/tests/` are ring's, byte for byte, passing against
+scytale.
+
+### What it does not reach
+
+The line changes what *your* crate's `ring` means. A dependency that
+names ring itself, such as rustls or rustls-webpki, keeps the ring in
+its own manifest: cargo's `[patch]` cannot substitute a package under
+another name, and this package is not called `ring`. To run such a
+crate over scytale, make the same one-line change in its manifest;
+`scripts/test-ring-downstream` in the scytale repository does that to
+rustls and rustls-webpki and runs their test suites, which pass.
 
 ## Which ring
 
@@ -21,21 +75,6 @@ so it says nothing about ring. This table does:
 A new ring API arrives in a new scytale-ring minor version, and a row
 here says so.
 
-## Using it
-
-Replace ring in your own manifest:
-
-```toml
-[dependencies]
-ring = { package = "scytale-ring", version = "0.8" }
-```
-
-That reaches your crate's own calls. It does not reach a dependency
-that names ring itself, such as rustls or rustls-webpki: cargo's
-`[patch]` matches a replacement by its real package name, and this
-package is not called `ring`. Substituting it under such a crate means
-editing that crate's manifest the same way.
-
 ## What is tested
 
 - ring's own test suite, every file of it, vendored unchanged under
@@ -46,7 +85,7 @@ editing that crate's manifest the same way.
   against keys and signatures made by OpenSSL.
 - rustls-webpki 0.103 and rustls 0.23 run their own test suites with
   this crate as their ring, by `scripts/test-ring-downstream` in the
-  scytale repository.
+  scytale repository, in CI on every push.
 
 ## Where it differs from ring
 
@@ -63,4 +102,5 @@ editing that crate's manifest the same way.
 
 ## Licence
 
-BSD-2-Clause, as scytale.
+BSD-2-Clause, as scytale. The files under `ring-tests/` are ring's,
+under ring's licence, which is beside them.
