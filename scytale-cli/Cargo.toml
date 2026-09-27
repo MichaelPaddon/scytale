@@ -9,5 +9,23 @@ license.workspace = true
 # nothing here for anyone to import.
 publish = false
 
+[[bin]]
+name = "scytale"
+path = "src/main.rs"
+# The binary's name is the library's, and rustdoc would write both
+# to one place. Its module comments are for readers of the source;
+# the library's are the documentation.
+doc = false
+
 [dependencies]
 scytale = { path = "../scytale" }
+zeroize = "1"
+# Only the parser: no colour, no suggestions, no environment lookups,
+# so the binary stays small and its behaviour is what the code says.
+clap = { version = "4", default-features = false, features = [
+    "std",
+    "derive",
+    "help",
+    "usage",
+    "error-context",
+] }
