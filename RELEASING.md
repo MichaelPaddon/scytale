@@ -78,13 +78,15 @@ done
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ```
 
-Then the packaging, which verifies against crates.io and so passes
-for the library alone until it is published:
+Then the packaging. Only the library's can be tried before the
+release: the shim and the tool depend on the new library version,
+which crates.io does not have until step 6, and even `--no-verify`
+resolves the dependency there.
 
 ```sh
 cargo publish --dry-run -p scytale
-cargo publish --dry-run -p scytale-ring --no-verify
-cargo publish --dry-run -p scytale-cli --no-verify
+cargo package -p scytale-ring --list
+cargo package -p scytale-cli --list
 ```
 
 ## 5. Commit, tag, push

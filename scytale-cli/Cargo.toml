@@ -23,7 +23,7 @@ doc = false
 
 [dependencies]
 # Moves with the workspace version.
-scytale = { path = "../scytale", version = "0.8" }
+scytale = { path = "../scytale", version = "0.9" }
 zeroize = "1"
 # Only the parser: no colour, no suggestions, no environment lookups,
 # so the binary stays small and its behaviour is what the code says.
