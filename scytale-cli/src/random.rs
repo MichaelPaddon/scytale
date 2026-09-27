@@ -11,6 +11,7 @@ use crate::fail::Result;
 use crate::io;
 
 #[derive(Args)]
+#[command(after_help = crate::help::VALUES)]
 pub struct RandomArgs {
     /// How many bytes
     count: usize,

@@ -19,6 +19,7 @@ pub enum KdfOp {
 }
 
 #[derive(Args)]
+#[command(after_help = crate::help::VALUES)]
 pub struct HkdfArgs {
     /// The hash
     #[arg(short = 'H', long, default_value = "sha256")]
@@ -44,6 +45,7 @@ pub struct HkdfArgs {
 }
 
 #[derive(Args)]
+#[command(after_help = crate::help::VALUES)]
 pub struct Pbkdf2Args {
     /// The hash
     #[arg(short = 'H', long, default_value = "sha256")]

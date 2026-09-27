@@ -1,13 +1,17 @@
 [package]
 name = "scytale-cli"
-description = "Command line interface for scytale"
+description = "The scytale cryptography library from a shell: AES, ChaCha20, AEAD, hashes, MACs, KDFs, keys, signatures, key agreement, ML-KEM"
+# scytale's version: the two are released together.
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
-# A tool built from the library, not a crate to depend on: it takes
-# scytale by path, which crates.io will not accept, and there is
-# nothing here for anyone to import.
-publish = false
+repository = "https://github.com/MichaelPaddon/scytale"
+# A binary has no rustdoc; the manual is the documentation.
+documentation = "https://github.com/MichaelPaddon/scytale/blob/main/scytale-cli/scytale.1.md"
+readme = "README.md"
+keywords = ["cryptography", "cli", "encryption", "signature", "post-quantum"]
+categories = ["command-line-utilities", "cryptography"]
 
 [[bin]]
 name = "scytale"
@@ -18,7 +22,8 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
-scytale = { path = "../scytale" }
+# Moves with the workspace version.
+scytale = { path = "../scytale", version = "0.8" }
 zeroize = "1"
 # Only the parser: no colour, no suggestions, no environment lookups,
 # so the binary stays small and its behaviour is what the code says.

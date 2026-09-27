@@ -21,6 +21,7 @@ pub enum PkeOp {
 }
 
 #[derive(Args)]
+#[command(after_help = crate::help::VALUES)]
 pub struct EncryptArgs {
     /// The public key file (PEM)
     #[arg(short, long)]
@@ -39,6 +40,7 @@ pub struct EncryptArgs {
 }
 
 #[derive(Args)]
+#[command(after_help = crate::help::VALUES)]
 pub struct DecryptArgs {
     /// The private key file (PEM)
     #[arg(short, long)]

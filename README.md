@@ -593,7 +593,7 @@ from ring, the main difference being deterministic ECDSA signatures.
 one subcommand per module of the library:
 
 ```sh
-cargo install --path scytale-cli
+cargo install scytale-cli
 
 scytale random 32 > key.hex
 scytale aead encrypt -a aes-256-gcm -k env:KEY -n hex:$NONCE \

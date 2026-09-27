@@ -23,6 +23,7 @@ pub enum KemOp {
 }
 
 #[derive(Args)]
+#[command(after_help = crate::help::VALUES)]
 pub struct EncapsulateArgs {
     /// The peer's public key file (PEM)
     #[arg(short, long)]
@@ -39,6 +40,7 @@ pub struct EncapsulateArgs {
 }
 
 #[derive(Args)]
+#[command(after_help = crate::help::VALUES)]
 pub struct DecapsulateArgs {
     /// The private key file (PEM)
     #[arg(short, long)]

@@ -1,0 +1,16 @@
+#!/bin/sh
+# Renders scytale-cli/scytale.1 as Markdown, for reading on GitHub,
+# into scytale-cli/scytale.1.md. The troff is the source; this file
+# is generated, and CI checks it is current. Requires pandoc.
+
+set -eu
+cd "$(dirname "$0")/.."
+
+{
+    echo "<!-- Generated from scytale.1 by scripts/man-md; edit that. -->"
+    echo
+    echo "# scytale(1)"
+    echo
+    pandoc -f man -t gfm scytale-cli/scytale.1 \
+        | sed 's/^# /## /'
+} > scytale-cli/scytale.1.md

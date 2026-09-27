@@ -25,6 +25,7 @@ mod aead;
 mod cipher;
 mod fail;
 mod hash;
+mod help;
 mod io;
 mod kdf;
 mod kem;

@@ -85,6 +85,7 @@ macro_rules! with_hash {
 pub(crate) use with_hash;
 
 #[derive(Args)]
+#[command(after_help = crate::help::VALUES)]
 pub struct HashArgs {
     /// The hash: sha256, sha3-512, shake128, ... (`scytale list hash`)
     #[arg(short, long, default_value = "sha256")]

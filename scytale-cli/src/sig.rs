@@ -29,6 +29,7 @@ pub enum RsaScheme {
 }
 
 #[derive(Args)]
+#[command(after_help = crate::help::VALUES)]
 pub struct SignArgs {
     /// The private key file (PEM)
     #[arg(short, long)]
@@ -56,6 +57,7 @@ pub struct SignArgs {
 }
 
 #[derive(Args)]
+#[command(after_help = crate::help::VALUES)]
 pub struct VerifyArgs {
     /// The public key file (PEM)
     #[arg(short, long)]

@@ -104,6 +104,7 @@ pub enum Padding {
 }
 
 #[derive(Args)]
+#[command(after_help = crate::help::VALUES)]
 pub struct CipherArgs {
     /// The cipher and mode: aes-256-ctr, chacha20, ff1-aes-128, ...
     #[arg(short, long)]

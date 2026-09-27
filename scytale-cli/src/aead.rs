@@ -45,6 +45,7 @@ pub enum AeadOp {
 }
 
 #[derive(Args)]
+#[command(after_help = crate::help::VALUES)]
 pub struct AeadArgs {
     /// The construction: aes-256-gcm, chacha20-poly1305, ...
     #[arg(short, long)]

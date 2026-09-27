@@ -350,6 +350,15 @@ jobs:
               exit 1
           fi
 
+      - name: Manual rendering
+        # scytale.1.md is generated from scytale.1 for reading on
+        # GitHub; a change to the troff without regenerating it is
+        # caught here.
+        run: |
+          command -v pandoc > /dev/null || sudo apt-get install -y pandoc
+          scripts/man-md
+          git diff --exit-code -- scytale-cli/scytale.1.md
+
   # rustls-webpki and rustls run their own test suites with
   # scytale-ring as their ring. Their tests are not in the published
   # crates, so the script clones each at its release tag.

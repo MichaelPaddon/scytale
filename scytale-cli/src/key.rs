@@ -62,6 +62,7 @@ pub enum KeyOp {
 }
 
 #[derive(Args)]
+#[command(after_help = crate::help::VALUES)]
 pub struct GenerateArgs {
     /// The algorithm: ed25519, ecdsa-p256, rsa-3072, ml-kem-768, ...
     #[arg(short, long)]
@@ -72,6 +73,7 @@ pub struct GenerateArgs {
 }
 
 #[derive(Args)]
+#[command(after_help = crate::help::VALUES)]
 pub struct PublicArgs {
     /// The private key file; standard input without one
     #[arg(long = "in")]
@@ -82,6 +84,7 @@ pub struct PublicArgs {
 }
 
 #[derive(Args)]
+#[command(after_help = crate::help::VALUES)]
 pub struct ShowArgs {
     /// The key file; standard input without one
     #[arg(long = "in")]

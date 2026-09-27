@@ -30,7 +30,10 @@ fn run(args: &[&str], stdin: &[u8]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(stdin).unwrap();
+    // A child that refuses its arguments exits without reading its
+    // input, and the write then fails with a broken pipe; that is the
+    // child's answer, not the test's failure.
+    let _ = child.stdin.take().unwrap().write_all(stdin);
     child.wait_with_output().unwrap()
 }
 
@@ -929,4 +932,70 @@ fn hex_bytes(s: &str) -> Vec<u8> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
         .collect()
+}
+
+/// Every option `--help` shows, at every level, and every name `list`
+/// prints, is in the manual; the manual is not left behind the code.
+#[test]
+fn the_manual_covers_the_help() {
+    let manual = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scytale.1"),
+    )
+    .unwrap();
+    // troff escapes hyphens.
+    let manual = manual.replace("\\-", "-");
+    let mut missing = Vec::new();
+    let mut stack = vec![Vec::<String>::new()];
+    while let Some(path) = stack.pop() {
+        let mut args: Vec<&str> = path.iter().map(String::as_str).collect();
+        args.push("--help");
+        let help = String::from_utf8(ok(&args, b"")).unwrap();
+        let mut section = "";
+        for line in help.lines() {
+            if line.ends_with(':') && !line.starts_with(' ') {
+                section = line;
+                continue;
+            }
+            let word = line.split_whitespace().next().unwrap_or("");
+            if section == "Commands:" && !word.is_empty() && word != "help" {
+                let mut next = path.clone();
+                next.push(word.to_owned());
+                stack.push(next);
+            }
+            if section == "Options:" {
+                for token in line.split_whitespace() {
+                    let token = token.trim_end_matches(',');
+                    if token.starts_with("--") && token != "--help" {
+                        if !manual.contains(token) {
+                            missing.push(format!("{path:?} {token}"));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    for name in text(ok(&["list"], b"")).lines() {
+        let name = name.split(' ').nth(1).unwrap();
+        // The manual writes the families out with their widths and
+        // sizes as patterns; the fixed names must be there verbatim.
+        let patterned = name.starts_with("aes-")
+            || name.starts_with("ff1-")
+            || name.starts_with("ff3-1-")
+            || name.starts_with("hmac-")
+            || name.starts_with("rsa-")
+            || name.starts_with("slh-dsa-");
+        if !patterned && !manual.contains(name) {
+            missing.push(name.to_owned());
+        }
+    }
+    assert!(missing.is_empty(), "not in scytale.1: {missing:#?}");
+    // The header names the version, and a release bumps it by hand.
+    let version = env!("CARGO_PKG_VERSION");
+    let (major_minor, _) = version.rsplit_once('.').unwrap();
+    let header = manual.lines().next().unwrap();
+    assert!(
+        header.contains(&format!("\"scytale {major_minor}\"")),
+        "scytale.1 header {header:?} is not for version {version}"
+    );
 }

@@ -37,6 +37,7 @@ pub const NAMES: [&str; 17] = [
 ];
 
 #[derive(Args)]
+#[command(after_help = crate::help::VALUES)]
 pub struct MacArgs {
     /// The MAC: hmac-sha256, cmac-aes-128, kmac256, poly1305, ...
     #[arg(short, long)]

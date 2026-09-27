@@ -10,7 +10,7 @@ ring's implementation is here.
 
 ## Why
 
-ring is a good library, and most of the Rust TLS ecosystem is written
+ring is an excellent library, and most of the Rust TLS ecosystem is written
 against it. A developer might still want the same API answered by a
 different implementation:
 

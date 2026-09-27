@@ -18,6 +18,7 @@ pub enum KexOp {
 }
 
 #[derive(Args)]
+#[command(after_help = crate::help::VALUES)]
 pub struct AgreeArgs {
     /// The private key file (PEM)
     #[arg(short, long)]
