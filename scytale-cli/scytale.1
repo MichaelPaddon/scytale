@@ -1,18 +1,21 @@
-.TH SCYTALE 1 "2026-09-27" "scytale 0.9" "User Commands"
+.TH SCYTALE 1 "2026-09-29" "scytale 0.9" "User Commands"
 .SH NAME
 scytale \- cryptographic command line tool
 .SH SYNOPSIS
 .B scytale
 .I command
-.RI [ subcommand ]
+.RI [ verb ]
+.I algorithm
 .RI [ options ]
 .RI [ file ]
 .br
 .B scytale list
 .RI [ family ]
+.RB [ \-\-long ]
 .br
 .B scytale
 .I command
+.RI [ verb ]
 .B \-\-help
 .SH DESCRIPTION
 .B scytale
@@ -31,6 +34,19 @@ command per module of the library:
 and
 .BR random .
 .PP
+The algorithm is the operation. It is the first word after the verb on
+every call, never an option and never defaulted, so a script says what
+it does and a reader need not know a default:
+.B scytale hash sha256
+.IR file ,
+.B scytale aead encrypt aes\-256\-gcm
+and so on. A name is matched without regard to case, and
+.B _
+and
+.B \-
+are interchangeable in it. A name that is not known is refused with
+the nearest names that are.
+.PP
 Input is standard input, or the
 .I file
 named last on the command line. Output is standard output, or the file
@@ -44,7 +60,8 @@ signature or label, is written with a prefix that says how to read it
 (see
 .BR VALUES ).
 The algorithm fixes the length of a key, IV or nonce, and a value of
-another length is refused: nothing is padded or cut to fit.
+another length is refused with both lengths in the message: nothing is
+padded or cut to fit.
 .SH VALUES
 .TP
 .BI hex: digits
@@ -89,11 +106,6 @@ way.
 Every option has a long form, and the long form is what the text
 below refers to. The short forms, where a command has them:
 .TP
-.BR \-a ", " \-\-algorithm
-The algorithm, by the names
-.B scytale list
-prints.
-.TP
 .BR \-k ", " \-\-key
 A key value, or for the public-key commands a private key file.
 .TP
@@ -106,11 +118,12 @@ the option is
 .BR \-s ", " \-\-signature
 A signature value.
 .TP
+.BR \-t ", " \-\-tag
+A tag value, for
+.BR "mac verify" .
+.TP
 .BR \-n ", " \-\-nonce
 A nonce value.
-.TP
-.BR \-H ", " \-\-hash
-A hash, by name.
 .TP
 .BR \-l ", " \-\-length
 An output length in bytes.
@@ -121,12 +134,10 @@ An iteration count.
 .BR \-o ", " \-\-out
 The output file, in place of standard output.
 .TP
-.BR \-\-in
-The input key file, for
-.B key public
-and
-.BR "key show" ,
-in place of standard input.
+.BR \-\-hex ", " \-\-raw
+How bytes are written: hex and a newline, or the bytes themselves.
+Each command says below which it does without either. The two
+exclude each other.
 .TP
 .BR \-h ", " \-\-help
 The help for a command, ending with the value syntax and the exit
@@ -138,35 +149,41 @@ The version.
 .SS list
 .B scytale list
 .RI [ family ]
+.RB [ \-\-long ]
 .PP
 Prints the algorithm names each command takes, one per line, for a
 script to check. With a
 .I family
 (one of
-.BR cipher ,
-.BR aead ,
 .BR hash ,
-.BR xof ,
 .BR mac ,
-.BR key )
-the names alone; without one, every name prefixed by its family.
+.BR aead ,
+.BR cipher ,
+.BR kdf ,
+.BR key ,
+.BR sig ,
+.BR kex ,
+.BR kem ,
+.BR pke )
+the names alone; without one, every name prefixed by its family. With
+.B \-\-long
+each line goes on to say what the name takes: the key, nonce, tag and
+output lengths, and which options it has.
 .SS random
 .B scytale random
-.RI [ \-\-binary ]
+.RB [ \-\-hex | \-\-raw ]
 .RI [ "\-o file" ]
 .I count
 .PP
 .I count
-bytes from the system-seeded CTR_DRBG, as hex with a newline, or raw
-with
-.BR \-\-binary .
+bytes from the system-seeded CTR_DRBG. Hex without a flag.
 .SS hash
 .B scytale hash
-.RI [ "\-a algorithm" ]
+.I algorithm
 .RI [ "\-l length" ]
 .RI [ "\-\-function\-name value" ]
 .RI [ "\-\-customization value" ]
-.RI [ \-\-binary ]
+.RB [ \-\-hex | \-\-raw ]
 .RI [ file... ]
 .PP
 A digest of each file, or of standard input, as hex followed by two
@@ -175,13 +192,11 @@ spaces and the file's name, in the layout of
 standard input is named
 .BR \- .
 With
-.B \-\-binary
-the raw digest alone.
+.B \-\-raw
+the digest alone, for one file at most.
 .TP
-.BI \-a,\ \-\-algorithm\  name
-The hash;
-.B sha256
-by default. One of
+.I algorithm
+One of
 .BR sha1 ,
 .BR sha224 ,
 .BR sha256 ,
@@ -207,27 +222,33 @@ refused otherwise.
 .BI \-\-function\-name\  value ,\ \-\-customization\  value
 The cSHAKE function name and customization string, as
 .BR VALUES ;
-empty without them.
-.SS mac
-.B scytale mac
-.BI \-a\  algorithm
+empty without them, refused for the other hashes.
+.SS mac tag, mac verify
+.B scytale mac tag
+.I algorithm
 .BI \-k\  key
-.RI [ "\-\-verify tag" ]
 .RI [ "\-l length" ]
 .RI [ "\-\-customization value" ]
-.RI [ \-\-binary ]
+.RB [ \-\-hex | \-\-raw ]
+.RI [ file ]
+.br
+.B scytale mac verify
+.I algorithm
+.BI \-k\  key
+.BI \-t\  tag
+.RI [ "\-l length" ]
+.RI [ "\-\-customization value" ]
 .RI [ file ]
 .PP
-A tag over the input, as hex, or raw with
-.BR \-\-binary .
-With
-.B \-\-verify
-the input is checked against
+.B tag
+writes a tag over the input, hex without a flag.
+.B verify
+checks the input against
 .I tag
 instead: nothing is printed, and the exit status says whether it
 matched.
 .TP
-.BI \-a,\ \-\-algorithm\  name
+.I algorithm
 One of
 .BI hmac\- hash
 for any hash above
@@ -258,7 +279,7 @@ The KMAC customization string.
 .SS aead encrypt, aead decrypt
 .B scytale aead
 .RB { encrypt | decrypt }
-.BI \-a\  algorithm
+.I algorithm
 .BI \-k\  key
 .BI \-n\  nonce
 .RI [ "\-\-aad value" ]
@@ -274,7 +295,7 @@ GCM and ChaCha20-Poly1305 streams; decryption reads the whole input
 first, since plaintext handed out before the tag is checked is
 plaintext an attacker chose.
 .TP
-.BI \-a,\ \-\-algorithm\  name
+.I algorithm
 One of
 .BR aes\-128\-gcm ,
 .BR aes\-192\-gcm ,
@@ -308,12 +329,13 @@ number from 4 to 16; GCM-SIV and ChaCha20-Poly1305 take 16 only.
 .SS cipher encrypt, cipher decrypt
 .B scytale cipher
 .RB { encrypt | decrypt }
-.BI \-a\  algorithm
+.I algorithm
 .BI \-k\  key
 .RI [ "\-\-iv value" ]
 .RI [ "\-n nonce" ]
 .RI [ "\-\-counter n" ]
 .RI [ "\-\-padding pkcs7|none" ]
+.RI [ "\-\-tweak\-key key" ]
 .RI [ "\-\-alphabet chars" ]
 .RI [ "\-\-tweak value" ]
 .RI [ "\-o file" ]
@@ -322,10 +344,11 @@ number from 4 to 16; GCM-SIV and ChaCha20-Poly1305 take 16 only.
 The unauthenticated modes. Nothing here checks that a message is what
 was encrypted; a script that needs to know that wants
 .BR aead .
-These are for a protocol that brings its own MAC, a disk, a key to
-wrap, or a format to preserve.
+These are for a protocol that brings its own MAC, a disk, or a format
+to preserve. An option the algorithm does not take is refused, and
+the message says which algorithm it is for.
 .TP
-.BI \-a,\ \-\-algorithm\  name
+.I algorithm
 .BI aes\- width \- mode
 for a
 .I width
@@ -338,42 +361,48 @@ of
 .BR cfb1 ,
 .BR cfb8 ,
 .BR cfb128 ,
-.BR ofb ,
-.BR xts ,
-.B kw
+.B ofb
 or
-.BR kwp ;
+.BR xts ;
 .BR chacha20 ;
 .BI ff1\-aes\- width
 or
 .BI ff3\-1\-aes\- width
 for the format-preserving modes.
+.B kw
+and
+.B kwp
+are under
+.BR "cipher wrap" .
 .TP
 .BI \-k,\ \-\-key\  value
-The key, of the cipher's width. XTS takes two keys of that width, one
-after the other, as
-.BR openssl (1)
-does, and they must differ.
+The key, of the cipher's width.
 .TP
 .BI \-\-iv\  value
-One block: the IV for CBC, CFB and OFB, the initial counter block for
-CTR, the tweak for XTS. Required by those modes and refused by ECB, KW
-and KWP.
+One 16-byte block: the IV for CBC, CFB and OFB, the first counter
+block for CTR, the tweak for XTS. Required by those modes and refused
+by the others.
 .TP
 .BI \-n,\ \-\-nonce\  value ,\ \-\-counter\  n
-The 12-byte nonce and the initial block counter (0 without it) for
+The 12-byte nonce and the first block counter (0 without it) for
 ChaCha20, which encrypts and decrypts with the one operation.
 .TP
 .BI \-\-padding\  pkcs7 | none
-For ECB, CBC and CFB128, which take whole blocks. PKCS#7 padding is
-added on encryption and removed on decryption unless
-.B none
-is given, in which case an input that is not whole blocks is refused.
-PKCS#7 is what
+Required for ECB, CBC and CFB128, which take whole blocks, and
+refused by the rest.
+.B pkcs7
+adds PKCS#7 padding on encryption and removes it on decryption, and
+is what
 .B openssl enc
-and CMS use. Padding that does not check on decryption exits with
-status 1 and prints nothing; a script must not report that
-difference to anyone who can submit ciphertexts.
+and CMS use;
+.B none
+refuses an input that is not whole blocks. Padding that does not
+check on decryption exits with status 1 and prints nothing; a script
+must not report that difference to anyone who can submit ciphertexts.
+.TP
+.BI \-\-tweak\-key\  value
+The second key for XTS, of the cipher's width and different from the
+first. Required by XTS, refused by the rest.
 .TP
 .BI \-\-alphabet\  chars ,\ \-\-tweak\  value
 For FF1 and FF3-1, which read and write lines of text in the alphabet,
@@ -382,45 +411,63 @@ are the numerals, in order; the decimal digits without it. The tweak
 is any length for FF1 and exactly 7 bytes for FF3-1; empty for FF1
 without it. These modes are not constant time.
 .PP
-KW wraps a key of any whole number of 8-byte blocks, at least two; KWP
-wraps any length. Both add 8 bytes. CTR, OFB and CFB take any length
-and stream; CBC, CFB128 and ECB stream a block at a time; CFB1, XTS,
-KW and KWP read the whole input.
+CTR, OFB and CFB take any length and stream; CBC, CFB128 and ECB
+stream a block at a time; CFB1, XTS and the format-preserving modes
+read the whole input.
+.SS cipher wrap, cipher unwrap
+.B scytale cipher
+.RB { wrap | unwrap }
+.I algorithm
+.BI \-k\  key
+.RI [ "\-o file" ]
+.RI [ file ]
+.PP
+Key wrapping (RFC 3394, RFC 5649): the input is a key, and the output
+is it under the wrapping key with an 8-byte check value.
+.I algorithm
+is
+.BI aes\- width \-kw
+for a key that is whole 8-byte blocks, two or more, or
+.BI aes\- width \-kwp
+for a key of any length. A wrapped key that does not check on
+unwrapping exits with status 1.
 .SS kdf hkdf
 .B scytale kdf hkdf
-.RI [ "\-H hash" ]
+.I hash
 .BI \-\-ikm\  value
 .RI [ "\-\-salt value" ]
 .RI [ "\-\-info value" ...]
 .BI \-l\  bytes
-.RI [ \-\-binary ]
+.RB [ \-\-hex | \-\-raw ]
 .RI [ "\-o file" ]
 .PP
-HKDF (RFC 5869): keys from keying material that is already
-unguessable, such as a shared secret. The input keying material may
-not be given as
+HKDF (RFC 5869) over
+.IR hash ,
+any of the plain hashes above: keys from keying material that is
+already unguessable, such as a shared secret. The input keying
+material may not be given as
 .BR str: .
 .B \-\-info
-may repeat; the values are concatenated in order. Output as hex, or raw
-with
-.BR \-\-binary .
+may repeat; the values are concatenated in order. Hex without a flag.
 .SS kdf pbkdf2
 .B scytale kdf pbkdf2
-.RI [ "\-H hash" ]
+.I hash
 .BI \-\-password\  value
 .BI \-\-salt\  value
 .BI \-i\  iterations
 .BI \-l\  bytes
-.RI [ \-\-binary ]
+.RB [ \-\-hex | \-\-raw ]
 .RI [ "\-o file" ]
 .PP
-PBKDF2 (RFC 8018): a key from a password, which is guessable, at a
-cost per guess set by the iteration count. The password and salt may
-be given as
+PBKDF2 (RFC 8018) over
+.IR hash :
+a key from a password, which is guessable, at a cost per guess set by
+the iteration count. The password and salt may be given as
 .BR str: .
+Hex without a flag.
 .SS key generate
 .B scytale key generate
-.BI \-a\  algorithm
+.I algorithm
 .RI [ "\-o file" ]
 .PP
 A new private key, as a PEM
@@ -460,15 +507,17 @@ of 128, 192 or 256. Keys on P-256 and P-384 serve both ECDSA and ECDH;
 an RSA key serves both signatures and encryption.
 .SS key public
 .B scytale key public
-.RI [ "\-\-in file" ]
+.RI [ file ]
 .RI [ "\-o file" ]
 .PP
-The public half of a private key, as a PEM
+The public half of the private key in
+.IR file ,
+or standard input, as a PEM
 .B PUBLIC KEY
 block.
 .SS key show
 .B scytale key show
-.RI [ "\-\-in file" ]
+.RI [ file ]
 .PP
 Prints what a key file holds: its algorithm, which half it is, and
 for RSA the modulus length.
@@ -484,31 +533,29 @@ and everything else write, and the bare
 .B RSA PUBLIC KEY
 and
 .B EC PRIVATE KEY
-forms as well. The algorithm is read out of the file, so it is never
-named on the command line.
+forms as well. A command names the scheme it runs and checks the file
+holds a key for it; a file that holds another kind of key, or the
+wrong half, is refused with a message saying what it holds.
 .SS sig sign
 .B scytale sig sign
+.I scheme
 .BI \-k\  private
-.RI [ "\-H hash" ]
 .RI [ "\-\-context value" ]
-.RI [ "\-\-rsa\-scheme pss|pkcs1" ]
-.RI [ \-\-raw ]
-.RI [ \-\-hex ]
+.RB [ \-\-raw\-ecdsa ]
+.RB [ \-\-hex | \-\-raw ]
 .RI [ "\-o file" ]
 .RI [ file ]
 .PP
 Signs the input with the private key in
 .IR private ,
-writing the signature raw, or as hex with
-.BR \-\-hex .
+writing the signature as raw bytes without a flag.
 .SS sig verify
 .B scytale sig verify
+.I scheme
 .BI \-p\  public
 .BI \-s\  signature
-.RI [ "\-H hash" ]
 .RI [ "\-\-context value" ]
-.RI [ "\-\-rsa\-scheme pss|pkcs1" ]
-.RI [ \-\-raw ]
+.RB [ \-\-raw\-ecdsa ]
 .RI [ file ]
 .PP
 Checks
@@ -522,23 +569,30 @@ A private key file is refused here;
 .B key public
 makes the public one.
 .TP
-.BI \-H,\ \-\-hash\  name
-The hash for ECDSA and RSA,
-.B sha256
-by default; Ed25519, ML-DSA and SLH-DSA hash internally and ignore it.
+.I scheme
+.B ed25519
+on an Ed25519 key;
+.BI ecdsa\- hash
+on a P-256 or P-384 key, the curve being the key's;
+.BI rsa\-pss\- hash
+on an RSA or RSA-PSS key, salted with a hash's worth of random bytes;
+.BI rsa\-pkcs1\- hash
+on an RSA key, deterministic;
+.BR ml\-dsa\-44 ,
+.BR ml\-dsa\-65 ,
+.B ml\-dsa\-87
+and the twelve
+.B slh\-dsa
+sets on their own keys.
+.I hash
+is any of the plain hashes above.
 .TP
 .BI \-\-context\  value
 The context string for Ed25519 (which then signs in the Ed25519ctx
 form), ML-DSA and SLH-DSA; up to 255 bytes. Empty without it, which
-for Ed25519 is the plain form.
+for Ed25519 is the plain form. Refused by the other schemes.
 .TP
-.BI \-\-rsa\-scheme\  pss | pkcs1
-RSASSA-PSS, salted with a hash's worth of random bytes, or the
-deterministic RSASSA-PKCS1-v1_5;
-.B pss
-by default.
-.TP
-.B \-\-raw
+.B \-\-raw\-ecdsa
 An ECDSA signature as the fixed-width
 .I r
 followed by
@@ -550,65 +604,85 @@ fixed-width bytes their standards define, and RSA signatures the
 modulus length.
 .SS kex agree
 .B scytale kex agree
+.I algorithm
 .BI \-k\  private
 .BI \-p\  peer
-.RI [ \-\-hex ]
+.RB [ \-\-hex | \-\-raw ]
 .RI [ "\-o file" ]
 .PP
 The shared secret between the private key in
 .I private
 and the peer's public key in
 .IR peer ,
-which must be on the same curve: X25519, P-256 or P-384. Raw bytes,
-or hex with
-.BR \-\-hex .
-A shared secret is keying material, not a key; derive keys from it with
+under
+.BR x25519 ,
+.B ecdh\-p256
+or
+.BR ecdh\-p384 ;
+both keys must be for it. Hex without a flag. A shared secret is
+keying material, not a key; derive keys from it with
 .BR "kdf hkdf" .
 .SS kem encapsulate
 .B scytale kem encapsulate
+.I algorithm
 .BI \-p\  public
 .BI \-\-secret\-out\  file
-.RI [ \-\-hex ]
+.RB [ \-\-hex | \-\-raw ]
 .RI [ "\-o file" ]
 .PP
-A ciphertext for the ML-KEM public key in
+A ciphertext for the public key in
 .IR public ,
+under
+.BR ml\-kem\-512 ,
+.B ml\-kem\-768
+or
+.BR ml\-kem\-1024 ,
 to standard output or
 .BR \-o ,
 and the shared secret it carries to
 .IR file ,
-created readable by its owner alone. The peer recovers the secret from
-the ciphertext with the private key.
+created readable by its owner alone. Raw bytes without a flag, for
+both. The peer recovers the secret from the ciphertext with the
+private key.
 .SS kem decapsulate
 .B scytale kem decapsulate
+.I algorithm
 .BI \-k\  private
-.RI [ \-\-hex ]
+.RB [ \-\-hex | \-\-raw ]
 .RI [ "\-o file" ]
 .RI [ file ]
 .PP
-The shared secret an ML-KEM ciphertext carries. A ciphertext that was
-not made for the key yields a secret that matches nothing, rather than
-an error, as FIPS 203 requires.
+The shared secret a ciphertext carries; hex without a flag. A
+ciphertext that was not made for the key yields a secret that matches
+nothing, rather than an error, as FIPS 203 requires.
 .SS pke encrypt, pke decrypt
 .B scytale pke
 .RB { encrypt | decrypt }
+.I scheme
 .RB { "\-p public" | "\-k private" }
-.RI [ "\-H hash" ]
 .RI [ "\-\-label value" ]
 .RI [ "\-o file" ]
 .RI [ file ]
 .PP
-RSA-OAEP: a short message, at most the modulus length less twice the
-hash length less two bytes, under an RSA public key. The hash is
-.B sha256
-by default, the label empty; both must match to decrypt. A ciphertext
-that does not decrypt exits with status 1 and says nothing more.
+RSA-OAEP under
+.BI rsa\-oaep\- hash
+for any of the plain hashes: a short message, at most the modulus
+length less twice the hash length less two bytes, under an RSA public
+key. The label is empty without
+.BR \-\-label ,
+and must match to decrypt. A ciphertext that does not decrypt exits
+with status 1 and says nothing more.
 .SH ALGORITHM NAMES
 .B scytale list
-prints every name. Names are lower case with hyphens, and name the
+prints every name, and
+.B scytale list
+.I family
+.B \-\-long
+what each takes. Names are lower case with hyphens, and name the
 whole construction, key width included:
 .BR aes\-256\-gcm ,
 .BR hmac\-sha3\-256 ,
+.BR rsa\-pss\-sha256 ,
 .BR ml\-dsa\-65 .
 A key of another width than the name says is refused rather than
 taken as a hint.
@@ -618,57 +692,62 @@ taken as a hint.
 Success, including a verification that passed.
 .TP
 .B 1
-A tag, signature or padding did not verify: the message is not what
-was made under this key.
+A tag, signature, padding or check value did not verify: the message
+is not what was made under this key.
 .TP
 .B 2
 The request could not be carried out as asked: an unknown name, an
 option the algorithm does not take, a value in the wrong form, a key
-of the wrong length, a file that is not a key.
+of the wrong length, a file that is not a key or holds the wrong
+kind.
 .TP
 .B 3
 Anything else: a file that would not open, a generator that would not
 seed.
 .PP
 Errors go to standard error as
-.B scytale:
-followed by the message, and never contain key material.
+.BI "scytale " "command verb algorithm" :
+followed by what is wrong and what would be right, naming the option
+concerned and a length or a name; the bytes of a value are never
+shown. When the reader of standard output goes away, the tool stops
+quietly with status 0, as the coreutils do.
 .SH EXAMPLES
 Encrypt a file to a key held in a file, with a header authenticated
 alongside it, and decrypt it again:
 .PP
 .nf
-scytale random 32 \-\-binary \-o session.key
+scytale random 32 \-\-raw \-o session.key
 scytale random 12 > nonce.hex
-scytale aead encrypt \-a aes\-256\-gcm \-k file:session.key \e
+scytale aead encrypt aes\-256\-gcm \-k file:session.key \e
     \-n hex:$(cat nonce.hex) \-\-aad str:v1 report.pdf \-o report.sealed
-scytale aead decrypt \-a aes\-256\-gcm \-k file:session.key \e
+scytale aead decrypt aes\-256\-gcm \-k file:session.key \e
     \-n hex:$(cat nonce.hex) \-\-aad str:v1 report.sealed \-o report.pdf
 .fi
 .PP
 Sign a release with a post-quantum key and check the signature:
 .PP
 .nf
-scytale key generate \-a ml\-dsa\-65 \-o release.pem
-scytale key public \-\-in release.pem \-o release.pub
-scytale sig sign \-k release.pem release.tar \-o release.sig
-scytale sig verify \-p release.pub \-s file:release.sig release.tar
+scytale key generate ml\-dsa\-65 \-o release.pem
+scytale key public release.pem \-o release.pub
+scytale sig sign ml\-dsa\-65 \-k release.pem release.tar \-o release.sig
+scytale sig verify ml\-dsa\-65 \-p release.pub \-s file:release.sig \e
+    release.tar
 .fi
 .PP
 Agree a key with a peer and derive session keys from it:
 .PP
 .nf
-scytale key generate \-a x25519 \-o me.pem
-scytale key public \-\-in me.pem \-o me.pub
-scytale kex agree \-k me.pem \-p peer.pub \-o shared.bin
-scytale kdf hkdf \-\-ikm file:shared.bin \-\-salt str:session\-1 \e
+scytale key generate x25519 \-o me.pem
+scytale key public me.pem \-o me.pub
+scytale kex agree x25519 \-k me.pem \-p peer.pub \-\-raw \-o shared.bin
+scytale kdf hkdf sha256 \-\-ikm file:shared.bin \-\-salt str:session\-1 \e
     \-\-info str:encrypt \-\-length 32
 .fi
 .PP
 Read a key from a descriptor rather than the command line:
 .PP
 .nf
-scytale mac \-a hmac\-sha256 \-k fd:3 message.txt 3< mac.key
+scytale mac tag hmac\-sha256 \-k fd:3 message.txt 3< mac.key
 .fi
 .PP
 Decrypt what
@@ -677,7 +756,8 @@ encrypted:
 .PP
 .nf
 openssl enc \-aes\-128\-cbc \-K $KEY \-iv $IV < plain > cipher
-scytale cipher decrypt \-a aes\-128\-cbc \-k hex:$KEY \-\-iv hex:$IV < cipher
+scytale cipher decrypt aes\-128\-cbc \-k hex:$KEY \-\-iv hex:$IV \e
+    \-\-padding pkcs7 < cipher
 .fi
 .SH SEE ALSO
 .BR openssl (1),

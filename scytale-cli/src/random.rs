@@ -9,15 +9,16 @@ use zeroize::Zeroizing;
 
 use crate::fail::Result;
 use crate::io;
+use crate::io::Format;
 
 #[derive(Args)]
 #[command(after_help = crate::help::VALUES)]
 pub struct RandomArgs {
     /// How many bytes
     count: usize,
-    /// Write the raw bytes rather than hex
-    #[arg(long)]
-    binary: bool,
+    /// Hex by default
+    #[command(flatten)]
+    format: Format,
     /// Write to this file, created readable by the owner alone
     #[arg(short, long)]
     out: Option<PathBuf>,
@@ -31,5 +32,5 @@ pub fn run(args: RandomArgs) -> Result<()> {
         rng.fill(chunk)?;
     }
     let mut out = io::output(args.out.as_deref(), true)?;
-    io::write(&mut *out, &bytes, !args.binary)
+    io::write(&mut *out, &bytes, args.format.as_hex(true))
 }

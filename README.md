@@ -595,22 +595,24 @@ one subcommand per module of the library:
 ```sh
 cargo install scytale-cli
 
-scytale random 32 > key.hex
-scytale aead encrypt -a aes-256-gcm -k env:KEY -n hex:$NONCE \
+scytale random 32 --raw -o key.bin
+scytale aead encrypt aes-256-gcm -k file:key.bin -n hex:$NONCE \
     --aad str:v1 < report.pdf > report.sealed
-scytale aead decrypt -a aes-256-gcm -k file:key.bin -n hex:$NONCE \
+scytale aead decrypt aes-256-gcm -k file:key.bin -n hex:$NONCE \
     --aad str:v1 < report.sealed > report.pdf
 
-scytale key generate -a ml-dsa-65 -o sign.pem
-scytale key public --in sign.pem -o sign.pub
-scytale sig sign -k sign.pem release.tar > release.sig
-scytale sig verify -p sign.pub -s file:release.sig release.tar
+scytale key generate ml-dsa-65 -o sign.pem
+scytale key public sign.pem -o sign.pub
+scytale sig sign ml-dsa-65 -k sign.pem release.tar > release.sig
+scytale sig verify ml-dsa-65 -p sign.pub -s file:release.sig release.tar
 ```
 
-Keys and every other byte-valued option are written `hex:`, `file:`,
-`fd:`, `env:` or `str:`, never bare, so a value is never read the
-wrong way, and a key of the wrong length for the algorithm is
-refused rather than padded or cut. Encryption streams, so a pipe of
+The algorithm is the first word after the verb on every call, never
+an option and never defaulted. Keys and every other byte-valued
+option are written `hex:`, `file:`, `fd:`, `env:` or `str:`, never
+bare, so a value is never read the wrong way, and a key of the wrong
+length for the algorithm is refused rather than padded or cut, with
+both lengths in the message. Encryption streams, so a pipe of
 any size goes through in fixed memory; authenticated decryption
 writes nothing until the tag has checked. Exit status 1 means a tag,
 signature or padding did not verify, 2 a request that could not be

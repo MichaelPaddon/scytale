@@ -25,12 +25,14 @@ doc = false
 # Moves with the workspace version.
 scytale = { path = "../scytale", version = "0.9" }
 zeroize = "1"
-# Only the parser: no colour, no suggestions, no environment lookups,
-# so the binary stays small and its behaviour is what the code says.
+# The parser and its "did you mean" for a mistyped option: no colour
+# and no environment lookups, so the binary stays small and its
+# behaviour is what the code says.
 clap = { version = "4", default-features = false, features = [
     "std",
     "derive",
     "help",
     "usage",
     "error-context",
+    "suggestions",
 ] }

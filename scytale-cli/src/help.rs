@@ -10,6 +10,10 @@ Values:
   the variable), str:TEXT (the text; not for a key). The algorithm
   fixes each length, and a value of another length is refused.
 
+Output:
+  --hex writes hex and a newline, --raw the bytes; the default is in
+  the option's help.
+
 Exit status:
   0 done; 1 a tag, signature or padding did not verify; 2 the request
   could not be carried out as asked; 3 anything else.

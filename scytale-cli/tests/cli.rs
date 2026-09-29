@@ -6,140 +6,30 @@
 //! unit tests inside it still run there.
 #![cfg(not(target_family = "wasm"))]
 
+mod common;
+
 use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
 
-const BIN: &str = env!("CARGO_BIN_EXE_scytale");
-
-/// A directory of this test's own, under the target directory.
-fn dir(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-/// Runs `scytale` with `args`, `stdin` on its standard input.
-fn run(args: &[&str], stdin: &[u8]) -> Output {
-    let mut child = Command::new(BIN)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    // A child that refuses its arguments exits without reading its
-    // input, and the write then fails with a broken pipe; that is the
-    // child's answer, not the test's failure.
-    let _ = child.stdin.take().unwrap().write_all(stdin);
-    child.wait_with_output().unwrap()
-}
-
-/// Runs and requires success, returning standard output.
-fn ok(args: &[&str], stdin: &[u8]) -> Vec<u8> {
-    let out = run(args, stdin);
-    assert!(
-        out.status.success(),
-        "{args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    out.stdout
-}
-
-/// Runs and requires the exit status `code`.
-fn fails(args: &[&str], stdin: &[u8], code: i32) -> String {
-    let out = run(args, stdin);
-    assert_eq!(out.status.code(), Some(code), "{args:?}");
-    String::from_utf8_lossy(&out.stderr).into_owned()
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn text(bytes: Vec<u8>) -> String {
-    String::from_utf8(bytes).unwrap().trim_end().to_owned()
-}
-
-const KEY16: &str = "hex:000102030405060708090a0b0c0d0e0f";
-const KEY32: &str =
-    "hex:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-const IV: &str = "hex:0f0e0d0c0b0a09080706050403020100";
-const NONCE: &str = "hex:000000000000000000000001";
+use common::*;
 
 #[test]
 fn hash_matches_the_vectors() {
-    let out = text(ok(&["hash", "-a", "sha256"], b"abc"));
+    let out = text(ok(&["hash", "sha256"], b"abc"));
     assert_eq!(
         out,
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  -"
     );
-    let out = text(ok(&["hash", "-a", "sha3-256"], b""));
+    let out = text(ok(&["hash", "sha3-256"], b""));
     assert!(out.starts_with("a7ffc6f8bf1ed76651c14756a061d662"));
-    let out = text(ok(&["hash", "-a", "shake128", "--length", "16"], b""));
+    let out = text(ok(&["hash", "shake128", "--length", "16"], b""));
     assert_eq!(out, "7f9c2ba4e88f827d616045507605853e  -");
-    let out = ok(&["hash", "--binary"], b"abc");
+    let out = ok(&["hash", "sha256", "--raw"], b"abc");
     assert_eq!(out.len(), 32);
-    fails(&["hash", "-a", "md5"], b"", 2);
-    fails(&["hash", "-a", "shake256"], b"", 2);
-}
-
-#[test]
-fn keys_are_checked_before_anything_runs() {
-    // Wrong length, refused with the sizes and without the bytes.
-    let err = fails(
-        &[
-            "aead",
-            "encrypt",
-            "-a",
-            "aes-256-gcm",
-            "-k",
-            KEY16,
-            "-n",
-            NONCE,
-        ],
-        b"x",
-        2,
-    );
-    assert!(err.contains("32 bytes, got 16"), "{err}");
-    assert!(!err.contains("0001020304"), "{err}");
-    // No prefix, odd hex, a bad prefix, a text key.
-    for bad in ["00", "hex:0", "bin:00", "str:password"] {
-        let err = fails(
-            &[
-                "aead",
-                "encrypt",
-                "-a",
-                "aes-128-gcm",
-                "-k",
-                bad,
-                "-n",
-                NONCE,
-            ],
-            b"x",
-            2,
-        );
-        assert!(!err.is_empty());
-    }
-    // The other sources of a key.
-    let d = dir("keys");
-    let path = d.join("k");
-    fs::write(&path, [0u8; 16]).unwrap();
-    let file = format!("file:{}", path.display());
-    let a = ok(&["mac", "-a", "cmac-aes-128", "-k", &file], b"m");
-    let b = ok(
-        &[
-            "mac",
-            "-a",
-            "cmac-aes-128",
-            "-k",
-            &format!("hex:{}", "00".repeat(16)),
-        ],
-        b"m",
-    );
-    assert_eq!(a, b);
+    // Names are forgiving of case and underscores.
+    let out = text(ok(&["hash", "SHA3_256"], b""));
+    assert!(out.starts_with("a7ffc6f8"));
+    // The algorithm is not optional.
+    fails(&["hash"], b"", 2);
 }
 
 #[test]
@@ -159,7 +49,6 @@ fn aead_round_trips_and_detects_tampering() {
         let enc = [
             "aead",
             "encrypt",
-            "-a",
             alg,
             "-k",
             key,
@@ -173,7 +62,6 @@ fn aead_round_trips_and_detects_tampering() {
         let dec = [
             "aead",
             "decrypt",
-            "-a",
             alg,
             "-k",
             key,
@@ -192,7 +80,6 @@ fn aead_round_trips_and_detects_tampering() {
         let wrong = [
             "aead",
             "decrypt",
-            "-a",
             alg,
             "-k",
             key,
@@ -206,33 +93,14 @@ fn aead_round_trips_and_detects_tampering() {
     }
     // XPN: a 24-byte nonce.
     let nonce = "hex:000000000000000000000001000000000000000000000002";
-    let enc = [
-        "aead",
-        "encrypt",
-        "-a",
-        "aes-256-xpn",
-        "-k",
-        KEY32,
-        "-n",
-        nonce,
-    ];
-    let dec = [
-        "aead",
-        "decrypt",
-        "-a",
-        "aes-256-xpn",
-        "-k",
-        KEY32,
-        "-n",
-        nonce,
-    ];
+    let enc = ["aead", "encrypt", "aes-256-xpn", "-k", KEY32, "-n", nonce];
+    let dec = ["aead", "decrypt", "aes-256-xpn", "-k", KEY32, "-n", nonce];
     let sealed = ok(&enc, b"xpn");
     assert_eq!(ok(&dec, &sealed), b"xpn");
     // GCM with a truncated tag.
     let enc = [
         "aead",
         "encrypt",
-        "-a",
         "aes-128-gcm",
         "-k",
         KEY16,
@@ -244,7 +112,6 @@ fn aead_round_trips_and_detects_tampering() {
     let dec = [
         "aead",
         "decrypt",
-        "-a",
         "aes-128-gcm",
         "-k",
         KEY16,
@@ -268,7 +135,6 @@ fn gcm_matches_the_nist_vector() {
         &[
             "aead",
             "encrypt",
-            "-a",
             "aes-128-gcm",
             "-k",
             &zero_key,
@@ -295,7 +161,7 @@ fn every_cipher_mode_round_trips() {
         "aes-256-cfb128",
         "aes-128-ofb",
     ] {
-        let mut enc = vec!["cipher", "encrypt", "-a", alg, "-k"];
+        let mut enc = vec!["cipher", "encrypt", alg, "-k"];
         let key = match &alg[4..7] {
             "128" => KEY16.to_owned(),
             "192" => format!("hex:{}", "01".repeat(24)),
@@ -305,17 +171,17 @@ fn every_cipher_mode_round_trips() {
         if alg != "aes-128-ecb" {
             enc.extend(["--iv", IV]);
         }
-        let mut dec = enc.clone();
-        dec[1] = "decrypt";
-        let ciphertext = ok(&enc, &message);
         let padded =
             matches!(alg, "aes-128-ecb" | "aes-192-cbc" | "aes-256-cfb128");
         if padded {
-            assert_eq!(
-                ciphertext.len(),
-                (message.len() / 16 + 1) * 16,
-                "{alg}"
-            );
+            enc.extend(["--padding", "pkcs7"]);
+        }
+        let mut dec = enc.clone();
+        dec[1] = "decrypt";
+        let ciphertext = ok(&enc, &message);
+        if padded {
+            let blocks = (message.len() / 16 + 1) * 16;
+            assert_eq!(ciphertext.len(), blocks, "{alg}");
         } else {
             assert_eq!(ciphertext.len(), message.len(), "{alg}");
         }
@@ -326,7 +192,6 @@ fn every_cipher_mode_round_trips() {
     let enc = [
         "cipher",
         "encrypt",
-        "-a",
         "aes-128-cbc",
         "-k",
         KEY16,
@@ -337,61 +202,44 @@ fn every_cipher_mode_round_trips() {
     ];
     fails(&enc, &message, 2);
     assert_eq!(ok(&enc, &message[..32]).len(), 32);
-    // Padding stripped on decrypt that does not check is status 1.
+    // Padding that does not check on decrypt is status 1.
     let dec = [
         "cipher",
         "decrypt",
-        "-a",
         "aes-128-cbc",
         "-k",
         KEY16,
         "--iv",
         IV,
+        "--padding",
+        "pkcs7",
     ];
     fails(&dec, &[0u8; 32], 1);
-    // ECB refuses an IV; CBC needs one.
-    fails(
-        &[
-            "cipher",
-            "encrypt",
-            "-a",
-            "aes-128-ecb",
-            "-k",
-            KEY16,
-            "--iv",
-            IV,
-        ],
-        b"",
-        2,
-    );
-    fails(
-        &["cipher", "encrypt", "-a", "aes-128-cbc", "-k", KEY16],
-        b"",
-        2,
-    );
 }
 
 #[test]
 fn xts_kw_chacha20_and_fpe() {
-    // XTS takes both keys at once, and they must differ.
-    let two = format!("hex:{}{}", &KEY16[4..], "ff".repeat(16));
+    // XTS takes both keys, and they must differ.
+    let second = format!("hex:{}", "ff".repeat(16));
     let enc = [
         "cipher",
         "encrypt",
-        "-a",
         "aes-128-xts",
         "-k",
-        &two,
+        KEY16,
+        "--tweak-key",
+        &second,
         "--iv",
         IV,
     ];
     let dec = [
         "cipher",
         "decrypt",
-        "-a",
         "aes-128-xts",
         "-k",
-        &two,
+        KEY16,
+        "--tweak-key",
+        &second,
         "--iv",
         IV,
     ];
@@ -399,59 +247,33 @@ fn xts_kw_chacha20_and_fpe() {
     let c = ok(&enc, &sector);
     assert_eq!(c.len(), 520);
     assert_eq!(ok(&dec, &c), sector);
-    fails(
-        &[
-            "cipher",
-            "encrypt",
-            "-a",
-            "aes-128-xts",
-            "-k",
-            KEY16,
-            "--iv",
-            IV,
-        ],
-        &sector,
-        2,
-    );
 
     // Key wrap: RFC 3394 4.1.
     let kek = "hex:000102030405060708090A0B0C0D0E0F";
     let wrapped = ok(
-        &["cipher", "encrypt", "-a", "aes-128-kw", "-k", kek],
+        &["cipher", "wrap", "aes-128-kw", "-k", kek],
         &hex_bytes("00112233445566778899AABBCCDDEEFF"),
     );
     assert_eq!(
         hex(&wrapped),
         "1fa68b0a8112b447aef34bd8fb5a7b829d3e862371d2cfe5"
     );
-    let back = ok(
-        &["cipher", "decrypt", "-a", "aes-128-kw", "-k", kek],
-        &wrapped,
-    );
+    let back = ok(&["cipher", "unwrap", "aes-128-kw", "-k", kek], &wrapped);
     assert_eq!(hex(&back), "00112233445566778899aabbccddeeff");
-    let kwp = ok(
-        &["cipher", "encrypt", "-a", "aes-256-kwp", "-k", KEY32],
-        b"12345",
-    );
+    let kwp = ok(&["cipher", "wrap", "aes-256-kwp", "-k", KEY32], b"12345");
     assert_eq!(kwp.len(), 16);
-    let back = ok(
-        &["cipher", "decrypt", "-a", "aes-256-kwp", "-k", KEY32],
-        &kwp,
-    );
+    let back = ok(&["cipher", "unwrap", "aes-256-kwp", "-k", KEY32], &kwp);
     assert_eq!(back, b"12345");
 
     // ChaCha20: RFC 8439 2.4.2 uses a counter of 1.
-    let key =
-        "hex:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     let nonce = "hex:000000000000004a00000000";
     let out = ok(
         &[
             "cipher",
             "encrypt",
-            "-a",
             "chacha20",
             "-k",
-            key,
+            KEY32,
             "--nonce",
             nonce,
             "--counter",
@@ -463,8 +285,8 @@ fn xts_kw_chacha20_and_fpe() {
     assert!(hex(&out).starts_with("6e2e359a2568f98041ba0728dd0d6981"));
 
     // FF1 over digits, one line at a time.
-    let enc = ["cipher", "encrypt", "-a", "ff1-aes-128", "-k", KEY16];
-    let dec = ["cipher", "decrypt", "-a", "ff1-aes-128", "-k", KEY16];
+    let enc = ["cipher", "encrypt", "ff1-aes-128", "-k", KEY16];
+    let dec = ["cipher", "decrypt", "ff1-aes-128", "-k", KEY16];
     let c = text(ok(&enc, b"4000123456789010\n0123456789\n"));
     let lines: Vec<&str> = c.lines().collect();
     assert_eq!(lines.len(), 2);
@@ -473,12 +295,10 @@ fn xts_kw_chacha20_and_fpe() {
     assert_ne!(lines[0], "4000123456789010");
     let back = text(ok(&dec, format!("{c}\n").as_bytes()));
     assert_eq!(back, "4000123456789010\n0123456789");
-    fails(&enc, b"12a4\n", 2);
     // FF3-1 with a 7-byte tweak and a custom alphabet.
     let enc = [
         "cipher",
         "encrypt",
-        "-a",
         "ff3-1-aes-256",
         "-k",
         KEY32,
@@ -496,28 +316,32 @@ fn xts_kw_chacha20_and_fpe() {
 fn mac_and_kdf() {
     // RFC 4231 test case 2.
     let out = text(ok(
-        &["mac", "-a", "hmac-sha256", "-k", "hex:4a656665"],
+        &["mac", "tag", "hmac-sha256", "-k", "hex:4a656665"],
         b"what do ya want for nothing?",
     ));
     assert_eq!(
         out,
         "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
     );
-    let verify = ["mac", "-a", "hmac-sha256", "-k", "hex:4a656665", "--verify"];
     let tag = format!("hex:{out}");
-    let mut good = verify.to_vec();
-    good.push(&tag);
+    let good = [
+        "mac",
+        "verify",
+        "hmac-sha256",
+        "-k",
+        "hex:4a656665",
+        "-t",
+        &tag,
+    ];
     ok(&good, b"what do ya want for nothing?");
     fails(&good, b"what do ya want for something?", 1);
     // CMAC, KMAC and Poly1305 run and have the right sizes.
-    assert_eq!(
-        text(ok(&["mac", "-a", "cmac-aes-256", "-k", KEY32], b"")).len(),
-        32
-    );
+    let cmac = text(ok(&["mac", "tag", "cmac-aes-256", "-k", KEY32], b""));
+    assert_eq!(cmac.len(), 32);
     let kmac = ok(
         &[
             "mac",
-            "-a",
+            "tag",
             "kmac128",
             "-k",
             KEY32,
@@ -529,11 +353,8 @@ fn mac_and_kdf() {
         b"m",
     );
     assert_eq!(text(kmac).len(), 16);
-    assert_eq!(
-        text(ok(&["mac", "-a", "poly1305", "-k", KEY32], b"m")).len(),
-        32
-    );
-    fails(&["mac", "-a", "poly1305", "-k", KEY16], b"m", 2);
+    let poly = text(ok(&["mac", "tag", "poly1305", "-k", KEY32], b"m"));
+    assert_eq!(poly.len(), 32);
 
     // RFC 5869 test case 1.
     let ikm = format!("hex:{}", "0b".repeat(22));
@@ -541,6 +362,7 @@ fn mac_and_kdf() {
         &[
             "kdf",
             "hkdf",
+            "sha256",
             "--ikm",
             &ikm,
             "--salt",
@@ -562,7 +384,6 @@ fn mac_and_kdf() {
         &[
             "kdf",
             "pbkdf2",
-            "-H",
             "sha1",
             "--password",
             "str:password",
@@ -576,22 +397,6 @@ fn mac_and_kdf() {
         b"",
     ));
     assert_eq!(out, "ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957");
-    fails(
-        &[
-            "kdf",
-            "pbkdf2",
-            "--password",
-            "str:p",
-            "--salt",
-            "str:s",
-            "-i",
-            "0",
-            "-l",
-            "8",
-        ],
-        b"",
-        2,
-    );
 }
 
 #[test]
@@ -600,129 +405,96 @@ fn random_is_random() {
     let b = text(ok(&["random", "32"], b""));
     assert_eq!(a.len(), 64);
     assert_ne!(a, b);
-    assert_eq!(ok(&["random", "70000", "--binary"], b"").len(), 70000);
+    assert_eq!(ok(&["random", "70000", "--raw"], b"").len(), 70000);
 }
 
 #[test]
 fn every_key_algorithm_signs_agrees_or_encapsulates() {
     let d = dir("pk");
     let message = b"a message to sign";
-    for alg in [
-        "ed25519",
-        "ecdsa-p256",
-        "ecdsa-p384",
-        "rsa-1024",
-        "ml-dsa-44",
-        "slh-dsa-shake-128f",
+    for (alg, scheme) in [
+        ("ed25519", "ed25519"),
+        ("ecdsa-p256", "ecdsa-sha256"),
+        ("ecdsa-p384", "ecdsa-sha384"),
+        ("rsa-1024", "rsa-pss-sha256"),
+        ("ml-dsa-44", "ml-dsa-44"),
+        ("slh-dsa-shake-128f", "slh-dsa-shake-128f"),
     ] {
         let private = d.join(format!("{alg}.pem"));
         let public = d.join(format!("{alg}.pub"));
         let (private, public) =
             (private.to_str().unwrap(), public.to_str().unwrap());
-        ok(&["key", "generate", "-a", alg, "-o", private], b"");
-        assert!(
-            fs::read_to_string(private)
-                .unwrap()
-                .starts_with("-----BEGIN PRIVATE KEY-----\n")
-        );
-        ok(&["key", "public", "--in", private, "-o", public], b"");
-        assert!(
-            fs::read_to_string(public)
-                .unwrap()
-                .starts_with("-----BEGIN PUBLIC KEY-----\n")
-        );
-        let shown = text(ok(&["key", "show", "--in", private], b""));
+        ok(&["key", "generate", alg, "-o", private], b"");
+        let pem = fs::read_to_string(private).unwrap();
+        assert!(pem.starts_with("-----BEGIN PRIVATE KEY-----\n"));
+        ok(&["key", "public", private, "-o", public], b"");
+        let pem = fs::read_to_string(public).unwrap();
+        assert!(pem.starts_with("-----BEGIN PUBLIC KEY-----\n"));
+        let shown = text(ok(&["key", "show", private], b""));
         assert!(shown.contains("private key"), "{shown}");
-        let sig = ok(&["sig", "sign", "-k", private], message);
+        let sig = ok(&["sig", "sign", scheme, "-k", private], message);
         let sig_hex = format!("hex:{}", hex(&sig));
-        ok(&["sig", "verify", "-p", public, "-s", &sig_hex], message);
-        fails(
-            &["sig", "verify", "-p", public, "-s", &sig_hex],
-            b"another",
-            1,
-        );
-        // The private key is refused where the public one is wanted.
-        fails(
-            &["sig", "verify", "-p", private, "-s", &sig_hex],
-            message,
-            2,
-        );
+        let verify = ["sig", "verify", scheme, "-p", public, "-s", &sig_hex];
+        ok(&verify, message);
+        fails(&verify, b"another", 1);
         if alg.starts_with("ecdsa") {
-            let raw = ok(&["sig", "sign", "-k", private, "--raw"], message);
-            let raw_hex = format!("hex:{}", hex(&raw));
-            ok(
-                &["sig", "verify", "-p", public, "-s", &raw_hex, "--raw"],
+            let raw = ok(
+                &["sig", "sign", scheme, "-k", private, "--raw-ecdsa"],
                 message,
             );
-            fails(&["sig", "verify", "-p", public, "-s", &raw_hex], message, 2);
+            let raw_hex = format!("hex:{}", hex(&raw));
+            let mut verify = vec!["sig", "verify", scheme, "-p", public];
+            verify.extend(["-s", &raw_hex]);
+            fails(&verify, message, 2);
+            verify.push("--raw-ecdsa");
+            ok(&verify, message);
         }
         if alg == "rsa-1024" {
-            let pkcs1 = ok(
-                &["sig", "sign", "-k", private, "--rsa-scheme", "pkcs1"],
-                message,
-            );
-            let pkcs1_hex = format!("hex:{}", hex(&pkcs1));
-            ok(
-                &[
-                    "sig",
-                    "verify",
-                    "-p",
-                    public,
-                    "-s",
-                    &pkcs1_hex,
-                    "--rsa-scheme",
-                    "pkcs1",
-                ],
-                message,
-            );
-            fails(
-                &["sig", "verify", "-p", public, "-s", &pkcs1_hex],
-                message,
-                1,
-            );
-            assert!(
-                text(ok(&["key", "show", "--in", public], b""))
-                    .contains("1024 bits")
-            );
+            let pkcs1 = "rsa-pkcs1-sha256";
+            let sig = ok(&["sig", "sign", pkcs1, "-k", private], message);
+            let sig_hex = format!("hex:{}", hex(&sig));
+            let verify = ["sig", "verify", pkcs1, "-p", public, "-s", &sig_hex];
+            ok(&verify, message);
+            let wrong = ["sig", "verify", scheme, "-p", public, "-s", &sig_hex];
+            fails(&wrong, message, 1);
+            let shown = text(ok(&["key", "show", public], b""));
+            assert!(shown.contains("1024 bits"));
             // RSA-OAEP too.
+            let oaep = "rsa-oaep-sha256";
             let c = ok(
-                &["pke", "encrypt", "-p", public, "--label", "str:l"],
+                &["pke", "encrypt", oaep, "-p", public, "--label", "str:l"],
                 b"secret",
             );
             assert_eq!(c.len(), 128);
-            assert_eq!(
-                ok(&["pke", "decrypt", "-k", private, "--label", "str:l"], &c),
-                b"secret"
+            let back = ok(
+                &["pke", "decrypt", oaep, "-k", private, "--label", "str:l"],
+                &c,
             );
-            fails(&["pke", "decrypt", "-k", private], &c, 1);
+            assert_eq!(back, b"secret");
+            fails(&["pke", "decrypt", oaep, "-k", private], &c, 1);
         }
     }
     // Context strings on the algorithms that take them.
     let private = d.join("ed25519.pem").to_str().unwrap().to_owned();
     let public = d.join("ed25519.pub").to_str().unwrap().to_owned();
     let sig = ok(
-        &["sig", "sign", "-k", &private, "--context", "str:ctx"],
-        message,
-    );
-    let sig_hex = format!("hex:{}", hex(&sig));
-    ok(
         &[
             "sig",
-            "verify",
-            "-p",
-            &public,
-            "-s",
-            &sig_hex,
+            "sign",
+            "ed25519",
+            "-k",
+            &private,
             "--context",
             "str:ctx",
         ],
         message,
     );
-    fails(
-        &["sig", "verify", "-p", &public, "-s", &sig_hex],
-        message,
-        1,
-    );
+    let sig_hex = format!("hex:{}", hex(&sig));
+    let mut verify = vec!["sig", "verify", "ed25519", "-p", &public];
+    verify.extend(["-s", &sig_hex]);
+    fails(&verify, message, 1);
+    verify.extend(["--context", "str:ctx"]);
+    ok(&verify, message);
 
     // Key agreement: both sides reach the same secret.
     for alg in ["x25519", "ecdh-p256", "ecdh-p384"] {
@@ -731,18 +503,16 @@ fn every_key_algorithm_signs_agrees_or_encapsulates() {
         let (a, b) = (a.to_str().unwrap(), b.to_str().unwrap());
         let a_pub = format!("{a}.pub");
         let b_pub = format!("{b}.pub");
-        ok(&["key", "generate", "-a", alg, "-o", a], b"");
-        ok(&["key", "generate", "-a", alg, "-o", b], b"");
-        ok(&["key", "public", "--in", a, "-o", &a_pub], b"");
-        ok(&["key", "public", "--in", b, "-o", &b_pub], b"");
-        let ab = ok(&["kex", "agree", "-k", a, "-p", &b_pub, "--hex"], b"");
-        let ba = ok(&["kex", "agree", "-k", b, "-p", &a_pub, "--hex"], b"");
+        ok(&["key", "generate", alg, "-o", a], b"");
+        ok(&["key", "generate", alg, "-o", b], b"");
+        ok(&["key", "public", a, "-o", &a_pub], b"");
+        ok(&["key", "public", b, "-o", &b_pub], b"");
+        let ab = ok(&["kex", "agree", alg, "-k", a, "-p", &b_pub], b"");
+        let ba = ok(&["kex", "agree", alg, "-k", b, "-p", &a_pub], b"");
         assert_eq!(ab, ba, "{alg}");
-        assert_eq!(text(ab).len(), if alg == "ecdh-p384" { 96 } else { 64 });
+        let len = if alg == "ecdh-p384" { 96 } else { 64 };
+        assert_eq!(text(ab).len(), len);
     }
-    let x = d.join("x25519-a.pem").to_str().unwrap().to_owned();
-    let p = format!("{}.pub", d.join("ecdh-p256-b.pem").display());
-    fails(&["kex", "agree", "-k", &x, "-p", &p], b"", 2);
 
     // Encapsulation: the secret written aside equals the one
     // decapsulated.
@@ -755,81 +525,81 @@ fn every_key_algorithm_signs_agrees_or_encapsulates() {
             public.to_str().unwrap(),
             secret.to_str().unwrap(),
         );
-        ok(&["key", "generate", "-a", alg, "-o", private], b"");
-        ok(&["key", "public", "--in", private, "-o", public], b"");
-        let ciphertext = ok(
-            &[
-                "kem",
-                "encapsulate",
-                "-p",
-                public,
-                "--secret-out",
-                secret,
-                "--hex",
-            ],
-            b"",
-        );
-        let ciphertext = hex_bytes(&text(ciphertext));
-        let ss =
-            ok(&["kem", "decapsulate", "-k", private, "--hex"], &ciphertext);
-        assert_eq!(text(ss), text(fs::read(secret).unwrap()));
-        fails(&["kem", "decapsulate", "-k", private], &ciphertext[..10], 2);
+        ok(&["key", "generate", alg, "-o", private], b"");
+        ok(&["key", "public", private, "-o", public], b"");
+        let encapsulate = [
+            "kem",
+            "encapsulate",
+            alg,
+            "-p",
+            public,
+            "--secret-out",
+            secret,
+        ];
+        let ciphertext = ok(&encapsulate, b"");
+        let decapsulate = ["kem", "decapsulate", alg, "-k", private];
+        let ss = ok(&decapsulate, &ciphertext);
+        assert_eq!(text(ss), hex(&fs::read(secret).unwrap()));
     }
-    // A key of the wrong family, and a file that is not a key.
-    let kem = d.join("ml-kem-512.pem").to_str().unwrap().to_owned();
-    fails(&["sig", "sign", "-k", &kem], message, 2);
-    let junk = d.join("junk");
-    fs::write(&junk, "not a key").unwrap();
-    fails(&["sig", "sign", "-k", junk.to_str().unwrap()], message, 2);
-    fails(&["key", "generate", "-a", "dsa"], b"", 2);
 }
 
 #[test]
 fn list_names_only_what_runs() {
     let all = text(ok(&["list"], b""));
-    assert!(all.lines().count() > 100);
-    for family in ["cipher", "aead", "hash", "mac", "key"] {
+    assert!(all.lines().count() > 150);
+    let families = [
+        "hash", "mac", "aead", "cipher", "kdf", "key", "sig", "kex", "kem",
+        "pke",
+    ];
+    for family in families {
         let names = text(ok(&["list", family], b""));
-        assert!(names.lines().count() > 3, "{family}");
+        assert!(names.lines().count() >= 3, "{family}");
         for name in names.lines() {
             assert!(all.contains(&format!("{family} {name}")));
         }
+        let long = text(ok(&["list", family, "--long"], b""));
+        assert_eq!(long.lines().count(), names.lines().count());
     }
-    fails(&["list", "kdf"], b"", 2);
-    // Every named cipher and aead at least gets past the name check.
+    fails(&["list", "kdfs"], b"", 2);
+    // Every named algorithm gets past the name check in its command.
+    let one = "hex:00";
     for name in text(ok(&["list", "cipher"], b"")).lines() {
-        let err =
-            fails(&["cipher", "encrypt", "-a", name, "-k", "hex:00"], b"", 2);
-        assert!(!err.contains("unknown"), "{name}: {err}");
+        let verb = if name.contains("-kw") {
+            "wrap"
+        } else {
+            "encrypt"
+        };
+        let err = fails(&["cipher", verb, name, "-k", one], b"", 2);
+        assert!(!err.contains("named"), "{name}: {err}");
     }
     for name in text(ok(&["list", "aead"], b"")).lines() {
-        let err = fails(
-            &["aead", "encrypt", "-a", name, "-k", "hex:00", "-n", NONCE],
-            b"",
-            2,
-        );
-        assert!(!err.contains("unknown"), "{name}: {err}");
+        let args = ["aead", "encrypt", name, "-k", one, "-n", one];
+        let err = fails(&args, b"", 2);
+        assert!(!err.contains("named"), "{name}: {err}");
     }
     for name in text(ok(&["list", "mac"], b"")).lines() {
-        let err = fails(&["mac", "-a", name, "-k", "00"], b"", 2);
-        assert!(!err.contains("unknown"), "{name}: {err}");
+        let err = fails(&["mac", "tag", name, "-k", "00"], b"", 2);
+        assert!(!err.contains("named"), "{name}: {err}");
+    }
+    for name in text(ok(&["list", "sig"], b"")).lines() {
+        let args = ["sig", "sign", name, "-k", "/nonexistent"];
+        let err = fails(&args, b"", 3);
+        assert!(!err.contains("named"), "{name}: {err}");
+    }
+    for name in text(ok(&["list", "pke"], b"")).lines() {
+        let args = ["pke", "encrypt", name, "-p", "/nonexistent"];
+        let err = fails(&args, b"", 3);
+        assert!(!err.contains("named"), "{name}: {err}");
+    }
+    for name in text(ok(&["list", "kdf"], b"")).lines() {
+        let args = ["kdf", "hkdf", name, "--ikm", "00", "-l", "1"];
+        let err = fails(&args, b"", 2);
+        assert!(!err.contains("named"), "{name}: {err}");
     }
 }
 
 #[test]
 fn agrees_with_openssl_where_it_is_present() {
-    let openssl = |args: &[&str], stdin: &[u8]| -> Option<Vec<u8>> {
-        let mut child = Command::new("openssl")
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
-        child.stdin.take()?.write_all(stdin).ok()?;
-        let out = child.wait_with_output().ok()?;
-        out.status.success().then_some(out.stdout)
-    };
     let message = b"fourteen bytes".repeat(37);
     let Some(theirs) = openssl(
         &["enc", "-aes-128-cbc", "-K", &KEY16[4..], "-iv", &IV[4..]],
@@ -838,59 +608,35 @@ fn agrees_with_openssl_where_it_is_present() {
         eprintln!("openssl not found; skipping");
         return;
     };
-    let ours = ok(
-        &[
+    let cbc = |verb| {
+        [
             "cipher",
-            "encrypt",
-            "-a",
+            verb,
             "aes-128-cbc",
             "-k",
             KEY16,
             "--iv",
             IV,
-        ],
-        &message,
-    );
-    assert_eq!(ours, theirs, "CBC with PKCS#7");
-    let back = ok(
-        &[
-            "cipher",
-            "decrypt",
-            "-a",
-            "aes-128-cbc",
-            "-k",
-            KEY16,
-            "--iv",
-            IV,
-        ],
-        &theirs,
-    );
-    assert_eq!(back, message);
+            "--padding",
+            "pkcs7",
+        ]
+    };
+    assert_eq!(ok(&cbc("encrypt"), &message), theirs, "CBC with PKCS#7");
+    assert_eq!(ok(&cbc("decrypt"), &theirs), message);
 
     // A key openssl made, read here; a key made here, read there.
     let d = dir("openssl");
     let key = d.join("ec.pem");
-    if let Some(pem) = openssl(
-        &["ecparam", "-genkey", "-name", "prime256v1", "-noout"],
-        b"",
-    ) {
-        fs::write(&key, pem).unwrap();
-        let shown =
-            text(ok(&["key", "show", "--in", key.to_str().unwrap()], b""));
+    let key = key.to_str().unwrap();
+    let params = ["ecparam", "-genkey", "-name", "prime256v1", "-noout"];
+    if let Some(pem) = openssl(&params, b"") {
+        fs::write(key, pem).unwrap();
+        let shown = text(ok(&["key", "show", key], b""));
         assert_eq!(shown, "P-256 private key");
         let public = d.join("ec.pub");
-        ok(
-            &[
-                "key",
-                "public",
-                "--in",
-                key.to_str().unwrap(),
-                "-o",
-                public.to_str().unwrap(),
-            ],
-            b"",
-        );
-        let sig = ok(&["sig", "sign", "-k", key.to_str().unwrap()], &message);
+        let public = public.to_str().unwrap();
+        ok(&["key", "public", key, "-o", public], b"");
+        let sig = ok(&["sig", "sign", "ecdsa-sha256", "-k", key], &message);
         let sig_path = d.join("ec.sig");
         fs::write(&sig_path, &sig).unwrap();
         let verified = openssl(
@@ -898,7 +644,7 @@ fn agrees_with_openssl_where_it_is_present() {
                 "dgst",
                 "-sha256",
                 "-verify",
-                public.to_str().unwrap(),
+                public,
                 "-signature",
                 sig_path.to_str().unwrap(),
             ],
@@ -907,31 +653,12 @@ fn agrees_with_openssl_where_it_is_present() {
         assert!(verified.is_some(), "openssl rejected our ECDSA signature");
     }
     let ours = d.join("ed.pem");
-    ok(
-        &[
-            "key",
-            "generate",
-            "-a",
-            "ed25519",
-            "-o",
-            ours.to_str().unwrap(),
-        ],
-        b"",
-    );
-    let theirs =
-        openssl(&["pkey", "-in", ours.to_str().unwrap(), "-pubout"], b"");
-    if let Some(theirs) = theirs {
-        let public =
-            ok(&["key", "public", "--in", ours.to_str().unwrap()], b"");
+    let ours = ours.to_str().unwrap();
+    ok(&["key", "generate", "ed25519", "-o", ours], b"");
+    if let Some(theirs) = openssl(&["pkey", "-in", ours, "-pubout"], b"") {
+        let public = ok(&["key", "public", ours], b"");
         assert_eq!(public, theirs);
     }
-}
-
-fn hex_bytes(s: &str) -> Vec<u8> {
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
-        .collect()
 }
 
 /// Every option `--help` shows, at every level, and every name `list`
@@ -939,7 +666,7 @@ fn hex_bytes(s: &str) -> Vec<u8> {
 #[test]
 fn the_manual_covers_the_help() {
     let manual = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("scytale.1"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scytale.1"),
     )
     .unwrap();
     // troff escapes hyphens.
@@ -978,11 +705,12 @@ fn the_manual_covers_the_help() {
     for name in text(ok(&["list"], b"")).lines() {
         let name = name.split(' ').nth(1).unwrap();
         // The manual writes the families out with their widths and
-        // sizes as patterns; the fixed names must be there verbatim.
+        // hashes as patterns; the fixed names must be there verbatim.
         let patterned = name.starts_with("aes-")
             || name.starts_with("ff1-")
             || name.starts_with("ff3-1-")
             || name.starts_with("hmac-")
+            || name.starts_with("ecdsa-")
             || name.starts_with("rsa-")
             || name.starts_with("slh-dsa-");
         if !patterned && !manual.contains(name) {

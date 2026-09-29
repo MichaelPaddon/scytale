@@ -11,9 +11,36 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
 
+use clap::Args;
 use scytale::codec::hex;
 
 use crate::fail::{Fail, Result};
+
+/// `--hex` and `--raw`, on every command that writes bytes; which is
+/// the default is the command's to say.
+#[derive(Args, Clone, Copy)]
+pub struct Format {
+    /// Write hex and a newline
+    #[arg(long, conflicts_with = "raw")]
+    pub hex: bool,
+    /// Write the raw bytes
+    #[arg(long)]
+    pub raw: bool,
+}
+
+impl Format {
+    /// Whether to write hex, given what the command does without
+    /// either flag.
+    pub fn as_hex(self, default_hex: bool) -> bool {
+        if self.hex {
+            true
+        } else if self.raw {
+            false
+        } else {
+            default_hex
+        }
+    }
+}
 
 /// Bytes read at a time when streaming.
 pub const CHUNK: usize = 64 * 1024;

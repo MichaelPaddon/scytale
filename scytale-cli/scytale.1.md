@@ -8,9 +8,9 @@ scytale - cryptographic command line tool
 
 ## SYNOPSIS
 
-**scytale** *command* \[*subcommand*\] \[*options*\] \[*file*\]  
-**scytale list** \[*family*\]  
-**scytale** *command* **--help**
+**scytale** *command* \[*verb*\] *algorithm* \[*options*\] \[*file*\]  
+**scytale list** \[*family*\] \[**--long**\]  
+**scytale** *command* \[*verb*\] **--help**
 
 ## DESCRIPTION
 
@@ -18,6 +18,14 @@ scytale - cryptographic command line tool
 line, one command per module of the library: **hash**, **mac**,
 **aead**, **cipher**, **kdf**, **key**, **sig**, **kex**, **kem**,
 **pke** and **random**.
+
+The algorithm is the operation. It is the first word after the verb on
+every call, never an option and never defaulted, so a script says what
+it does and a reader need not know a default: **scytale hash sha256**
+*file*, **scytale aead encrypt aes-256-gcm** and so on. A name is
+matched without regard to case, and **\_** and **-** are interchangeable
+in it. A name that is not known is refused with the nearest names that
+are.
 
 Input is standard input, or the *file* named last on the command line.
 Output is standard output, or the file named by **-o**. A file that
@@ -27,8 +35,8 @@ key, is created readable by its owner alone.
 Every option that carries bytes, such as a key, IV, nonce, tag, salt,
 signature or label, is written with a prefix that says how to read it
 (see **VALUES**). The algorithm fixes the length of a key, IV or nonce,
-and a value of another length is refused: nothing is padded or cut to
-fit.
+and a value of another length is refused with both lengths in the
+message: nothing is padded or cut to fit.
 
 ## VALUES
 
@@ -62,9 +70,6 @@ nonce or a salt, or in a script that already holds the key that way.
 Every option has a long form, and the long form is what the text below
 refers to. The short forms, where a command has them:
 
-**-a**, **--algorithm**  
-The algorithm, by the names **scytale list** prints.
-
 **-k**, **--key**  
 A key value, or for the public-key commands a private key file.
 
@@ -74,11 +79,11 @@ A public key file; for **kex agree** the option is **--peer**.
 **-s**, **--signature**  
 A signature value.
 
+**-t**, **--tag**  
+A tag value, for **mac verify**.
+
 **-n**, **--nonce**  
 A nonce value.
-
-**-H**, **--hash**  
-A hash, by name.
 
 **-l**, **--length**  
 An output length in bytes.
@@ -89,9 +94,10 @@ An iteration count.
 **-o**, **--out**  
 The output file, in place of standard output.
 
-**--in**  
-The input key file, for **key public** and **key show**, in place of
-standard input.
+**--hex**, **--raw**  
+How bytes are written: hex and a newline, or the bytes themselves. Each
+command says below which it does without either. The two exclude each
+other.
 
 **-h**, **--help**  
 The help for a command, ending with the value syntax and the exit codes.
@@ -103,35 +109,36 @@ The version.
 
 ## list
 
-**scytale list** \[*family*\]
+**scytale list** \[*family*\] \[**--long**\]
 
 Prints the algorithm names each command takes, one per line, for a
-script to check. With a *family* (one of **cipher**, **aead**, **hash**,
-**xof**, **mac**, **key**) the names alone; without one, every name
-prefixed by its family.
+script to check. With a *family* (one of **hash**, **mac**, **aead**,
+**cipher**, **kdf**, **key**, **sig**, **kex**, **kem**, **pke**) the
+names alone; without one, every name prefixed by its family. With
+**--long** each line goes on to say what the name takes: the key, nonce,
+tag and output lengths, and which options it has.
 
 ## random
 
-**scytale random** \[*--binary*\] \[*-o file*\] *count*
+**scytale random** \[**--hex**\|**--raw**\] \[*-o file*\] *count*
 
-*count* bytes from the system-seeded CTR_DRBG, as hex with a newline, or
-raw with **--binary**.
+*count* bytes from the system-seeded CTR_DRBG. Hex without a flag.
 
 ## hash
 
-**scytale hash** \[*-a algorithm*\] \[*-l length*\] \[*--function-name
-value*\] \[*--customization value*\] \[*--binary*\] \[*file...*\]
+**scytale hash** *algorithm* \[*-l length*\] \[*--function-name value*\]
+\[*--customization value*\] \[**--hex**\|**--raw**\] \[*file...*\]
 
 A digest of each file, or of standard input, as hex followed by two
 spaces and the file's name, in the layout of **sha256sum**(1); standard
-input is named **-**. With **--binary** the raw digest alone.
+input is named **-**. With **--raw** the digest alone, for one file at
+most.
 
-**-a, --algorithm ***name*  
-The hash; **sha256** by default. One of **sha1**, **sha224**,
-**sha256**, **sha384**, **sha512**, **sha512-224**, **sha512-256**,
-**sha3-224**, **sha3-256**, **sha3-384**, **sha3-512**, or an
-extendable-output function, **shake128**, **shake256**, **cshake128** or
-**cshake256**.
+*algorithm*  
+One of **sha1**, **sha224**, **sha256**, **sha384**, **sha512**,
+**sha512-224**, **sha512-256**, **sha3-224**, **sha3-256**,
+**sha3-384**, **sha3-512**, or an extendable-output function,
+**shake128**, **shake256**, **cshake128** or **cshake256**.
 
 **-l, --length ***bytes*  
 The output length, required for an extendable-output function and
@@ -139,18 +146,20 @@ refused otherwise.
 
 **--function-name ***value***, --customization ***value*  
 The cSHAKE function name and customization string, as **VALUES**; empty
-without them.
+without them, refused for the other hashes.
 
-## mac
+## mac tag, mac verify
 
-**scytale mac** **-a ***algorithm* **-k ***key* \[*--verify tag*\] \[*-l
-length*\] \[*--customization value*\] \[*--binary*\] \[*file*\]
+**scytale mac tag** *algorithm* **-k ***key* \[*-l length*\]
+\[*--customization value*\] \[**--hex**\|**--raw**\] \[*file*\]  
+**scytale mac verify** *algorithm* **-k ***key* **-t ***tag* \[*-l
+length*\] \[*--customization value*\] \[*file*\]
 
-A tag over the input, as hex, or raw with **--binary**. With
-**--verify** the input is checked against *tag* instead: nothing is
-printed, and the exit status says whether it matched.
+**tag** writes a tag over the input, hex without a flag. **verify**
+checks the input against *tag* instead: nothing is printed, and the exit
+status says whether it matched.
 
-**-a, --algorithm ***name*  
+*algorithm*  
 One of **hmac-***hash* for any hash above (**hmac-sha256**,
 **hmac-sha3-512**, ...), **cmac-aes-128**, **cmac-aes-192**,
 **cmac-aes-256**, **kmac128**, **kmac256** or **poly1305**.
@@ -168,9 +177,9 @@ The KMAC customization string.
 
 ## aead encrypt, aead decrypt
 
-**scytale aead** {**encrypt**\|**decrypt**} **-a ***algorithm* **-k
-***key* **-n ***nonce* \[*--aad value*\] \[*--tag-length bytes*\] \[*-o
-file*\] \[*file*\]
+**scytale aead** {**encrypt**\|**decrypt**} *algorithm* **-k ***key*
+**-n ***nonce* \[*--aad value*\] \[*--tag-length bytes*\] \[*-o file*\]
+\[*file*\]
 
 Authenticated encryption. Encryption writes the ciphertext and then the
 tag; decryption reads ciphertext and tag as one input, checks the tag,
@@ -180,7 +189,7 @@ ChaCha20-Poly1305 streams; decryption reads the whole input first, since
 plaintext handed out before the tag is checked is plaintext an attacker
 chose.
 
-**-a, --algorithm ***name*  
+*algorithm*  
 One of **aes-128-gcm**, **aes-192-gcm**, **aes-256-gcm**,
 **aes-128-gcm-siv**, **aes-256-gcm-siv**, **aes-128-ccm**,
 **aes-192-ccm**, **aes-256-ccm**, **aes-128-xpn**, **aes-192-xpn**,
@@ -205,42 +214,47 @@ number from 4 to 16; GCM-SIV and ChaCha20-Poly1305 take 16 only.
 
 ## cipher encrypt, cipher decrypt
 
-**scytale cipher** {**encrypt**\|**decrypt**} **-a ***algorithm* **-k
-***key* \[*--iv value*\] \[*-n nonce*\] \[*--counter n*\] \[*--padding
-pkcs7\|none*\] \[*--alphabet chars*\] \[*--tweak value*\] \[*-o file*\]
-\[*file*\]
+**scytale cipher** {**encrypt**\|**decrypt**} *algorithm* **-k ***key*
+\[*--iv value*\] \[*-n nonce*\] \[*--counter n*\] \[*--padding
+pkcs7\|none*\] \[*--tweak-key key*\] \[*--alphabet chars*\] \[*--tweak
+value*\] \[*-o file*\] \[*file*\]
 
 The unauthenticated modes. Nothing here checks that a message is what
 was encrypted; a script that needs to know that wants **aead**. These
-are for a protocol that brings its own MAC, a disk, a key to wrap, or a
-format to preserve.
+are for a protocol that brings its own MAC, a disk, or a format to
+preserve. An option the algorithm does not take is refused, and the
+message says which algorithm it is for.
 
-**-a, --algorithm ***name*  
+*algorithm*  
 **aes-***width***-***mode* for a *width* of 128, 192 or 256 and a *mode*
-of **ecb**, **cbc**, **ctr**, **cfb1**, **cfb8**, **cfb128**, **ofb**,
-**xts**, **kw** or **kwp**; **chacha20**; **ff1-aes-***width* or
-**ff3-1-aes-***width* for the format-preserving modes.
+of **ecb**, **cbc**, **ctr**, **cfb1**, **cfb8**, **cfb128**, **ofb** or
+**xts**; **chacha20**; **ff1-aes-***width* or **ff3-1-aes-***width* for
+the format-preserving modes. **kw** and **kwp** are under **cipher
+wrap**.
 
 **-k, --key ***value*  
-The key, of the cipher's width. XTS takes two keys of that width, one
-after the other, as **openssl**(1) does, and they must differ.
+The key, of the cipher's width.
 
 **--iv ***value*  
-One block: the IV for CBC, CFB and OFB, the initial counter block for
-CTR, the tweak for XTS. Required by those modes and refused by ECB, KW
-and KWP.
+One 16-byte block: the IV for CBC, CFB and OFB, the first counter block
+for CTR, the tweak for XTS. Required by those modes and refused by the
+others.
 
 **-n, --nonce ***value***, --counter ***n*  
-The 12-byte nonce and the initial block counter (0 without it) for
+The 12-byte nonce and the first block counter (0 without it) for
 ChaCha20, which encrypts and decrypts with the one operation.
 
 **--padding ***pkcs7***\|***none*  
-For ECB, CBC and CFB128, which take whole blocks. PKCS#7 padding is
-added on encryption and removed on decryption unless **none** is given,
-in which case an input that is not whole blocks is refused. PKCS#7 is
-what **openssl enc** and CMS use. Padding that does not check on
+Required for ECB, CBC and CFB128, which take whole blocks, and refused
+by the rest. **pkcs7** adds PKCS#7 padding on encryption and removes it
+on decryption, and is what **openssl enc** and CMS use; **none** refuses
+an input that is not whole blocks. Padding that does not check on
 decryption exits with status 1 and prints nothing; a script must not
 report that difference to anyone who can submit ciphertexts.
+
+**--tweak-key ***value*  
+The second key for XTS, of the cipher's width and different from the
+first. Required by XTS, refused by the rest.
 
 **--alphabet ***chars***, --tweak ***value*  
 For FF1 and FF3-1, which read and write lines of text in the alphabet,
@@ -249,34 +263,45 @@ the numerals, in order; the decimal digits without it. The tweak is any
 length for FF1 and exactly 7 bytes for FF3-1; empty for FF1 without it.
 These modes are not constant time.
 
-KW wraps a key of any whole number of 8-byte blocks, at least two; KWP
-wraps any length. Both add 8 bytes. CTR, OFB and CFB take any length and
-stream; CBC, CFB128 and ECB stream a block at a time; CFB1, XTS, KW and
-KWP read the whole input.
+CTR, OFB and CFB take any length and stream; CBC, CFB128 and ECB stream
+a block at a time; CFB1, XTS and the format-preserving modes read the
+whole input.
+
+## cipher wrap, cipher unwrap
+
+**scytale cipher** {**wrap**\|**unwrap**} *algorithm* **-k ***key* \[*-o
+file*\] \[*file*\]
+
+Key wrapping (RFC 3394, RFC 5649): the input is a key, and the output is
+it under the wrapping key with an 8-byte check value. *algorithm* is
+**aes-***width***-kw** for a key that is whole 8-byte blocks, two or
+more, or **aes-***width***-kwp** for a key of any length. A wrapped key
+that does not check on unwrapping exits with status 1.
 
 ## kdf hkdf
 
-**scytale kdf hkdf** \[*-H hash*\] **--ikm ***value* \[*--salt value*\]
-\[*--info value*...\] **-l ***bytes* \[*--binary*\] \[*-o file*\]
+**scytale kdf hkdf** *hash* **--ikm ***value* \[*--salt value*\]
+\[*--info value*...\] **-l ***bytes* \[**--hex**\|**--raw**\] \[*-o
+file*\]
 
-HKDF (RFC 5869): keys from keying material that is already unguessable,
-such as a shared secret. The input keying material may not be given as
-**str:**. **--info** may repeat; the values are concatenated in order.
-Output as hex, or raw with **--binary**.
+HKDF (RFC 5869) over *hash*, any of the plain hashes above: keys from
+keying material that is already unguessable, such as a shared secret.
+The input keying material may not be given as **str:**. **--info** may
+repeat; the values are concatenated in order. Hex without a flag.
 
 ## kdf pbkdf2
 
-**scytale kdf pbkdf2** \[*-H hash*\] **--password ***value* **--salt
-***value* **-i ***iterations* **-l ***bytes* \[*--binary*\] \[*-o
+**scytale kdf pbkdf2** *hash* **--password ***value* **--salt ***value*
+**-i ***iterations* **-l ***bytes* \[**--hex**\|**--raw**\] \[*-o
 file*\]
 
-PBKDF2 (RFC 8018): a key from a password, which is guessable, at a cost
-per guess set by the iteration count. The password and salt may be given
-as **str:**.
+PBKDF2 (RFC 8018) over *hash*: a key from a password, which is
+guessable, at a cost per guess set by the iteration count. The password
+and salt may be given as **str:**. Hex without a flag.
 
 ## key generate
 
-**scytale key generate** **-a ***algorithm* \[*-o file*\]
+**scytale key generate** *algorithm* \[*-o file*\]
 
 A new private key, as a PEM **PRIVATE KEY** block (PKCS#8), to standard
 output or to *file*, created readable by its owner alone. The algorithm
@@ -290,13 +315,14 @@ ECDSA and ECDH; an RSA key serves both signatures and encryption.
 
 ## key public
 
-**scytale key public** \[*--in file*\] \[*-o file*\]
+**scytale key public** \[*file*\] \[*-o file*\]
 
-The public half of a private key, as a PEM **PUBLIC KEY** block.
+The public half of the private key in *file*, or standard input, as a
+PEM **PUBLIC KEY** block.
 
 ## key show
 
-**scytale key show** \[*--in file*\]
+**scytale key show** \[*file*\]
 
 Prints what a key file holds: its algorithm, which half it is, and for
 RSA the modulus length.
@@ -304,43 +330,42 @@ RSA the modulus length.
 Every command that takes a key file reads PEM: the **PRIVATE KEY** and
 **PUBLIC KEY** blocks that **openssl**(1) and everything else write, and
 the bare **RSA PRIVATE KEY**, **RSA PUBLIC KEY** and **EC PRIVATE KEY**
-forms as well. The algorithm is read out of the file, so it is never
-named on the command line.
+forms as well. A command names the scheme it runs and checks the file
+holds a key for it; a file that holds another kind of key, or the wrong
+half, is refused with a message saying what it holds.
 
 ## sig sign
 
-**scytale sig sign** **-k ***private* \[*-H hash*\] \[*--context
-value*\] \[*--rsa-scheme pss\|pkcs1*\] \[*--raw*\] \[*--hex*\] \[*-o
-file*\] \[*file*\]
+**scytale sig sign** *scheme* **-k ***private* \[*--context value*\]
+\[**--raw-ecdsa**\] \[**--hex**\|**--raw**\] \[*-o file*\] \[*file*\]
 
 Signs the input with the private key in *private*, writing the signature
-raw, or as hex with **--hex**.
+as raw bytes without a flag.
 
 ## sig verify
 
-**scytale sig verify** **-p ***public* **-s ***signature* \[*-H hash*\]
-\[*--context value*\] \[*--rsa-scheme pss\|pkcs1*\] \[*--raw*\]
-\[*file*\]
+**scytale sig verify** *scheme* **-p ***public* **-s ***signature*
+\[*--context value*\] \[**--raw-ecdsa**\] \[*file*\]
 
 Checks *signature* (a value, as **VALUES**) over the input under the
 public key in *public*. Nothing is printed; the exit status is 0 if it
 verified and 1 if not. A private key file is refused here; **key
 public** makes the public one.
 
-**-H, --hash ***name*  
-The hash for ECDSA and RSA, **sha256** by default; Ed25519, ML-DSA and
-SLH-DSA hash internally and ignore it.
+*scheme*  
+**ed25519** on an Ed25519 key; **ecdsa-***hash* on a P-256 or P-384 key,
+the curve being the key's; **rsa-pss-***hash* on an RSA or RSA-PSS key,
+salted with a hash's worth of random bytes; **rsa-pkcs1-***hash* on an
+RSA key, deterministic; **ml-dsa-44**, **ml-dsa-65**, **ml-dsa-87** and
+the twelve **slh-dsa** sets on their own keys. *hash* is any of the
+plain hashes above.
 
 **--context ***value*  
 The context string for Ed25519 (which then signs in the Ed25519ctx
 form), ML-DSA and SLH-DSA; up to 255 bytes. Empty without it, which for
-Ed25519 is the plain form.
+Ed25519 is the plain form. Refused by the other schemes.
 
-**--rsa-scheme ***pss***\|***pkcs1*  
-RSASSA-PSS, salted with a hash's worth of random bytes, or the
-deterministic RSASSA-PKCS1-v1_5; **pss** by default.
-
-**--raw**  
+**--raw-ecdsa**  
 An ECDSA signature as the fixed-width *r* followed by *s*, rather than
 the DER SEQUENCE that **openssl dgst** writes. Ed25519, ML-DSA and
 SLH-DSA signatures are always the fixed-width bytes their standards
@@ -348,50 +373,52 @@ define, and RSA signatures the modulus length.
 
 ## kex agree
 
-**scytale kex agree** **-k ***private* **-p ***peer* \[*--hex*\] \[*-o
-file*\]
+**scytale kex agree** *algorithm* **-k ***private* **-p ***peer*
+\[**--hex**\|**--raw**\] \[*-o file*\]
 
 The shared secret between the private key in *private* and the peer's
-public key in *peer*, which must be on the same curve: X25519, P-256 or
-P-384. Raw bytes, or hex with **--hex**. A shared secret is keying
+public key in *peer*, under **x25519**, **ecdh-p256** or **ecdh-p384**;
+both keys must be for it. Hex without a flag. A shared secret is keying
 material, not a key; derive keys from it with **kdf hkdf**.
 
 ## kem encapsulate
 
-**scytale kem encapsulate** **-p ***public* **--secret-out ***file*
-\[*--hex*\] \[*-o file*\]
+**scytale kem encapsulate** *algorithm* **-p ***public* **--secret-out
+***file* \[**--hex**\|**--raw**\] \[*-o file*\]
 
-A ciphertext for the ML-KEM public key in *public*, to standard output
-or **-o**, and the shared secret it carries to *file*, created readable
-by its owner alone. The peer recovers the secret from the ciphertext
-with the private key.
+A ciphertext for the public key in *public*, under **ml-kem-512**,
+**ml-kem-768** or **ml-kem-1024**, to standard output or **-o**, and the
+shared secret it carries to *file*, created readable by its owner alone.
+Raw bytes without a flag, for both. The peer recovers the secret from
+the ciphertext with the private key.
 
 ## kem decapsulate
 
-**scytale kem decapsulate** **-k ***private* \[*--hex*\] \[*-o file*\]
-\[*file*\]
+**scytale kem decapsulate** *algorithm* **-k ***private*
+\[**--hex**\|**--raw**\] \[*-o file*\] \[*file*\]
 
-The shared secret an ML-KEM ciphertext carries. A ciphertext that was
-not made for the key yields a secret that matches nothing, rather than
-an error, as FIPS 203 requires.
+The shared secret a ciphertext carries; hex without a flag. A ciphertext
+that was not made for the key yields a secret that matches nothing,
+rather than an error, as FIPS 203 requires.
 
 ## pke encrypt, pke decrypt
 
-**scytale pke** {**encrypt**\|**decrypt**} {**-p public**\|**-k
-private**} \[*-H hash*\] \[*--label value*\] \[*-o file*\] \[*file*\]
+**scytale pke** {**encrypt**\|**decrypt**} *scheme* {**-p public**\|**-k
+private**} \[*--label value*\] \[*-o file*\] \[*file*\]
 
-RSA-OAEP: a short message, at most the modulus length less twice the
-hash length less two bytes, under an RSA public key. The hash is
-**sha256** by default, the label empty; both must match to decrypt. A
-ciphertext that does not decrypt exits with status 1 and says nothing
-more.
+RSA-OAEP under **rsa-oaep-***hash* for any of the plain hashes: a short
+message, at most the modulus length less twice the hash length less two
+bytes, under an RSA public key. The label is empty without **--label**,
+and must match to decrypt. A ciphertext that does not decrypt exits with
+status 1 and says nothing more.
 
 ## ALGORITHM NAMES
 
-**scytale list** prints every name. Names are lower case with hyphens,
-and name the whole construction, key width included: **aes-256-gcm**,
-**hmac-sha3-256**, **ml-dsa-65**. A key of another width than the name
-says is refused rather than taken as a hint.
+**scytale list** prints every name, and **scytale list** *family*
+**--long** what each takes. Names are lower case with hyphens, and name
+the whole construction, key width included: **aes-256-gcm**,
+**hmac-sha3-256**, **rsa-pss-sha256**, **ml-dsa-65**. A key of another
+width than the name says is refused rather than taken as a hint.
 
 ## EXIT STATUS
 
@@ -399,56 +426,61 @@ says is refused rather than taken as a hint.
 Success, including a verification that passed.
 
 **1**  
-A tag, signature or padding did not verify: the message is not what was
-made under this key.
+A tag, signature, padding or check value did not verify: the message is
+not what was made under this key.
 
 **2**  
 The request could not be carried out as asked: an unknown name, an
 option the algorithm does not take, a value in the wrong form, a key of
-the wrong length, a file that is not a key.
+the wrong length, a file that is not a key or holds the wrong kind.
 
 **3**  
 Anything else: a file that would not open, a generator that would not
 seed.
 
-Errors go to standard error as **scytale:** followed by the message, and
-never contain key material.
+Errors go to standard error as **scytale ***command verb algorithm***:**
+followed by what is wrong and what would be right, naming the option
+concerned and a length or a name; the bytes of a value are never shown.
+When the reader of standard output goes away, the tool stops quietly
+with status 0, as the coreutils do.
 
 ## EXAMPLES
 
 Encrypt a file to a key held in a file, with a header authenticated
 alongside it, and decrypt it again:
 
-    scytale random 32 --binary -o session.key
+    scytale random 32 --raw -o session.key
     scytale random 12 > nonce.hex
-    scytale aead encrypt -a aes-256-gcm -k file:session.key \
+    scytale aead encrypt aes-256-gcm -k file:session.key \
         -n hex:$(cat nonce.hex) --aad str:v1 report.pdf -o report.sealed
-    scytale aead decrypt -a aes-256-gcm -k file:session.key \
+    scytale aead decrypt aes-256-gcm -k file:session.key \
         -n hex:$(cat nonce.hex) --aad str:v1 report.sealed -o report.pdf
 
 Sign a release with a post-quantum key and check the signature:
 
-    scytale key generate -a ml-dsa-65 -o release.pem
-    scytale key public --in release.pem -o release.pub
-    scytale sig sign -k release.pem release.tar -o release.sig
-    scytale sig verify -p release.pub -s file:release.sig release.tar
+    scytale key generate ml-dsa-65 -o release.pem
+    scytale key public release.pem -o release.pub
+    scytale sig sign ml-dsa-65 -k release.pem release.tar -o release.sig
+    scytale sig verify ml-dsa-65 -p release.pub -s file:release.sig \
+        release.tar
 
 Agree a key with a peer and derive session keys from it:
 
-    scytale key generate -a x25519 -o me.pem
-    scytale key public --in me.pem -o me.pub
-    scytale kex agree -k me.pem -p peer.pub -o shared.bin
-    scytale kdf hkdf --ikm file:shared.bin --salt str:session-1 \
+    scytale key generate x25519 -o me.pem
+    scytale key public me.pem -o me.pub
+    scytale kex agree x25519 -k me.pem -p peer.pub --raw -o shared.bin
+    scytale kdf hkdf sha256 --ikm file:shared.bin --salt str:session-1 \
         --info str:encrypt --length 32
 
 Read a key from a descriptor rather than the command line:
 
-    scytale mac -a hmac-sha256 -k fd:3 message.txt 3< mac.key
+    scytale mac tag hmac-sha256 -k fd:3 message.txt 3< mac.key
 
 Decrypt what **openssl enc** encrypted:
 
     openssl enc -aes-128-cbc -K $KEY -iv $IV < plain > cipher
-    scytale cipher decrypt -a aes-128-cbc -k hex:$KEY --iv hex:$IV < cipher
+    scytale cipher decrypt aes-128-cbc -k hex:$KEY --iv hex:$IV \
+        --padding pkcs7 < cipher
 
 ## SEE ALSO
 

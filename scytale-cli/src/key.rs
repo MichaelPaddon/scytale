@@ -3,50 +3,18 @@
 //! Keys travel as PEM, the private half as a `PRIVATE KEY` block
 //! (PKCS#8) and the public half as `PUBLIC KEY`, which is what every
 //! other tool reads and writes. The commands that take a key file
-//! read its algorithm out of the file, so nothing has to be named
-//! twice.
+//! name the scheme they run and check the file holds a key for it,
+//! so a swapped file is caught rather than used.
 
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand};
 use scytale::random::CtrDrbg;
-use scytale::{Algorithm, KeyInfo};
+use scytale::{Algorithm, Error, KeyInfo};
 use zeroize::Zeroizing;
 
 use crate::fail::{Result, usage};
-use crate::io;
-
-/// The key algorithms `generate` takes; `rsa-N` for any N from 1024
-/// to 8192.
-pub const NAMES: [&str; 27] = [
-    "ed25519",
-    "x25519",
-    "ecdsa-p256",
-    "ecdsa-p384",
-    "ecdh-p256",
-    "ecdh-p384",
-    "rsa-2048",
-    "rsa-3072",
-    "rsa-4096",
-    "ml-kem-512",
-    "ml-kem-768",
-    "ml-kem-1024",
-    "ml-dsa-44",
-    "ml-dsa-65",
-    "ml-dsa-87",
-    "slh-dsa-sha2-128s",
-    "slh-dsa-sha2-128f",
-    "slh-dsa-sha2-192s",
-    "slh-dsa-sha2-192f",
-    "slh-dsa-sha2-256s",
-    "slh-dsa-sha2-256f",
-    "slh-dsa-shake-128s",
-    "slh-dsa-shake-128f",
-    "slh-dsa-shake-192s",
-    "slh-dsa-shake-192f",
-    "slh-dsa-shake-256s",
-    "slh-dsa-shake-256f",
-];
+use crate::{io, names};
 
 /// Room for any PEM the library writes.
 const PEM_ROOM: usize = 16 * 1024;
@@ -61,34 +29,40 @@ pub enum KeyOp {
     Show(ShowArgs),
 }
 
+impl KeyOp {
+    /// The words a message about this call starts with.
+    pub fn context(&self) -> String {
+        match self {
+            KeyOp::Generate(a) => format!("generate {}", a.algorithm),
+            KeyOp::Public(_) => "public".into(),
+            KeyOp::Show(_) => "show".into(),
+        }
+    }
+}
+
 #[derive(Args)]
 #[command(after_help = crate::help::VALUES)]
 pub struct GenerateArgs {
     /// The algorithm: ed25519, ecdsa-p256, rsa-3072, ml-kem-768, ...
-    #[arg(short, long)]
-    algorithm: String,
+    pub algorithm: String,
     /// Write to this file, created readable by the owner alone
     #[arg(short, long)]
     out: Option<PathBuf>,
 }
 
 #[derive(Args)]
-#[command(after_help = crate::help::VALUES)]
 pub struct PublicArgs {
     /// The private key file; standard input without one
-    #[arg(long = "in")]
-    input: Option<PathBuf>,
+    file: Option<PathBuf>,
     /// Write to this file rather than standard output
     #[arg(short, long)]
     out: Option<PathBuf>,
 }
 
 #[derive(Args)]
-#[command(after_help = crate::help::VALUES)]
 pub struct ShowArgs {
     /// The key file; standard input without one
-    #[arg(long = "in")]
-    input: Option<PathBuf>,
+    file: Option<PathBuf>,
 }
 
 /// Runs `$body` for each post-quantum signature set, with `$m` bound
@@ -96,63 +70,63 @@ pub struct ShowArgs {
 macro_rules! with_pq_sig {
     ($alg:expr, $m:ident => $body:expr, _ => $else:expr) => {
         match $alg {
-            Algorithm::MlDsa44 => {
+            scytale::Algorithm::MlDsa44 => {
                 use scytale::sig::ml_dsa::ml_dsa_44 as $m;
                 $body
             }
-            Algorithm::MlDsa65 => {
+            scytale::Algorithm::MlDsa65 => {
                 use scytale::sig::ml_dsa::ml_dsa_65 as $m;
                 $body
             }
-            Algorithm::MlDsa87 => {
+            scytale::Algorithm::MlDsa87 => {
                 use scytale::sig::ml_dsa::ml_dsa_87 as $m;
                 $body
             }
-            Algorithm::SlhDsaSha2_128s => {
+            scytale::Algorithm::SlhDsaSha2_128s => {
                 use scytale::sig::slh_dsa::sha2_128s as $m;
                 $body
             }
-            Algorithm::SlhDsaSha2_128f => {
+            scytale::Algorithm::SlhDsaSha2_128f => {
                 use scytale::sig::slh_dsa::sha2_128f as $m;
                 $body
             }
-            Algorithm::SlhDsaSha2_192s => {
+            scytale::Algorithm::SlhDsaSha2_192s => {
                 use scytale::sig::slh_dsa::sha2_192s as $m;
                 $body
             }
-            Algorithm::SlhDsaSha2_192f => {
+            scytale::Algorithm::SlhDsaSha2_192f => {
                 use scytale::sig::slh_dsa::sha2_192f as $m;
                 $body
             }
-            Algorithm::SlhDsaSha2_256s => {
+            scytale::Algorithm::SlhDsaSha2_256s => {
                 use scytale::sig::slh_dsa::sha2_256s as $m;
                 $body
             }
-            Algorithm::SlhDsaSha2_256f => {
+            scytale::Algorithm::SlhDsaSha2_256f => {
                 use scytale::sig::slh_dsa::sha2_256f as $m;
                 $body
             }
-            Algorithm::SlhDsaShake128s => {
+            scytale::Algorithm::SlhDsaShake128s => {
                 use scytale::sig::slh_dsa::shake_128s as $m;
                 $body
             }
-            Algorithm::SlhDsaShake128f => {
+            scytale::Algorithm::SlhDsaShake128f => {
                 use scytale::sig::slh_dsa::shake_128f as $m;
                 $body
             }
-            Algorithm::SlhDsaShake192s => {
+            scytale::Algorithm::SlhDsaShake192s => {
                 use scytale::sig::slh_dsa::shake_192s as $m;
                 $body
             }
-            Algorithm::SlhDsaShake192f => {
+            scytale::Algorithm::SlhDsaShake192f => {
                 use scytale::sig::slh_dsa::shake_192f as $m;
                 $body
             }
-            Algorithm::SlhDsaShake256s => {
+            scytale::Algorithm::SlhDsaShake256s => {
                 use scytale::sig::slh_dsa::shake_256s as $m;
                 $body
             }
-            Algorithm::SlhDsaShake256f => {
+            scytale::Algorithm::SlhDsaShake256f => {
                 use scytale::sig::slh_dsa::shake_256f as $m;
                 $body
             }
@@ -165,15 +139,15 @@ macro_rules! with_pq_sig {
 macro_rules! with_kem {
     ($alg:expr, $m:ident => $body:expr, _ => $else:expr) => {
         match $alg {
-            Algorithm::MlKem512 => {
+            scytale::Algorithm::MlKem512 => {
                 use scytale::kem::ml_kem::ml_kem_512 as $m;
                 $body
             }
-            Algorithm::MlKem768 => {
+            scytale::Algorithm::MlKem768 => {
                 use scytale::kem::ml_kem::ml_kem_768 as $m;
                 $body
             }
-            Algorithm::MlKem1024 => {
+            scytale::Algorithm::MlKem1024 => {
                 use scytale::kem::ml_kem::ml_kem_1024 as $m;
                 $body
             }
@@ -184,39 +158,145 @@ macro_rules! with_kem {
 
 pub(crate) use {with_kem, with_pq_sig};
 
+/// The post-quantum algorithm a name stands for, `None` for any
+/// other name.
+pub fn pq_by_name(name: &str) -> Option<Algorithm> {
+    Some(match name {
+        "ml-kem-512" => Algorithm::MlKem512,
+        "ml-kem-768" => Algorithm::MlKem768,
+        "ml-kem-1024" => Algorithm::MlKem1024,
+        "ml-dsa-44" => Algorithm::MlDsa44,
+        "ml-dsa-65" => Algorithm::MlDsa65,
+        "ml-dsa-87" => Algorithm::MlDsa87,
+        "slh-dsa-sha2-128s" => Algorithm::SlhDsaSha2_128s,
+        "slh-dsa-sha2-128f" => Algorithm::SlhDsaSha2_128f,
+        "slh-dsa-sha2-192s" => Algorithm::SlhDsaSha2_192s,
+        "slh-dsa-sha2-192f" => Algorithm::SlhDsaSha2_192f,
+        "slh-dsa-sha2-256s" => Algorithm::SlhDsaSha2_256s,
+        "slh-dsa-sha2-256f" => Algorithm::SlhDsaSha2_256f,
+        "slh-dsa-shake-128s" => Algorithm::SlhDsaShake128s,
+        "slh-dsa-shake-128f" => Algorithm::SlhDsaShake128f,
+        "slh-dsa-shake-192s" => Algorithm::SlhDsaShake192s,
+        "slh-dsa-shake-192f" => Algorithm::SlhDsaShake192f,
+        "slh-dsa-shake-256s" => Algorithm::SlhDsaShake256s,
+        "slh-dsa-shake-256f" => Algorithm::SlhDsaShake256f,
+        _ => return None,
+    })
+}
+
+/// What a file is called in a message.
+fn shown(path: Option<&Path>) -> String {
+    path.map_or("standard input".into(), |p| p.display().to_string())
+}
+
 /// A key file and what it holds.
 pub fn read(path: Option<&Path>) -> Result<(Zeroizing<Vec<u8>>, KeyInfo)> {
     let pem = Zeroizing::new(io::read_all(path)?);
     let info = KeyInfo::try_from_pem(&pem).map_err(|e| {
-        let name =
-            path.map_or("standard input".into(), |p| p.display().to_string());
-        usage!("{name}: not a key file: {e}")
+        let why = match e {
+            Error::InvalidEncoding => {
+                if pem.is_empty() {
+                    "it is empty"
+                } else if !pem.starts_with(b"-----BEGIN ") {
+                    "no PEM block (-----BEGIN ...-----) at its start; keys \
+                     are PEM here, and DER is not read"
+                } else {
+                    "not a PRIVATE KEY, PUBLIC KEY, RSA or EC PRIVATE \
+                     KEY block, or malformed inside"
+                }
+            }
+            Error::NotSupported => {
+                "a PEM block for an algorithm this tool does not have"
+            }
+            Error::UnsupportedVersion => {
+                "a PKCS#8 version this tool does \
+                                          not read"
+            }
+            _ => "not readable as a key",
+        };
+        usage!("{}: not a key file: {why}", shown(path))
     })?;
     Ok((pem, info))
 }
 
-/// A private key file, or a usage error.
-pub fn read_private(path: &Path) -> Result<(Zeroizing<Vec<u8>>, Algorithm)> {
+/// The private key in `path`, holding one of `want`, for `scheme`.
+pub fn read_private(
+    path: &Path,
+    want: &[Algorithm],
+    scheme: &str,
+) -> Result<Zeroizing<Vec<u8>>> {
     let (pem, info) = read(Some(path))?;
+    fits(path, info, want, scheme)?;
     if !info.private {
         return Err(usage!(
-            "{}: a public key, not a private one",
-            path.display()
+            "{} holds the public half of a{} {} key; {scheme} needs the \
+             private key here",
+            path.display(),
+            article(info.algorithm),
+            info.algorithm
         ));
     }
-    Ok((pem, info.algorithm))
+    Ok(pem)
 }
 
-/// A public key file, or a usage error.
-pub fn read_public(path: &Path) -> Result<(Zeroizing<Vec<u8>>, Algorithm)> {
+/// The public key in `path`, holding one of `want`, for `scheme`.
+pub fn read_public(
+    path: &Path,
+    want: &[Algorithm],
+    scheme: &str,
+) -> Result<Zeroizing<Vec<u8>>> {
     let (pem, info) = read(Some(path))?;
+    fits(path, info, want, scheme)?;
     if info.private {
         return Err(usage!(
-            "{}: a private key; `scytale key public` makes the public one",
-            path.display()
+            "{} holds a{} {} private key; {scheme} needs the public key \
+             here, and scytale key public makes it",
+            path.display(),
+            article(info.algorithm),
+            info.algorithm
         ));
     }
-    Ok((pem, info.algorithm))
+    Ok(pem)
+}
+
+/// Checks the key is for one of the algorithms `scheme` runs on.
+fn fits(
+    path: &Path,
+    info: KeyInfo,
+    want: &[Algorithm],
+    scheme: &str,
+) -> Result<()> {
+    if want.contains(&info.algorithm) {
+        return Ok(());
+    }
+    let names: Vec<&str> = want.iter().map(|a| a.name()).collect();
+    Err(usage!(
+        "{} holds a{} {} key; {scheme} needs {} key",
+        path.display(),
+        article(info.algorithm),
+        info.algorithm,
+        match names.len() {
+            1 => format!("a{} {}", article(want[0]), names[0]),
+            _ => format!("a {}", names.join(" or ")),
+        }
+    ))
+}
+
+/// "n" before a name that starts with a vowel sound.
+fn article(algorithm: Algorithm) -> &'static str {
+    match algorithm {
+        Algorithm::Ed25519
+        | Algorithm::X25519
+        | Algorithm::Rsa
+        | Algorithm::RsaPss
+        | Algorithm::MlKem512
+        | Algorithm::MlKem768
+        | Algorithm::MlKem1024
+        | Algorithm::MlDsa44
+        | Algorithm::MlDsa65
+        | Algorithm::MlDsa87 => "n",
+        _ => "",
+    }
 }
 
 pub fn run(op: KeyOp) -> Result<()> {
@@ -227,16 +307,21 @@ pub fn run(op: KeyOp) -> Result<()> {
             io::write(&mut *out, &pem, false)
         }
         KeyOp::Public(args) => {
-            let (pem, info) = read(args.input.as_deref())?;
+            let (pem, info) = read(args.file.as_deref())?;
             if !info.private {
-                return Err(usage!("the input is already a public key"));
+                return Err(usage!(
+                    "{} already holds the public half of a{} {} key",
+                    shown(args.file.as_deref()),
+                    article(info.algorithm),
+                    info.algorithm
+                ));
             }
             let public = public(info.algorithm, &pem)?;
             let mut out = io::output(args.out.as_deref(), false)?;
             io::write(&mut *out, &public, false)
         }
         KeyOp::Show(args) => {
-            let (pem, info) = read(args.input.as_deref())?;
+            let (pem, info) = read(args.file.as_deref())?;
             let half = if info.private { "private" } else { "public" };
             let detail = match (info.algorithm, info.private) {
                 (Algorithm::Rsa | Algorithm::RsaPss, true) => {
@@ -267,6 +352,21 @@ fn generate(name: &str) -> Result<Zeroizing<Vec<u8>>> {
             return Ok(pem);
         }};
     }
+    // rsa-N takes any N, so the table is consulted for the rest.
+    if let Some(bits) = name.strip_prefix("rsa-") {
+        let bits: usize = bits.parse().map_err(|_| {
+            usage!("rsa-{bits}: N in rsa-N is a bit count, 1024 to 8192")
+        })?;
+        if !(1024..=8192).contains(&bits) || !bits.is_multiple_of(8) {
+            return Err(usage!(
+                "rsa-{bits}: a modulus is 1024 to 8192 bits, a multiple \
+                 of 8; 3072 is the size to reach for"
+            ));
+        }
+        let key = scytale::sig::rsa::PrivateKey::generate(&mut rng, bits)?;
+        into_pem!(key);
+    }
+    let name = names::KEY.find(name)?.name;
     match name {
         "ed25519" => {
             let key = scytale::sig::ed25519::PrivateKey::generate(&mut rng)?;
@@ -287,47 +387,16 @@ fn generate(name: &str) -> Result<Zeroizing<Vec<u8>>> {
             )?)
         }
         _ => {
-            if let Some(bits) = name.strip_prefix("rsa-") {
-                let bits: usize = bits
-                    .parse()
-                    .map_err(|_| usage!("rsa-N: N must be a bit count"))?;
-                let key =
-                    scytale::sig::rsa::PrivateKey::generate(&mut rng, bits)?;
-                into_pem!(key);
-            }
-            let algorithm = by_name(name)?;
+            let Some(algorithm) = pq_by_name(name) else {
+                return Err(usage!("no key algorithm named \"{name}\""));
+            };
             with_kem!(algorithm, m => {
                 into_pem!(m::PrivateKey::generate(&mut rng)?)
             }, _ => with_pq_sig!(algorithm, m => {
                 into_pem!(m::PrivateKey::generate(&mut rng)?)
-            }, _ => Err(usage!("unknown key algorithm {name}"))))
+            }, _ => Err(usage!("no key algorithm named \"{name}\""))))
         }
     }
-}
-
-/// The post-quantum algorithm a `generate` name stands for.
-fn by_name(name: &str) -> Result<Algorithm> {
-    Ok(match name {
-        "ml-kem-512" => Algorithm::MlKem512,
-        "ml-kem-768" => Algorithm::MlKem768,
-        "ml-kem-1024" => Algorithm::MlKem1024,
-        "ml-dsa-44" => Algorithm::MlDsa44,
-        "ml-dsa-65" => Algorithm::MlDsa65,
-        "ml-dsa-87" => Algorithm::MlDsa87,
-        "slh-dsa-sha2-128s" => Algorithm::SlhDsaSha2_128s,
-        "slh-dsa-sha2-128f" => Algorithm::SlhDsaSha2_128f,
-        "slh-dsa-sha2-192s" => Algorithm::SlhDsaSha2_192s,
-        "slh-dsa-sha2-192f" => Algorithm::SlhDsaSha2_192f,
-        "slh-dsa-sha2-256s" => Algorithm::SlhDsaSha2_256s,
-        "slh-dsa-sha2-256f" => Algorithm::SlhDsaSha2_256f,
-        "slh-dsa-shake-128s" => Algorithm::SlhDsaShake128s,
-        "slh-dsa-shake-128f" => Algorithm::SlhDsaShake128f,
-        "slh-dsa-shake-192s" => Algorithm::SlhDsaShake192s,
-        "slh-dsa-shake-192f" => Algorithm::SlhDsaShake192f,
-        "slh-dsa-shake-256s" => Algorithm::SlhDsaShake256s,
-        "slh-dsa-shake-256f" => Algorithm::SlhDsaShake256f,
-        _ => return Err(usage!("unknown key algorithm {name}")),
-    })
 }
 
 /// The public half of the private key in `pem`, as PEM.
@@ -366,5 +435,26 @@ fn public(algorithm: Algorithm, pem: &[u8]) -> Result<Vec<u8>> {
         }, _ => with_pq_sig!(other, m => {
             into_pem!(m::PrivateKey::try_from_pem(pem)?.public_key())
         }, _ => Err(usage!("{other}: no public half is defined")))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every name in the table generates a key, but for the RSA
+    /// sizes, which are slow and share one path.
+    #[test]
+    fn table_matches_dispatch() {
+        for entry in names::KEY.iter() {
+            if entry.name.starts_with("rsa-") {
+                continue;
+            }
+            let pem = generate(entry.name).unwrap();
+            let info = KeyInfo::try_from_pem(&pem).unwrap();
+            assert!(info.private, "{}", entry.name);
+            let public = public(info.algorithm, &pem).unwrap();
+            assert!(!KeyInfo::try_from_pem(&public).unwrap().private);
+        }
     }
 }

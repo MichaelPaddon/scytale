@@ -8,19 +8,21 @@ cargo install scytale-cli
 ```
 
 installs a binary called `scytale`. It has one subcommand per module
-of the library, takes its keys and other bytes in a form that cannot
-be misread, streams where the algorithm allows it, and does no
-cryptography of its own: every operation is the library's, and the
-tool only carries bytes to it and back.
+of the library, names the algorithm on every call, takes its keys
+and other bytes in a form that cannot be misread, streams where the
+algorithm allows it, and does no cryptography of its own: every
+operation is the library's, and the tool only carries bytes to it
+and back.
 
 ## What it does
 
 | Command | Does | Algorithms |
 | --- | --- | --- |
 | `scytale hash` | a digest of each input, `sha256sum` style | SHA-1, SHA-2, SHA-3, SHAKE, cSHAKE |
-| `scytale mac` | a tag over the input, or a check of one | HMAC, CMAC, KMAC, Poly1305 |
+| `scytale mac tag` / `verify` | a tag over the input, or a check of one | HMAC, CMAC, KMAC, Poly1305 |
 | `scytale aead encrypt` / `decrypt` | authenticated encryption, tag after the ciphertext | AES-GCM, AES-GCM-SIV, AES-CCM, AES-XPN, ChaCha20-Poly1305 |
-| `scytale cipher encrypt` / `decrypt` | the unauthenticated modes | AES-ECB, -CBC, -CTR, -CFB, -OFB, -XTS, -KW, -KWP, ChaCha20, FF1, FF3-1 |
+| `scytale cipher encrypt` / `decrypt` | the unauthenticated modes | AES-ECB, -CBC, -CTR, -CFB, -OFB, -XTS, ChaCha20, FF1, FF3-1 |
+| `scytale cipher wrap` / `unwrap` | key wrapping | AES-KW, AES-KWP |
 | `scytale kdf hkdf` / `pbkdf2` | keys from keying material, or from a password | HKDF, PBKDF2 |
 | `scytale key generate` / `public` / `show` | key files, as PEM | Ed25519, X25519, P-256, P-384, RSA, ML-KEM, ML-DSA, SLH-DSA |
 | `scytale sig sign` / `verify` | signatures | Ed25519, ECDSA, RSA-PSS, RSA PKCS#1 v1.5, ML-DSA, SLH-DSA |
@@ -30,8 +32,11 @@ tool only carries bytes to it and back.
 | `scytale random` | bytes from the system-seeded generator | CTR_DRBG |
 | `scytale list` | every algorithm name, for a script to check | |
 
-`scytale list cipher`, `scytale list aead` and so on print the
-names each command takes; `--help` on any subcommand says what it
+The algorithm is the operation: it is the first word after the verb
+on every call, never an option and never defaulted, so a script says
+what it does. `scytale list cipher`, `scytale list aead` and so on
+print the names each command takes, `scytale list aead --long` what
+each takes with it, and `--help` on any subcommand says what it
 needs.
 
 ## Examples
@@ -40,32 +45,32 @@ Encrypt a file to a key held in a file, with a header authenticated
 alongside it, and decrypt it again:
 
 ```sh
-scytale random 32 --binary -o session.key
+scytale random 32 --raw -o session.key
 scytale random 12 > nonce.hex
 
-scytale aead encrypt -a aes-256-gcm -k file:session.key \
+scytale aead encrypt aes-256-gcm -k file:session.key \
     -n hex:$(cat nonce.hex) --aad str:v1 report.pdf -o report.sealed
-scytale aead decrypt -a aes-256-gcm -k file:session.key \
+scytale aead decrypt aes-256-gcm -k file:session.key \
     -n hex:$(cat nonce.hex) --aad str:v1 report.sealed -o report.pdf
 ```
 
 Sign a release with a post-quantum key and check the signature:
 
 ```sh
-scytale key generate -a ml-dsa-65 -o release.pem
-scytale key public --in release.pem -o release.pub
-scytale sig sign -k release.pem release.tar -o release.sig
-scytale sig verify -p release.pub -s file:release.sig release.tar \
-    && echo verified
+scytale key generate ml-dsa-65 -o release.pem
+scytale key public release.pem -o release.pub
+scytale sig sign ml-dsa-65 -k release.pem release.tar -o release.sig
+scytale sig verify ml-dsa-65 -p release.pub -s file:release.sig \
+    release.tar && echo verified
 ```
 
 Agree a key with a peer and derive session keys from it:
 
 ```sh
-scytale key generate -a x25519 -o me.pem
-scytale key public --in me.pem -o me.pub        # send this
-scytale kex agree -k me.pem -p peer.pub -o shared.bin
-scytale kdf hkdf --ikm file:shared.bin --salt str:session-1 \
+scytale key generate x25519 -o me.pem
+scytale key public me.pem -o me.pub             # send this
+scytale kex agree x25519 -k me.pem -p peer.pub --raw -o shared.bin
+scytale kdf hkdf sha256 --ikm file:shared.bin --salt str:session-1 \
     --info str:encrypt --length 32
 ```
 
@@ -74,15 +79,15 @@ does by default:
 
 ```sh
 openssl enc -aes-128-cbc -K $KEY -iv $IV < plain > cipher
-scytale cipher decrypt -a aes-128-cbc -k hex:$KEY --iv hex:$IV \
-    < cipher
+scytale cipher decrypt aes-128-cbc -k hex:$KEY --iv hex:$IV \
+    --padding pkcs7 < cipher
 ```
 
 Format-preserving encryption of card numbers, one per line, under a
 tweak:
 
 ```sh
-scytale cipher encrypt -a ff1-aes-256 -k file:fpe.key \
+scytale cipher encrypt ff1-aes-256 -k file:fpe.key \
     --tweak str:cards-2026 < numbers.txt
 ```
 
@@ -101,9 +106,9 @@ it, and never bare:
 | `str:TEXT` | the text itself; for additional data, labels, salts and contexts, refused for a key |
 
 The algorithm fixes the length of a key, an IV or a nonce
-(`aes-128-gcm` takes 16 bytes of key, `aes-256-xts` 64), and a value
-of another length is refused with both lengths in the message and
-none of the bytes. Nothing is padded or cut to fit. `hex:` on a
+(`aes-128-gcm` takes 16 bytes of key, `aes-256-xts` 32 in each of
+`--key` and `--tweak-key`), and a value of another length is refused
+with both lengths in the message and none of the bytes. Nothing is padded or cut to fit. `hex:` on a
 command line is visible to every process on the machine through `ps`
 and stays in the shell's history, so a key is better given as
 `file:` or `fd:`; `hex:` is there for the script that already holds
@@ -121,9 +126,10 @@ file a secret is written to with `-o`.
 
 - Input is standard input, or the file named last; output is
   standard output, or `-o FILE`.
-- Digests, tags and random bytes are hex with a newline; ciphertext,
-  signatures and secrets are raw bytes. `--binary` and `--hex` turn
-  either into the other where they apply.
+- Digests, tags, random bytes, shared and derived secrets are hex
+  with a newline; ciphertext, signatures, wrapped keys and PEM are
+  raw bytes. `--hex` and `--raw` turn either into the other on every
+  command that writes bytes.
 - Authenticated encryption appends the 16-byte tag to the
   ciphertext, and `--tag-length` shortens it where the construction
   allows. Decryption reads the whole input and writes nothing until
@@ -131,16 +137,24 @@ file a secret is written to with `-o`.
   empty.
 - The stream modes, and GCM and ChaCha20-Poly1305 encryption, run a
   chunk at a time, so a pipe of any length goes through in fixed
-  memory. The block modes pad with PKCS#7 unless `--padding none`.
+  memory. The block modes take `--padding pkcs7` or `--padding
+  none`, and say so if neither is given.
 - ECDSA signatures are DER, as `openssl dgst` writes them, or
-  `r || s` with `--raw`. Ed25519, ML-DSA and SLH-DSA signatures are
-  the fixed-width bytes their standards define.
+  `r || s` with `--raw-ecdsa`. Ed25519, ML-DSA and SLH-DSA
+  signatures are the fixed-width bytes their standards define.
+- A signature scheme is named in full, `ecdsa-sha256`,
+  `rsa-pss-sha256`, `rsa-pkcs1-sha512`, and the key file must hold a
+  key for it; one that does not is refused with what it holds.
 - Exit status is 0 on success, 1 when a tag, signature or padding
   did not verify, 2 when the request could not be carried out as
   asked -- an unknown name, a value in the wrong form, a key of the
   wrong length -- and 3 for anything else, such as a file that would
-  not open. Errors go to standard error as `scytale: ...`, and never
-  contain key material.
+  not open. Errors go to standard error as `scytale <command> <verb>
+  <algorithm>: what is wrong; what would be right`, name the option
+  concerned and the lengths or names involved, suggest the nearest
+  algorithm name for one that is not known, and never contain key
+  material. A closed standard output ends the run quietly with
+  status 0.
 - There is no configuration file and nothing is read from the
   environment except the variable an `env:` value names. The tool
   needs no privileges.
