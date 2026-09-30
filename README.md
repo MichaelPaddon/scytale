@@ -471,7 +471,7 @@ to the portable code.
 ## Documentation
 
 The API documentation for the main branch is at
-<https://michaelpaddon.github.io/scytale/>. Released versions are on
+<https://6d7770.github.io/scytale/>. Released versions are on
 [docs.rs](https://docs.rs/scytale). Locally, `cargo doc --open`. One
 copy serves every architecture: the implementations that exist only
 on one of them are private, so the documentation does not vary with
