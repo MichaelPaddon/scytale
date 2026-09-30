@@ -6,15 +6,15 @@
 [![MSRV][msrv-badge]][crate]
 [![BSD-2-Clause][license-badge]][license]
 
-[ci-badge]: https://github.com/MichaelPaddon/scytale/actions/workflows/ci.yml/badge.svg?branch=main
-[ci]: https://github.com/MichaelPaddon/scytale/actions/workflows/ci.yml
+[ci-badge]: https://github.com/6d7770/scytale/actions/workflows/ci.yml/badge.svg?branch=main
+[ci]: https://github.com/6d7770/scytale/actions/workflows/ci.yml
 [version-badge]: https://img.shields.io/crates/v/scytale.svg
 [crate]: https://crates.io/crates/scytale
 [docs-badge]: https://docs.rs/scytale/badge.svg
 [docs]: https://docs.rs/scytale
 [msrv-badge]: https://img.shields.io/crates/msrv/scytale.svg
 [license-badge]: https://img.shields.io/crates/l/scytale.svg
-[license]: https://github.com/MichaelPaddon/scytale/blob/main/LICENSE
+[license]: https://github.com/6d7770/scytale/blob/main/LICENSE
 
 Correct, fast, portable cryptography in Rust: ciphers, authenticated
 encryption and the modes over them, hashes, message authentication,
@@ -658,7 +658,7 @@ implementations are measured a few rows at a time on the native CI
 runners, by starting the `Bench` workflow by hand. On a laptop
 running on battery, expect about half of each figure.
 
-[bench]: https://github.com/MichaelPaddon/scytale/blob/main/scytale/benchmarks/i7-1355u.md
+[bench]: https://github.com/6d7770/scytale/blob/main/scytale/benchmarks/i7-1355u.md
 
 ## Testing
 
