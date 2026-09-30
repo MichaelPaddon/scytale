@@ -268,10 +268,14 @@ mod tests {
                 buf[PAD + len..].iter().all(|&b| b == 0xaa),
                 "{len}: wrote past the end"
             );
-            // One byte in 256 matches the padding by chance, so ask
-            // whether any byte moved rather than all of them.
+            // Random bytes can equal the padding: one byte does so
+            // once in 256 draws, which a test must never bet
+            // against. Sixteen bytes all doing so is one draw in
+            // 2^128, the odds of a key collision, and that is what
+            // the assertion rests on; the short lengths above check
+            // the bounds alone.
             assert!(
-                len == 0 || buf[PAD..PAD + len].iter().any(|&b| b != 0xaa),
+                len < 16 || buf[PAD..PAD + len].iter().any(|&b| b != 0xaa),
                 "{len}: wrote nothing"
             );
         }

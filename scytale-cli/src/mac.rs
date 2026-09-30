@@ -205,7 +205,11 @@ mod tests {
                 key,
                 length: None,
                 customization: None,
-                file: Some("/dev/null".into()),
+                // A file that exists wherever the tests run, wasm's
+                // mapped checkout included.
+                file: Some(
+                    concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml").into(),
+                ),
             };
             let tag = tag(&args).unwrap();
             if let Len::Exact(n) = entry.output {
